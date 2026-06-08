@@ -2,17 +2,19 @@
 # (3) Compile the kernel with gcc-15 inside the build container.
 set -euo pipefail
 cd "$(dirname "$0")"
+source ./lib.sh
 
-IMAGE="${IMAGE:-mackernel-build}"
 LINUX_SRC="${LINUX_SRC:-$HOME/linux}"
 ARCH="${ARCH:-arm64}"
+IMG_REF="$(resolve_image)"
+echo "using build image: $IMG_REF"
 
 if [ ! -f "$LINUX_SRC/.config" ]; then
   echo "error: no .config in $LINUX_SRC -- run ./configure-kernel.sh first" >&2
   exit 1
 fi
 
-podman run --rm -v "$LINUX_SRC:/linux" -w /linux -e ARCH="$ARCH" "$IMAGE" \
+podman run --rm -v "$LINUX_SRC:/linux" -w /linux -e ARCH="$ARCH" "$IMG_REF" \
   bash -c 'make ARCH="$ARCH" CC=gcc-15 HOSTCC=gcc-15 -j"$(nproc)" Image'
 
 echo "=== built: ==="

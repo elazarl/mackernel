@@ -5,17 +5,19 @@
 # rootfs + exec userspace.
 set -euo pipefail
 cd "$(dirname "$0")"
+source ./lib.sh
 
-IMAGE="${IMAGE:-mackernel-build}"
 LINUX_SRC="${LINUX_SRC:-$HOME/linux}"
 ARCH="${ARCH:-arm64}"
+IMG_REF="$(resolve_image)"
+echo "using build image: $IMG_REF"
 
 if [ ! -f "$LINUX_SRC/Makefile" ]; then
   echo "error: no kernel tree at LINUX_SRC=$LINUX_SRC" >&2
   exit 1
 fi
 
-podman run --rm -v "$LINUX_SRC:/linux" -w /linux -e ARCH="$ARCH" "$IMAGE" bash -c '
+podman run --rm -v "$LINUX_SRC:/linux" -w /linux -e ARCH="$ARCH" "$IMG_REF" bash -c '
   set -e
   make ARCH="$ARCH" tinyconfig
 
