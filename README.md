@@ -24,6 +24,40 @@ You also need a Linux kernel source tree. By default the scripts use `~/linux`:
 git clone --depth=1 https://github.com/torvalds/linux.git ~/linux
 ```
 
+## Speed: give Podman all your CPUs
+
+Podman on macOS runs Linux inside a VM, and containers see the *VM's* CPU count — not
+the Mac's. `make -j$(nproc)` parallelizes to whatever the VM was given, so an
+under-provisioned machine builds the kernel far slower than it could.
+
+Check the gap:
+
+```bash
+sysctl -n hw.ncpu                                                          # Mac's logical CPUs
+podman machine inspect podman-machine-default --format '{{.Resources.CPUs}}'  # VM's CPUs
+```
+
+If the VM has fewer, raise it (the machine must be **stopped** to change resources):
+
+```bash
+podman machine stop
+podman machine set --cpus "$(sysctl -n hw.ncpu)"   # all cores; optionally --memory 16384
+podman machine start
+```
+
+Verify the container now sees them all:
+
+```bash
+podman run --rm mackernel-build nproc              # should match sysctl -n hw.ncpu
+```
+
+Notes:
+- `--cpus` can't exceed `hw.ncpu`. If the Mac feels sluggish during builds, leave a couple
+  of cores for the host (e.g. `--cpus 12` on a 14-core machine).
+- The setting is persistent across restarts. To bake it in at creation time:
+  `podman machine init --cpus "$(sysctl -n hw.ncpu)" --memory 16384`.
+- QEMU's `-smp` in `run-kernel.sh` is independent (QEMU runs on the host, not in the VM).
+
 ## Usage
 
 ```bash
