@@ -10,6 +10,15 @@ second thanks to HVF hardware acceleration.
 This targets **arm64** (Apple Silicon). The kernel is built *natively* in the container
 (no cross-compiler), and QEMU runs the guest with the `hvf` accelerator at near-native speed.
 
+> **You don't have to build the container image.** A prebuilt, multi-arch (amd64 + arm64)
+> image is published publicly at `ghcr.io/elazarl/mackernel` by CI. The scripts pull it
+> automatically when no local image exists — no `build-container.sh`, no GHCR login needed.
+> A fresh clone goes straight to:
+> ```bash
+> ./configure-kernel.sh && ./run-kernel.sh
+> ```
+> Build the image yourself only if you've changed the `Containerfile`.
+
 ## Prerequisites
 
 ```bash
@@ -108,10 +117,10 @@ a fresh clone needs only:
 
 To bump the version, edit `VERSION` and push — the workflow publishes the new tag.
 
-> **Package visibility:** the GHCR package must be **public** for the no-auth pull above to
-> work. If it's private, either make it public once (repo → Packages → *Package settings* →
-> *Change visibility*) or `podman login ghcr.io` first. Override the source entirely with
-> `REMOTE_IMAGE=ghcr.io/<owner>/<image>:<tag>`.
+> **Package visibility:** the GHCR package is **public**, so the pull above needs no
+> authentication. (If you fork this and your package is private, either make it public —
+> repo → Packages → *Package settings* → *Change visibility* — or `podman login ghcr.io`
+> first.) Override the source entirely with `REMOTE_IMAGE=ghcr.io/<owner>/<image>:<tag>`.
 
 ## Configuration knobs (env vars)
 
