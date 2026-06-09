@@ -88,7 +88,42 @@ isn't there yet, so the day-to-day loop is just:
 ./build-kernel.sh && ./run-kernel.sh
 ```
 
-You'll land in `root@(none):/#` with the cloud image's userspace. Quit QEMU with `Ctrl-a x`.
+By default `run-kernel.sh` boots the cloud image's real init (systemd) so **cloud-init** runs,
+brings up the network, and starts `sshd` — see [Networking](#networking-ssh-in-from-the-mac).
+The QEMU serial stays attached to your terminal (quit with `Ctrl-a x`).
+
+Want the old straight-to-shell behaviour (no networking / cloud-init)? Boot with
+`INIT=/bin/bash ./run-kernel.sh` and you'll land in `root@(none):/#`.
+
+## Networking: SSH in from the Mac
+
+`run-kernel.sh` gives the guest a `virtio-net` NIC on QEMU's **user-mode (slirp)** networking —
+no `sudo`, no host bridge. A host port is forwarded to the guest's SSH, and a cloud-init seed
+DHCPs the NIC and installs your SSH key, so the Mac can connect to the guest:
+
+```bash
+./run-kernel.sh                                   # boots; cloud-init runs (~10–30s the first time)
+# in another terminal, once cloud-init has finished:
+ssh -p 2222 -i id_mackernel mac@127.0.0.1         # password: mackernel
+```
+
+How it fits together:
+
+- **Kernel** (`configure-kernel.sh`): adds `VIRTIO_NET` + the TCP/IP stack, plus the options
+  `tinyconfig` strips that systemd needs (cgroups, the `*fd`/inotify/epoll syscalls, namespaces,
+  tmpfs, …) and `ISO9660`/`JOLIET` so the guest can mount the seed. `VIRTIO_RNG` feeds entropy so
+  sshd host-key generation doesn't stall.
+- **Seed** (`make-seed.sh`): builds `seed.iso`, a cloud-init *NoCloud* disk (ISO9660+Joliet,
+  volume label `CIDATA`) made with macOS's own `hdiutil` — no `genisoimage`/`cloud-localds`
+  needed. It carries `user-data` (login user `mac` + your SSH key + passwordless sudo),
+  `meta-data`, and a v2 `network-config` (DHCP). A passphrase-less keypair (`id_mackernel`) is
+  minted on first run. `run-kernel.sh` builds the seed automatically if it's missing.
+- **QEMU** (`run-kernel.sh`): `-netdev user,hostfwd=tcp::2222-:22` + `-device virtio-net-pci`
+  forwards host `127.0.0.1:2222` → guest `:22`; `-device virtio-rng-pci` supplies entropy.
+
+The guest gets `10.0.2.15` from slirp's built-in DHCP and reaches the Mac at `10.0.2.2`. Because
+slirp is NAT, you reach the guest *through the forwarded port* (`127.0.0.1:2222`), not its
+`10.0.2.x` address. Forward more ports by adding `hostfwd=` clauses to `run-kernel.sh`.
 
 ## What each file does
 
@@ -96,9 +131,10 @@ You'll land in `root@(none):/#` with the cloud image's userspace. Quit QEMU with
 |---|---|
 | `Containerfile` | Latest Ubuntu image with `gcc-15` (default `cc`) + kernel build deps. |
 | `build-container.sh` | Builds the image as `mackernel-build`, verifies `gcc-15` is present. |
-| `configure-kernel.sh` | `make tinyconfig` + the minimal option set needed to boot. |
+| `configure-kernel.sh` | `make tinyconfig` + the minimal option set needed to boot (incl. virtio-net + the bits systemd/cloud-init need). |
 | `build-kernel.sh` | Compiles with `CC=gcc-15 HOSTCC=gcc-15` → `arch/arm64/boot/Image`. |
-| `run-kernel.sh` | Downloads the cloud image if missing, builds if missing, boots with QEMU/HVF. |
+| `make-seed.sh` | Builds a cloud-init NoCloud seed (`seed.iso`) that DHCPs the NIC + installs an SSH key. |
+| `run-kernel.sh` | Downloads the cloud image if missing, builds if missing, boots with QEMU/HVF + networking. |
 
 ## Prebuilt image (GHCR) & versioning
 
@@ -128,9 +164,15 @@ To bump the version, edit `VERSION` and push — the workflow publishes the new 
 |---|---|---|
 | `LINUX_SRC` | `~/linux` | Kernel source tree (mounted into the container). |
 | `ARCH` | `arm64` | Target architecture. |
+| `EXTRA_CONFIG` | _(empty)_ | Extra `scripts/config` args applied last, e.g. `EXTRA_CONFIG="-e NET_9P -e 9P_FS"`. |
 | `IMAGE` | `mackernel-build` | Local Podman image tag. |
 | `REMOTE_IMAGE` | `ghcr.io/elazarl/mackernel:<VERSION>` | Fallback image when no local one exists. |
 | `IMG` / `IMG_URL` | Ubuntu Noble arm64 | Cloud image filename / download URL. |
+| `SSH_PORT` | `2222` | Host port forwarded to the guest's SSH (`ssh -p $SSH_PORT mac@127.0.0.1`). |
+| `INIT` | _(empty)_ | Empty → boot systemd + cloud-init (networking). `/bin/bash` → straight-to-shell, no net. |
+| `SEED` | `seed.iso` | cloud-init NoCloud seed disk (built by `make-seed.sh` if absent). |
+| `SSH_KEY` | `id_mackernel` | Host SSH private key injected into the guest (generated if absent). |
+| `GUEST_USER` / `GUEST_PASS` | `mac` / `mackernel` | Login user + password created by cloud-init. |
 
 ## Notes
 
