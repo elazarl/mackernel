@@ -19,6 +19,10 @@ HOSTNAME_GUEST="${HOSTNAME_GUEST:-mackernel}"
 if [ ! -f "$SSH_KEY" ]; then
   echo "generating SSH keypair $SSH_KEY ..."
   ssh-keygen -t ed25519 -N "" -C "mackernel-host" -f "$SSH_KEY" >/dev/null
+elif [ ! -f "$SSH_KEY.pub" ]; then
+  # Private key exists but its .pub is gone -- re-derive the public key from it.
+  echo "deriving missing public key $SSH_KEY.pub ..."
+  ssh-keygen -y -f "$SSH_KEY" > "$SSH_KEY.pub"
 fi
 PUBKEY="$(cat "$SSH_KEY.pub")"
 

@@ -95,6 +95,45 @@ The QEMU serial stays attached to your terminal (quit with `Ctrl-a x`).
 Want the old straight-to-shell behaviour (no networking / cloud-init)? Boot with
 `INIT=/bin/bash ./run-kernel.sh` and you'll land in `root@(none):/#`.
 
+### Sanitizers & extra Kconfig
+
+`configure-kernel.sh` takes flags to layer debugging options onto the minimal config —
+each one is off by default, and `olddefconfig` resolves whatever they depend on:
+
+```bash
+./configure-kernel.sh --kasan               # Kernel Address Sanitizer (use-after-free / OOB)
+./configure-kernel.sh --all-sanitizers       # KASAN + UBSAN + KFENCE + lockdep + kmemleak
+./configure-kernel.sh --kasan --atalk        # the AppleTalk DDP race reproducer
+./configure-kernel.sh -e NET_9P -e 9P_FS      # arbitrary scripts/config tokens
+```
+
+Flags: `--kasan` / `--kasan-inline`, `--kfence`, `--kcsan`, `--ubsan`, `--kmemleak`,
+`--lockdep`, `--all-sanitizers`, `--atalk`. Anything else (`-e`/`-d`/`-m SYM`,
+`--set-str`/`--set-val K V`, or a raw token) is passed straight to `scripts/config`.
+Heap sanitizers automatically disable `SLUB_TINY`. The `EXTRA_CONFIG` env var still works
+and is applied first, so CLI flags win over it. Run `./configure-kernel.sh --help` for the
+full list.
+
+### Run a C program inside the kernel
+
+`run-in-kernel.py` is the fast path for "does this reproduce in *my* kernel?": it compiles a
+C file **fully statically** in the build container (so it has no libc dependency in the guest),
+boots the kernel, copies the binary in over SSH, runs it, and streams the output back —
+tearing the guest down afterwards (disk writes are discarded via `-snapshot`).
+
+```bash
+./run-in-kernel.py repro.c                      # build, boot, run as the 'mac' user
+./run-in-kernel.py --sudo repro.c               # run as root (raw sockets, AF_APPLETALK, …)
+./run-in-kernel.py repro.c -- --threads 8       # pass args after -- to the guest program
+./run-in-kernel.py -o ./repro repro.c           # also keep the static binary on the host
+```
+
+The program's exit status becomes the script's exit status. It builds the kernel / fetches the
+cloud image / makes the seed automatically if any are missing, picks a free SSH port (so it
+won't clash with a `run-kernel.sh` already on 2222), and writes the guest serial console to
+`run-in-kernel-boot.log` for post-mortem. Same env knobs as the other scripts
+(`LINUX_SRC`, `ARCH`, `IMG`, `SSH_KEY`, `GUEST_USER`, …); see `./run-in-kernel.py --help`.
+
 ## Networking: SSH in from the Mac
 
 `run-kernel.sh` gives the guest a `virtio-net` NIC on QEMU's **user-mode (slirp)** networking —
@@ -135,6 +174,7 @@ slirp is NAT, you reach the guest *through the forwarded port* (`127.0.0.1:2222`
 | `build-kernel.sh` | Compiles with `CC=gcc-15 HOSTCC=gcc-15` → `arch/arm64/boot/Image`. |
 | `make-seed.sh` | Builds a cloud-init NoCloud seed (`seed.iso`) that DHCPs the NIC + installs an SSH key. |
 | `run-kernel.sh` | Downloads the cloud image if missing, builds if missing, boots with QEMU/HVF + networking. |
+| `run-in-kernel.py` | Compiles a C file *statically* in the container, boots the kernel, and runs the binary in the guest over SSH. |
 
 ## Prebuilt image (GHCR) & versioning
 
@@ -164,7 +204,7 @@ To bump the version, edit `VERSION` and push — the workflow publishes the new 
 |---|---|---|
 | `LINUX_SRC` | `~/linux` | Kernel source tree (mounted into the container). |
 | `ARCH` | `arm64` | Target architecture. |
-| `EXTRA_CONFIG` | _(empty)_ | Extra `scripts/config` args applied last, e.g. `EXTRA_CONFIG="-e NET_9P -e 9P_FS"`. |
+| `EXTRA_CONFIG` | _(empty)_ | Extra `scripts/config` args (applied before CLI flags), e.g. `EXTRA_CONFIG="-e NET_9P -e 9P_FS"`. See also `configure-kernel.sh --help`. |
 | `IMAGE` | `mackernel-build` | Local Podman image tag. |
 | `REMOTE_IMAGE` | `ghcr.io/elazarl/mackernel:<VERSION>` | Fallback image when no local one exists. |
 | `IMG` / `IMG_URL` | Ubuntu Noble arm64 | Cloud image filename / download URL. |
