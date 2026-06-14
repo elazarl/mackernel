@@ -35,7 +35,7 @@ from guestlib import die, log, run  # noqa: E402
 g.TAG = "run-kernel"
 HERE = Path(__file__).resolve().parent
 
-META_KEYS = {"url", "commit", "patch"}
+META_KEYS = {"url", "commit", "patch", "arch"}
 ROLES = ("user", "module", "kconf", "init")
 
 
@@ -260,16 +260,38 @@ def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool) -
 # Bundle mode
 # ----------------------------------------------------------------------------
 
-def run_bundle(bundle_path: Path, args) -> int:
+def fetch_bundle(src: str) -> Path:
+    """Resolve a bundle source to a local file. A local path is returned as-is;
+    an http(s) URL is downloaded (lkml/gist page URLs are rewritten to their raw
+    form so we get the bundle text, not HTML)."""
+    if not re.match(r"^https?://", src):
+        p = Path(src)
+        if not p.is_file():
+            die(f"no such bundle file: {src}")
+        return p
+    url = src.rstrip("/")
+    if ("lore.kernel.org" in url or "gist.github.com" in url) and not url.endswith("/raw"):
+        url += "/raw"
+    dest = Path(tempfile.mkdtemp(prefix=".mk-fetch-", dir=HERE)) / "bundle.md"
+    log(f"fetching bundle from {url} ...")
+    if run(["curl", "-LfsS", "-o", str(dest), url]).returncode != 0:
+        die("bundle download failed")
+    return dest
+
+
+def run_bundle(src, args) -> int:
     os.chdir(HERE)
-    if not bundle_path.is_file():
-        die(f"no such bundle file: {bundle_path}")
+    bundle_path = fetch_bundle(str(src))
     b = parse_bundle(bundle_path)
 
     # Bundle builds are in-tree in the (cached) worktree, so a kernel module can
     # build against /linux directly; BUILD_DIR would split that out, so ignore it.
     os.environ.pop("BUILD_DIR", None)
 
+    # Target arch: frontmatter `arch:` wins, else ARCH env, else host arch. Set it
+    # in the environment so the configure/build subprocesses agree.
+    if b.meta.get("arch"):
+        os.environ["ARCH"] = mklib.normalize_arch(b.meta["arch"])
     arch = mklib.target_arch()
     base_src = Path(os.environ.get("LINUX_SRC", os.path.expanduser("~/linux")))
     tree = prepare_kernel_tree(b.meta, base_src)
@@ -393,8 +415,8 @@ def main() -> int:
         description="Boot the mackernel interactively, or build+run a bundle file.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("bundle", nargs="?", type=Path,
-                    help="optional bundle file (SKILL.md-like); omit for interactive boot")
+    ap.add_argument("bundle", nargs="?",
+                    help="optional bundle file or URL (lkml/gist); omit for interactive boot")
     ap.add_argument("--ssh-port", type=int, default=int(os.environ.get("SSH_PORT", "2222")),
                     help="host port forwarded to guest:22 (bundle mode; auto-bumped if busy)")
     ap.add_argument("--boot-timeout", type=int, default=180,

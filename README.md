@@ -196,8 +196,14 @@ Markdown/text file describing the whole thing. `run-kernel.py` builds it, boots,
 in the guest, streams the output, and exits with the guest's status:
 
 ```bash
-./run-kernel.py examples/greeter.md
+./run-kernel.py examples/greeter.md                          # local file
+./run-kernel.py https://lore.kernel.org/all/<msgid>/         # lkml message
+./run-kernel.py https://gist.github.com/<user>/<id>          # gist
 ```
+
+The bundle can be a local file or an **http(s) URL** — lkml (`lore.kernel.org`) and
+`gist.github.com` page URLs are fetched in their raw form automatically, so you can point
+it straight at a reproducer someone posted.
 
 The file has an optional `---`-delimited metadata block (it may appear **anywhere**, so a
 patch-set cover letter works as a source) plus fenced code blocks tagged `role:filename`:
@@ -207,6 +213,7 @@ patch-set cover letter works as a source) plus fenced code blocks tagged `role:f
 url: git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git   # optional remote
 commit: v6.12                                                            # optional treeish
 patch: https://example.com/series.patch                                  # optional patch URL
+arch: x86_64                                                             # optional; else native
 ---
 
 ```user:file.c
