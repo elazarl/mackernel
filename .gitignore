@@ -7,3 +7,7 @@ run-in-kernel-boot.log
 seed.iso
 id_mackernel
 id_mackernel.pub
+# Python bytecode cache
+__pycache__/
+# oh-my-claudecode local state
+.omc/

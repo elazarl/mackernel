@@ -1,25 +1,37 @@
 # mackernel
 
 Build a minimal, bootable Linux kernel inside a Podman container (latest Ubuntu +
-**gcc-15**) and boot it against an Ubuntu cloud image with QEMU — entirely on an
-**Apple Silicon Mac, no sudo required**.
+**gcc-15**) and boot it against an Ubuntu cloud image with QEMU — **no sudo required**,
+on **macOS or Linux**, targeting **arm64 or x86_64**.
 
 The goal is a fast edit-compile-run cycle: boot to a userspace shell in well under a
-second thanks to HVF hardware acceleration.
+second when the guest arch matches the host (hardware acceleration).
 
-This targets **arm64** (Apple Silicon). The kernel is built *natively* in the container
-(no cross-compiler), and QEMU runs the guest with the `hvf` accelerator at near-native speed.
+**Host/target matrix.** The target architecture defaults to the host's; set `ARCH`
+to cross-target. When the target matches the host arch the build is native and QEMU
+uses hardware acceleration (`hvf` on macOS, `kvm` on Linux). When they differ
+(e.g. `ARCH=x86_64` on an Apple Silicon Mac) both the build and the boot run under
+**emulation** — the build uses the matching-arch container (the multi-arch GHCR
+image), and QEMU falls back to TCG. Emulation works but is much slower.
+
+| Host \ Target | arm64 | x86_64 |
+|---|---|---|
+| macOS arm64 | native, hvf | emulated, tcg |
+| Linux arm64 | native, kvm | emulated, tcg |
+| Linux x86_64 | emulated, tcg | native, kvm |
 
 > **You don't have to build the container image.** A prebuilt, multi-arch (amd64 + arm64)
 > image is published publicly at `ghcr.io/elazarl/mackernel` by CI. The scripts pull it
 > automatically when no local image exists — no `build-container.sh`, no GHCR login needed.
 > A fresh clone goes straight to:
 > ```bash
-> ./configure-kernel.sh && ./run-kernel.sh
+> ./configure-kernel.py && ./run-kernel.py
 > ```
 > Build the image yourself only if you've changed the `Containerfile`.
 
 ## Prerequisites
+
+QEMU + Podman, plus Python 3 (for the `*.py` scripts). On **macOS**:
 
 ```bash
 brew install qemu podman
@@ -27,17 +39,30 @@ podman machine init    # if you don't already have a machine
 podman machine start
 ```
 
+On **Linux**, install from your distro and you're done — Podman runs natively, so
+there's no `podman machine` step. You also need a tool to build the cloud-init seed
+ISO (`xorriso` or `genisoimage`):
+
+```bash
+sudo apt install qemu-system podman xorriso        # Debian/Ubuntu
+sudo dnf install qemu-kvm podman xorriso           # Fedora/RHEL
+```
+
+(macOS builds the seed with the bundled `hdiutil`, so no extra package there.)
+
 You also need a Linux kernel source tree. By default the scripts use `~/linux`:
 
 ```bash
 git clone --depth=1 https://github.com/torvalds/linux.git ~/linux
 ```
 
-## Speed: give Podman all your CPUs
+## Speed: give Podman all your CPUs (macOS only)
 
-Podman on macOS runs Linux inside a VM, and containers see the *VM's* CPU count — not
-the Mac's. `make -j$(nproc)` parallelizes to whatever the VM was given, so an
-under-provisioned machine builds the kernel far slower than it could.
+On Linux, Podman runs containers natively and `make -j$(nproc)` already uses every
+core — skip this section. It applies only to **macOS**, where Podman runs Linux
+inside a VM and containers see the *VM's* CPU count — not the Mac's. `make -j$(nproc)`
+parallelizes to whatever the VM was given, so an under-provisioned machine builds the
+kernel far slower than it could.
 
 Check the gap:
 
@@ -65,53 +90,83 @@ Notes:
   of cores for the host (e.g. `--cpus 12` on a 14-core machine).
 - The setting is persistent across restarts. To bake it in at creation time:
   `podman machine init --cpus "$(sysctl -n hw.ncpu)" --memory 16384`.
-- QEMU's `-smp` in `run-kernel.sh` is independent (QEMU runs on the host, not in the VM).
+- QEMU's `-smp` in `run-kernel.py` is independent (QEMU runs on the host, not in the VM).
 
 ## Usage
 
 ```bash
 ./build-container.sh    # 1. build the latest-Ubuntu + gcc-15 build image (optional, see below)
-./configure-kernel.sh   # 2. produce a minimal, bootable .config in ~/linux
-./run-kernel.sh         # 3. download the cloud image if absent, build if needed, boot
+./configure-kernel.py   # 2. produce a minimal, bootable .config in ~/linux
+./run-kernel.py         # 3. download the cloud image if absent, build if needed, boot
 ```
 
-Step 1 is **optional**: if you skip it, `configure-kernel.sh` / `build-kernel.sh` fall back to
+Step 1 is **optional**: if you skip it, `configure-kernel.py` / `build-kernel.py` fall back to
 the prebuilt multi-arch image published to GHCR (`ghcr.io/elazarl/mackernel`), which Podman
 pulls automatically. Run `./build-container.sh` only when you want to build the image locally
 (e.g. you changed the `Containerfile`).
 
-`run-kernel.sh` builds the kernel automatically (via `build-kernel.sh`) if the `Image`
+`run-kernel.py` builds the kernel automatically (via `build-kernel.py`) if the `Image`
 isn't there yet, so the day-to-day loop is just:
 
 ```bash
 # edit ~/linux ...
-./build-kernel.sh && ./run-kernel.sh
+./build-kernel.py && ./run-kernel.py
 ```
 
-By default `run-kernel.sh` boots the cloud image's real init (systemd) so **cloud-init** runs,
+By default `run-kernel.py` boots the cloud image's real init (systemd) so **cloud-init** runs,
 brings up the network, and starts `sshd` — see [Networking](#networking-ssh-in-from-the-mac).
 The QEMU serial stays attached to your terminal (quit with `Ctrl-a x`).
 
 Want the old straight-to-shell behaviour (no networking / cloud-init)? Boot with
-`INIT=/bin/bash ./run-kernel.sh` and you'll land in `root@(none):/#`.
+`INIT=/bin/bash ./run-kernel.py` and you'll land in `root@(none):/#`.
+
+### Targeting a different architecture
+
+All four scripts read `ARCH` (default: the host's arch — `arm64` or `x86_64`). Set it
+to cross-target; the same value flows through configure, build, and boot:
+
+```bash
+ARCH=x86_64 ./configure-kernel.py && ARCH=x86_64 ./run-kernel.py   # x86_64 guest
+```
+
+The kernel config comes from `kconf/base.config` (arch-independent) merged with
+`kconf/$ARCH.config` (the platform drivers — serial console, interrupt controller,
+timer, PCI host bridge). When the target differs from the host arch, the build runs in
+the matching-arch container under emulation and QEMU boots with TCG — correct, but
+slow (minutes rather than seconds).
+
+Set **`BUILD_DIR`** to build out-of-tree (kernel `make O=`): the source tree stays
+clean and each arch can have its own output dir, so one checkout can build both arms
+of the matrix without clobbering. All steps (configure, build, boot) read their
+outputs — `.config`, the kernel image — from there:
+
+```bash
+# one source tree, two arches, no mrproper dance:
+BUILD_DIR=~/mk/arm64   ARCH=arm64   ./configure-kernel.py && BUILD_DIR=~/mk/arm64   ./run-kernel.py
+BUILD_DIR=~/mk/x86_64  ARCH=x86_64  ./configure-kernel.py && BUILD_DIR=~/mk/x86_64  ./run-kernel.py
+```
+
+(On macOS, `BUILD_DIR` must live under `$HOME` so the podman-machine VM can mount it.
+`make O=` needs the *source* tree clean, so use `BUILD_DIR` from the start, or
+`make mrproper` a tree that was previously built in-tree.)
 
 ### Sanitizers & extra Kconfig
 
-`configure-kernel.sh` takes flags to layer debugging options onto the minimal config —
+`configure-kernel.py` takes flags to layer debugging options onto the minimal config —
 each one is off by default, and `olddefconfig` resolves whatever they depend on:
 
 ```bash
-./configure-kernel.sh --kasan               # Kernel Address Sanitizer (use-after-free / OOB)
-./configure-kernel.sh --all-sanitizers       # KASAN + UBSAN + KFENCE + lockdep + kmemleak
-./configure-kernel.sh --kasan --atalk        # the AppleTalk DDP race reproducer
-./configure-kernel.sh -e NET_9P -e 9P_FS      # arbitrary scripts/config tokens
+./configure-kernel.py --kasan               # Kernel Address Sanitizer (use-after-free / OOB)
+./configure-kernel.py --all-sanitizers       # KASAN + UBSAN + KFENCE + lockdep + kmemleak
+./configure-kernel.py --kasan --atalk        # the AppleTalk DDP race reproducer
+./configure-kernel.py -e NET_9P -e 9P_FS      # arbitrary scripts/config tokens
 ```
 
 Flags: `--kasan` / `--kasan-inline`, `--kfence`, `--kcsan`, `--ubsan`, `--kmemleak`,
 `--lockdep`, `--all-sanitizers`, `--atalk`. Anything else (`-e`/`-d`/`-m SYM`,
 `--set-str`/`--set-val K V`, or a raw token) is passed straight to `scripts/config`.
 Heap sanitizers automatically disable `SLUB_TINY`. The `EXTRA_CONFIG` env var still works
-and is applied first, so CLI flags win over it. Run `./configure-kernel.sh --help` for the
+and is applied first, so CLI flags win over it. Run `./configure-kernel.py --help` for the
 full list.
 
 ### Run a C program inside the kernel
@@ -130,39 +185,41 @@ tearing the guest down afterwards (disk writes are discarded via `-snapshot`).
 
 The program's exit status becomes the script's exit status. It builds the kernel / fetches the
 cloud image / makes the seed automatically if any are missing, picks a free SSH port (so it
-won't clash with a `run-kernel.sh` already on 2222), and writes the guest serial console to
+won't clash with a `run-kernel.py` already on 2222), and writes the guest serial console to
 `run-in-kernel-boot.log` for post-mortem. Same env knobs as the other scripts
 (`LINUX_SRC`, `ARCH`, `IMG`, `SSH_KEY`, `GUEST_USER`, …); see `./run-in-kernel.py --help`.
 
 ## Networking: SSH in from the Mac
 
-`run-kernel.sh` gives the guest a `virtio-net` NIC on QEMU's **user-mode (slirp)** networking —
+`run-kernel.py` gives the guest a `virtio-net` NIC on QEMU's **user-mode (slirp)** networking —
 no `sudo`, no host bridge. A host port is forwarded to the guest's SSH, and a cloud-init seed
 DHCPs the NIC and installs your SSH key, so the Mac can connect to the guest:
 
 ```bash
-./run-kernel.sh                                   # boots; cloud-init runs (~10–30s the first time)
+./run-kernel.py                                   # boots; cloud-init runs (~10–30s the first time)
 # in another terminal, once cloud-init has finished:
 ssh -p 2222 -i id_mackernel mac@127.0.0.1         # password: mackernel
 ```
 
 How it fits together:
 
-- **Kernel** (`configure-kernel.sh`): adds `VIRTIO_NET` + the TCP/IP stack, plus the options
-  `tinyconfig` strips that systemd needs (cgroups, the `*fd`/inotify/epoll syscalls, namespaces,
-  tmpfs, …) and `ISO9660`/`JOLIET` so the guest can mount the seed. `VIRTIO_RNG` feeds entropy so
-  sshd host-key generation doesn't stall.
+- **Kernel** (`configure-kernel.py` + `kconf/`): `kconf/base.config` adds `VIRTIO_NET` + the
+  TCP/IP stack, plus the options `tinyconfig` strips that systemd needs (cgroups, the
+  `*fd`/inotify/epoll syscalls, namespaces, tmpfs, …) and `ISO9660`/`JOLIET` so the guest can
+  mount the seed; `VIRTIO_RNG` feeds entropy so sshd host-key generation doesn't stall. The
+  per-arch `kconf/<arch>.config` adds the platform drivers (serial console, interrupt
+  controller, timer, PCI host bridge).
 - **Seed** (`make-seed.sh`): builds `seed.iso`, a cloud-init *NoCloud* disk (ISO9660+Joliet,
-  volume label `CIDATA`) made with macOS's own `hdiutil` — no `genisoimage`/`cloud-localds`
-  needed. It carries `user-data` (login user `mac` + your SSH key + passwordless sudo),
+  volume label `CIDATA`) made with macOS's `hdiutil` or Linux's `xorriso`/`genisoimage`.
+  It carries `user-data` (login user `mac` + your SSH key + passwordless sudo),
   `meta-data`, and a v2 `network-config` (DHCP). A passphrase-less keypair (`id_mackernel`) is
-  minted on first run. `run-kernel.sh` builds the seed automatically if it's missing.
-- **QEMU** (`run-kernel.sh`): `-netdev user,hostfwd=tcp::2222-:22` + `-device virtio-net-pci`
+  minted on first run. `run-kernel.py` builds the seed automatically if it's missing.
+- **QEMU** (`run-kernel.py`): `-netdev user,hostfwd=tcp::2222-:22` + `-device virtio-net-pci`
   forwards host `127.0.0.1:2222` → guest `:22`; `-device virtio-rng-pci` supplies entropy.
 
 The guest gets `10.0.2.15` from slirp's built-in DHCP and reaches the Mac at `10.0.2.2`. Because
 slirp is NAT, you reach the guest *through the forwarded port* (`127.0.0.1:2222`), not its
-`10.0.2.x` address. Forward more ports by adding `hostfwd=` clauses to `run-kernel.sh`.
+`10.0.2.x` address. Forward more ports by adding `hostfwd=` clauses to `run-kernel.py`.
 
 ## What each file does
 
@@ -170,10 +227,12 @@ slirp is NAT, you reach the guest *through the forwarded port* (`127.0.0.1:2222`
 |---|---|
 | `Containerfile` | Latest Ubuntu image with `gcc-15` (default `cc`) + kernel build deps. |
 | `build-container.sh` | Builds the image as `mackernel-build`, verifies `gcc-15` is present. |
-| `configure-kernel.sh` | `make tinyconfig` + the minimal option set needed to boot (incl. virtio-net + the bits systemd/cloud-init need). |
-| `build-kernel.sh` | Compiles with `CC=gcc-15 HOSTCC=gcc-15` → `arch/arm64/boot/Image`. |
+| `mklib.py` | Shared helpers: host/arch detection, per-arch QEMU + image settings, build-image resolution. |
+| `kconf/` | Kconfig fragments: `base.config` (arch-independent) + `arm64.config` / `x86_64.config` (platform drivers). |
+| `configure-kernel.py` | `make tinyconfig` + merge `kconf/` fragments (base + per-arch) into a bootable `.config`. |
+| `build-kernel.py` | Compiles with `CC=gcc-15 HOSTCC=gcc-15` → `arch/<arch>/boot/{Image,bzImage}`. |
 | `make-seed.sh` | Builds a cloud-init NoCloud seed (`seed.iso`) that DHCPs the NIC + installs an SSH key. |
-| `run-kernel.sh` | Downloads the cloud image if missing, builds if missing, boots with QEMU/HVF + networking. |
+| `run-kernel.py` | Downloads the cloud image if missing, builds if missing, boots with QEMU (HVF/KVM/TCG) + networking. |
 | `run-in-kernel.py` | Compiles a C file *statically* in the container, boots the kernel, and runs the binary in the guest over SSH. |
 
 ## Prebuilt image (GHCR) & versioning
@@ -188,7 +247,7 @@ The scripts use this image automatically when no local `mackernel-build` image i
 a fresh clone needs only:
 
 ```bash
-./configure-kernel.sh && ./run-kernel.sh   # pulls ghcr.io/elazarl/mackernel:<VERSION>
+./configure-kernel.py && ./run-kernel.py   # pulls ghcr.io/elazarl/mackernel:<VERSION>
 ```
 
 To bump the version, edit `VERSION` and push — the workflow publishes the new tag.
@@ -203,11 +262,12 @@ To bump the version, edit `VERSION` and push — the workflow publishes the new 
 | Var | Default | Notes |
 |---|---|---|
 | `LINUX_SRC` | `~/linux` | Kernel source tree (mounted into the container). |
-| `ARCH` | `arm64` | Target architecture. |
-| `EXTRA_CONFIG` | _(empty)_ | Extra `scripts/config` args (applied before CLI flags), e.g. `EXTRA_CONFIG="-e NET_9P -e 9P_FS"`. See also `configure-kernel.sh --help`. |
+| `BUILD_DIR` | _(in-tree)_ | Out-of-tree build dir (`make O=`); outputs go here. macOS: keep it under `$HOME`. |
+| `ARCH` | _host arch_ | Target architecture (`arm64` or `x86_64`). Defaults to the host's. |
+| `EXTRA_CONFIG` | _(empty)_ | Extra `scripts/config` args (applied before CLI flags), e.g. `EXTRA_CONFIG="-e NET_9P -e 9P_FS"`. See also `configure-kernel.py --help`. |
 | `IMAGE` | `mackernel-build` | Local Podman image tag. |
 | `REMOTE_IMAGE` | `ghcr.io/elazarl/mackernel:<VERSION>` | Fallback image when no local one exists. |
-| `IMG` / `IMG_URL` | Ubuntu Noble arm64 | Cloud image filename / download URL. |
+| `IMG` / `IMG_URL` | Ubuntu Noble (matches `ARCH`) | Cloud image filename / download URL. |
 | `SSH_PORT` | `2222` | Host port forwarded to the guest's SSH (`ssh -p $SSH_PORT mac@127.0.0.1`). |
 | `INIT` | _(empty)_ | Empty → boot systemd + cloud-init (networking). `/bin/bash` → straight-to-shell, no net. |
 | `SEED` | `seed.iso` | cloud-init NoCloud seed disk (built by `make-seed.sh` if absent). |
@@ -219,9 +279,17 @@ To bump the version, edit `VERSION` and push — the workflow publishes the new 
 - **gcc-15 on latest Ubuntu:** if `gcc-15` isn't in the default repos for the Ubuntu
   release `ubuntu:latest` resolves to, uncomment the `ppa:ubuntu-toolchain-r/test` lines
   near the top of the `Containerfile`. `build-container.sh` fails loudly if `gcc-15` is missing.
-- **Why `PCI_HOST_GENERIC`:** QEMU's arm64 `virt` machine exposes virtio-blk over a generic
-  ECAM PCIe host bridge. `tinyconfig` omits that driver, so without it the PCI bus is never
-  enumerated, the disk never appears, and the kernel panics with "Unable to mount root fs".
-- **arm64 console is `ttyAMA0`** (PL011 UART), not `ttyS0`.
-- `run-kernel.sh` uses `-snapshot`, so writes are discarded on exit and the cloud image stays
+- **Why `PCI_HOST_GENERIC` (arm64):** QEMU's arm64 `virt` machine exposes virtio-blk over a
+  generic ECAM PCIe host bridge. `tinyconfig` omits that driver, so without it the PCI bus is
+  never enumerated, the disk never appears, and the kernel panics with "Unable to mount root
+  fs". It lives in `kconf/arm64.config`; x86_64's q35 uses `PCI_MMCONFIG` (`kconf/x86_64.config`).
+- **Serial console differs by arch:** arm64 is `ttyAMA0` (PL011 UART); x86_64 is `ttyS0`
+  (8250). `run-kernel.py` sets the right `console=` automatically.
+- **Cross-arch builds in one tree:** a kernel source tree holds one host-arch build at a time
+  (its host tools — `mk_elfconfig` etc. — are arch-specific), so an *in-tree* build of a
+  non-host arch in a tree already built for another fails (e.g. `Error 127`). Either set
+  `BUILD_DIR` to a per-arch output dir (recommended — keeps the source clean), point `LINUX_SRC`
+  at a second clean clone, or `make mrproper` in between.
+- **`kconf/x86_64.config` is validated under QEMU TCG emulation,** not on real x86 hardware.
+- `run-kernel.py` uses `-snapshot`, so writes are discarded on exit and the cloud image stays
   pristine and reusable.

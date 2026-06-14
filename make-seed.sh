@@ -4,8 +4,9 @@
 # can SSH straight into the booted kernel.
 #
 # The seed is an ISO9660+Joliet image labelled CIDATA (what cloud-init's NoCloud
-# datasource scans for). We build it with macOS's own `hdiutil` -- no genisoimage /
-# cloud-localds needed. Joliet preserves the lowercase user-data/meta-data names.
+# datasource scans for). On macOS we build it with the bundled `hdiutil`; on Linux
+# with `xorriso` (or `genisoimage`). Joliet preserves the lowercase
+# user-data/meta-data names that NoCloud requires.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -67,8 +68,19 @@ ethernets:
 EOF
 
 rm -f "$SEED"
-# -joliet keeps the lowercase filenames; CIDATA is the volume label NoCloud looks for.
-hdiutil makehybrid -quiet -o "$SEED" -iso -joliet -default-volume-name CIDATA "$work"
+# Build the ISO9660+Joliet image. Joliet keeps the lowercase filenames; CIDATA is
+# the volume label NoCloud scans for. macOS ships hdiutil; Linux uses xorriso or
+# genisoimage (whichever is installed).
+if command -v hdiutil >/dev/null 2>&1; then
+  hdiutil makehybrid -quiet -o "$SEED" -iso -joliet -default-volume-name CIDATA "$work"
+elif command -v xorriso >/dev/null 2>&1; then
+  xorriso -as mkisofs -quiet -o "$SEED" -V CIDATA -J -r "$work"
+elif command -v genisoimage >/dev/null 2>&1; then
+  genisoimage -quiet -o "$SEED" -V CIDATA -J -r "$work"
+else
+  echo "error: need hdiutil (macOS) or xorriso/genisoimage (Linux) to build the seed ISO" >&2
+  exit 1
+fi
 
 echo "=== built cloud-init seed: $SEED ==="
 echo "    user: $GUEST_USER   ssh key: $SSH_KEY   (password: $GUEST_PASS)"

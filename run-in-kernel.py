@@ -7,9 +7,9 @@ mackernel under QEMU/HVF, and run the binary inside the guest over SSH.
     ./run-in-kernel.py -o /tmp/x prog.c                  # keep the static binary
 
 It glues together the existing pieces:
-  * the same Podman build image as build-kernel.sh (gcc-15) -> a *static* ELF,
-  * the kernel Image from build-kernel.sh (built on demand if missing),
-  * the cloud image + cloud-init seed from run-kernel.sh / make-seed.sh,
+  * the same Podman build image as build-kernel.py (gcc-15) -> a *static* ELF,
+  * the kernel Image from build-kernel.py (built on demand if missing),
+  * the cloud image + cloud-init seed from run-kernel.py / make-seed.sh,
   * QEMU user-mode networking with a forwarded SSH port.
 
 Static linking matters: the guest is an Ubuntu cloud image, but a statically
@@ -28,6 +28,9 @@ import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import mklib  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 
 
@@ -45,24 +48,6 @@ def run(cmd, **kw):
     return subprocess.run(cmd, **kw)
 
 
-def resolve_image() -> tuple[str, bool]:
-    """Mirror lib.sh: prefer the local build image, else the GHCR one.
-
-    Returns (image_ref, is_local). For the local image we pass --pull=never so
-    Podman never consults a (possibly broken) registry credential helper.
-    """
-    local = os.environ.get("IMAGE", "mackernel-build")
-    have_local = subprocess.run(
-        ["podman", "image", "exists", local],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    ).returncode == 0
-    if have_local:
-        return local, True
-    version = (HERE / "VERSION").read_text().strip() if (HERE / "VERSION").exists() else "latest"
-    remote = os.environ.get("REMOTE_IMAGE", f"ghcr.io/elazarl/mackernel:{version}")
-    return remote, False
-
-
 def free_port(preferred: int) -> int:
     """Return `preferred` if it is free, otherwise an OS-assigned free port."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -77,14 +62,20 @@ def free_port(preferred: int) -> int:
         return s.getsockname()[1]
 
 
-def compile_static(cfile: Path, image: str, is_local: bool, cflags: list[str]) -> Path:
-    """Statically compile `cfile` inside the build container; return host path."""
+def compile_static(cfile: Path, image: str, is_local: bool, plat_args: list[str],
+                   cflags: list[str]) -> Path:
+    """Statically compile `cfile` inside the build container; return host path.
+
+    Builds for the guest's architecture (plat_args is empty for a native build,
+    or --platform for an emulated foreign arch), so the static binary matches the
+    kernel it will run under.
+    """
     builddir = Path(tempfile.mkdtemp(prefix=".rik-build-", dir=HERE))
     src_name = cfile.name
     shutil.copy(cfile, builddir / src_name)
     out_name = cfile.stem  # binary named after the source
 
-    podman = ["podman", "run", "--rm"]
+    podman = ["podman", "run", "--rm", *plat_args]
     if is_local:
         podman += ["--pull=never"]
     podman += [
@@ -106,8 +97,8 @@ def compile_static(cfile: Path, image: str, is_local: bool, cflags: list[str]) -
 def ensure_prereqs(kimg: Path, img: Path, img_url: str, seed: Path) -> None:
     """Build the kernel / fetch the cloud image / make the seed if missing."""
     if not kimg.exists():
-        log("kernel Image not found, building it (./build-kernel.sh) ...")
-        if run(["./build-kernel.sh"], cwd=HERE).returncode != 0:
+        log("kernel Image not found, building it (./build-kernel.py) ...")
+        if run([sys.executable, "./build-kernel.py"], cwd=HERE).returncode != 0:
             die("kernel build failed")
     if not img.exists():
         log(f"cloud image not found, downloading {img_url} ...")
@@ -175,22 +166,24 @@ def main() -> int:
     if not args.cfile.exists():
         die(f"no such C file: {args.cfile}")
 
-    arch = os.environ.get("ARCH", "arm64")
+    arch = mklib.target_arch()
+    prof = mklib.arch_profile(arch)
+    accel, cpu = mklib.qemu_accel_cpu(arch)
     linux_src = Path(os.environ.get("LINUX_SRC", str(Path.home() / "linux")))
-    kimg = linux_src / "arch" / arch / "boot" / "Image"
-    img = Path(os.environ.get("IMG", "noble-server-cloudimg-arm64.img"))
+    kimg = mklib.kernel_image(linux_src, arch)
+    img = Path(os.environ.get("IMG", prof["cloud_img"]))
     img_url = os.environ.get(
         "IMG_URL", f"https://cloud-images.ubuntu.com/noble/current/{img.name}")
     seed = Path(os.environ.get("SEED", "seed.iso"))
     key = Path(os.environ.get("SSH_KEY", "id_mackernel"))
     user = os.environ.get("GUEST_USER", "mac")
 
-    image, is_local = resolve_image()
-    log(f"using build image: {image}")
+    image, is_local = mklib.resolve_image(arch)
+    log(f"using build image: {image} (target arch: {arch})")
 
     ensure_prereqs(kimg, img, img_url, seed)
 
-    binary = compile_static(args.cfile, image, is_local,
+    binary = compile_static(args.cfile, image, is_local, mklib.platform_args(arch),
                             args.cflags.split() if args.cflags else [])
     builddir = binary.parent
     if args.output:
@@ -203,9 +196,9 @@ def main() -> int:
 
     boot_log = HERE / "run-in-kernel-boot.log"
     qemu = [
-        "qemu-system-aarch64",
-        "-machine", "virt,gic-version=3",
-        "-cpu", "host", "-accel", "hvf",
+        prof["qemu_binary"],
+        "-machine", prof["qemu_machine"],
+        "-cpu", cpu, "-accel", accel,
         "-m", "2048", "-smp", "4",
         "-kernel", str(kimg),
         "-drive", f"file={img},if=virtio,format=qcow2",
@@ -213,7 +206,7 @@ def main() -> int:
         "-netdev", f"user,id=net0,hostfwd=tcp::{port}-:22",
         "-device", "virtio-net-pci,netdev=net0",
         "-device", "virtio-rng-pci",
-        "-append", "console=ttyAMA0 root=/dev/vda1 rw",
+        "-append", f"console={prof['console']} root=/dev/vda1 rw",
         "-snapshot",          # discard guest disk writes on exit
         "-display", "none",
         "-serial", f"file:{boot_log}",
