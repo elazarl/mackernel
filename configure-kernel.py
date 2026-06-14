@@ -48,22 +48,32 @@ Config passthrough (forwarded to scripts/config, repeatable):
   --set-str K V     set CONFIG_K to string V
   --set-val K V     set CONFIG_K to value V
 
+  --fragment FILE   merge an extra Kconfig fragment file (repeatable), after
+                    base + per-arch, before the passthrough tokens above
+
   -h, --help        show this help and exit
 
 Env vars: LINUX_SRC (=$HOME/linux), ARCH (=host arch), EXTRA_CONFIG.
 """
 
 
-def parse_args(argv: list[str]) -> tuple[list[str], bool]:
-    """Return (scripts/config tokens, want_full_slub). Mirrors the old bash
-    arg loop: sanitizer flags expand to tokens, -e/-d/-m and --set-* pass
-    through, -- forwards the rest verbatim, unknown -... tokens forward too."""
+def parse_args(argv: list[str]) -> tuple[list[str], bool, list[str]]:
+    """Return (scripts/config tokens, want_full_slub, fragment files). Mirrors
+    the old bash arg loop: sanitizer flags expand to tokens, -e/-d/-m and --set-*
+    pass through, --fragment FILE collects an extra Kconfig fragment, -- forwards
+    the rest verbatim, unknown -... tokens forward too."""
     cfg: list[str] = []
+    fragments: list[str] = []
     want_full_slub = False
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a == "--kasan":
+        if a == "--fragment":
+            if i + 1 >= len(argv):
+                sys.exit("--fragment needs a file path")
+            fragments.append(argv[i + 1])
+            i += 1
+        elif a == "--kasan":
             cfg += ["-e", "KASAN", "-e", "KASAN_OUTLINE", "-e", "KASAN_VMALLOC"]
             want_full_slub = True
         elif a == "--kasan-inline":
@@ -109,7 +119,7 @@ def parse_args(argv: list[str]) -> tuple[list[str], bool]:
             # unknown -... token or positional: forward verbatim to scripts/config
             cfg.append(a)
         i += 1
-    return cfg, want_full_slub
+    return cfg, want_full_slub, fragments
 
 
 # In-container script: tinyconfig -> merge kconf fragments -> EXTRA_CONFIG ->
@@ -119,7 +129,7 @@ CONTAINER_SCRIPT = r'''
 set -e
 if [ -n "$MK_O" ]; then OPT="O=$MK_O"; CFG="$MK_O/.config"; else OPT=""; CFG=".config"; fi
 make ARCH="$ARCH" $OPT tinyconfig
-scripts/kconfig/merge_config.sh -m -O "$(dirname "$CFG")" "$CFG" /kconf/base.config "/kconf/${MK_ARCH}.config"
+scripts/kconfig/merge_config.sh -m -O "$(dirname "$CFG")" "$CFG" /kconf/base.config "/kconf/${MK_ARCH}.config" $MK_FRAGMENTS
 if [ -n "${EXTRA_CONFIG// /}" ]; then
   echo "applying EXTRA_CONFIG: $EXTRA_CONFIG"
   ./scripts/config --file "$CFG" $EXTRA_CONFIG
@@ -131,7 +141,7 @@ make ARCH="$ARCH" $OPT olddefconfig
 def main() -> int:
     os.chdir(HERE)
 
-    cfg, want_full_slub = parse_args(sys.argv[1:])
+    cfg, want_full_slub, fragments = parse_args(sys.argv[1:])
     if want_full_slub:
         # Heap sanitizers need the full SLUB allocator, not tinyconfig's SLUB_TINY.
         cfg += ["-d", "SLUB_TINY"]
@@ -156,6 +166,20 @@ def main() -> int:
     # Optional out-of-tree build dir, mounted at /out and used as `make O=`.
     out_mount, mk_o = mklib.build_dir_mount()
 
+    # Extra Kconfig fragments (--fragment): mount each read-only and merge after
+    # base + arch (so they win over the defaults), before EXTRA_CONFIG.
+    frag_mounts: list[str] = []
+    frag_paths: list[str] = []
+    for i, f in enumerate(fragments):
+        fp = Path(f).resolve()
+        if not fp.is_file():
+            print(f"error: fragment not found: {f}", file=sys.stderr)
+            return 1
+        cpath = f"/frags/frag{i}.config"
+        frag_mounts += ["-v", f"{fp}:{cpath}:ro"]
+        frag_paths.append(cpath)
+        print(f"extra fragment: {f}", flush=True)
+
     # For a local image, --pull=never keeps podman from consulting a (possibly
     # broken) registry credential helper to re-resolve the --platform manifest.
     pull = ["--pull=never"] if is_local else []
@@ -165,10 +189,12 @@ def main() -> int:
             "-v", f"{linux_src}:/linux",
             "-v", f"{HERE / 'kconf'}:/kconf:ro",
             *out_mount,
+            *frag_mounts,
             "-w", "/linux",
             "-e", f"ARCH={prof['kernel_arch']}",
             "-e", f"MK_ARCH={arch}",
             "-e", f"MK_O={mk_o}",
+            "-e", f"MK_FRAGMENTS={' '.join(frag_paths)}",
             "-e", f"EXTRA_CONFIG={extra_config}",
             image,
             "bash", "-c", CONTAINER_SCRIPT,

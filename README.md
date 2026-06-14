@@ -189,6 +189,61 @@ won't clash with a `run-kernel.py` already on 2222), and writes the guest serial
 `run-in-kernel-boot.log` for post-mortem. Same env knobs as the other scripts
 (`LINUX_SRC`, `ARCH`, `IMG`, `SSH_KEY`, `GUEST_USER`, …); see `./run-in-kernel.py --help`.
 
+### Run a bundle file (kernel + userspace + module + script)
+
+For a richer, *shareable* repro, give `run-kernel.py` a **bundle** file — a single
+Markdown/text file describing the whole thing. `run-kernel.py` builds it, boots, runs it
+in the guest, streams the output, and exits with the guest's status:
+
+```bash
+./run-kernel.py examples/greeter.md
+```
+
+The file has an optional `---`-delimited metadata block (it may appear **anywhere**, so a
+patch-set cover letter works as a source) plus fenced code blocks tagged `role:filename`:
+
+````markdown
+---
+url: git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git   # optional remote
+commit: v6.12                                                            # optional treeish
+patch: https://example.com/series.patch                                  # optional patch URL
+---
+
+```user:file.c
+#include "file.h"
+int main(void) { return R; }     // compiled statically; one binary
+```
+```user:file.h
+#define R 1
+```
+```module:greeter.c
+... module_init(...) ...          // built as a loadable .ko, sudo-insmod'd
+```
+```kconf:extra.config
+CONFIG_PRINTK_CALLER=y            // merged into the kernel config
+```
+```init:init.sh
+#!/bin/bash
+./file                            // start script; runs in the guest
+```
+````
+
+Roles and defaults:
+- **`user:`** — C sources + headers, compiled together into one static binary. A single `.c`
+  is named after its stem (so `file.c` → `./file`); multiple `.c` are named after the bundle.
+- **`module:`** — each `.c` is built as its own loadable `.ko` and `sudo insmod`'d in order
+  (the kernel is built with `CONFIG_MODULES`).
+- **`kconf:`** — Kconfig fragment lines merged on top of `kconf/base.config` + the per-arch
+  fragment; a bundle with `kconf:` blocks reconfigures + rebuilds.
+- **`init:`** — the start script. If present it runs (cwd = the guest staging dir); otherwise
+  the user binary runs; a module-only bundle dumps `dmesg` so `module_init` output shows.
+
+**Kernel source:** with no metadata the bundle builds `LINUX_SRC` (`~/linux`). With `url`,
+that remote is added to the tree and fetched; `commit` is checked out into a **cached git
+worktree** (`~/linux-wt/<commit>`, reused across runs) and `patch` is applied there — so a
+bundle is self-contained about which kernel it targets without disturbing your main tree.
+Serial console goes to `run-kernel-boot.log`.
+
 ## Networking: SSH in from the Mac
 
 `run-kernel.py` gives the guest a `virtio-net` NIC on QEMU's **user-mode (slirp)** networking —
@@ -228,12 +283,14 @@ slirp is NAT, you reach the guest *through the forwarded port* (`127.0.0.1:2222`
 | `Containerfile` | Latest Ubuntu image with `gcc-15` (default `cc`) + kernel build deps. |
 | `build-container.sh` | Builds the image as `mackernel-build`, verifies `gcc-15` is present. |
 | `mklib.py` | Shared helpers: host/arch detection, per-arch QEMU + image settings, build-image resolution. |
+| `guestlib.py` | Shared guest engine: boot QEMU, wait for SSH, scp/run in the guest, static compile, teardown. |
 | `kconf/` | Kconfig fragments: `base.config` (arch-independent) + `arm64.config` / `x86_64.config` (platform drivers). |
-| `configure-kernel.py` | `make tinyconfig` + merge `kconf/` fragments (base + per-arch) into a bootable `.config`. |
+| `configure-kernel.py` | `make tinyconfig` + merge `kconf/` fragments (base + per-arch + `--fragment`) into a bootable `.config`. |
 | `build-kernel.py` | Compiles with `CC=gcc-15 HOSTCC=gcc-15` → `arch/<arch>/boot/{Image,bzImage}`. |
 | `make-seed.sh` | Builds a cloud-init NoCloud seed (`seed.iso`) that DHCPs the NIC + installs an SSH key. |
-| `run-kernel.py` | Downloads the cloud image if missing, builds if missing, boots with QEMU (HVF/KVM/TCG) + networking. |
+| `run-kernel.py` | Boots with QEMU (HVF/KVM/TCG) interactively, **or** builds + runs a bundle file (see above). |
 | `run-in-kernel.py` | Compiles a C file *statically* in the container, boots the kernel, and runs the binary in the guest over SSH. |
+| `examples/greeter.md` | Example bundle: userspace binary + kernel module + start script. |
 
 ## Prebuilt image (GHCR) & versioning
 
