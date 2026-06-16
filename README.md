@@ -360,4 +360,5 @@ To bump the version, edit `VERSION` and push — the workflow publishes the new 
 - **Hardening:** build/compile containers run least-privilege (no network, caps dropped,
   read-only rootfs), and the QEMU run is locked down too (`-nodefaults`, no monitor, guest
   egress blocked via slirp `restrict=on` — override `GUEST_NET=open`, seccomp `-sandbox` on
-  Linux). See [`docs/qemu-hardening.md`](docs/qemu-hardening.md).
+  Linux). Opt into an outer process sandbox with `MK_SANDBOX=auto` (bwrap/systemd-run on
+  Linux, Seatbelt on macOS). See [`docs/qemu-hardening.md`](docs/qemu-hardening.md).

@@ -17,6 +17,7 @@ import os
 import platform
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -273,3 +274,107 @@ def qemu_accel_cpu(arch: str) -> tuple[str, str]:
         accel = "hvf" if host_os() == "mac" else "kvm"
         return accel, "host"
     return "tcg", "max"
+
+
+# --- optional outer sandbox around the qemu process -------------------------
+# In-process hardening (qemu_hardening_args) shrinks the emulated surface; this
+# wraps the qemu *process* on the host so a compromised emulator can't roam the
+# host filesystem. Off by default; opt in with MK_SANDBOX.
+
+def sandbox_mode() -> str:
+    """Normalized MK_SANDBOX: 'off' (default), or one of bwrap / systemd /
+    bwrap+systemd (Linux) / seatbelt (macOS). 'auto' picks the host default."""
+    m = (os.environ.get("MK_SANDBOX") or "off").strip().lower()
+    if m == "auto":
+        return "seatbelt" if host_os() == "mac" else "bwrap+systemd"
+    return m
+
+
+def sandbox_prefix(arch: str, *, run_dir, files, interactive: bool = False) -> list[str]:
+    """Command prefix that confines the qemu process, prepended to the qemu argv.
+    Empty when MK_SANDBOX is off. `run_dir` is bind-mounted read-write (serial log
+    + -snapshot scratch); `files` (kernel image / cloud image / seed) read-only.
+    Raises SystemExit if a requested tool is unavailable (never silently unsandboxed)."""
+    mode = sandbox_mode()
+    if mode == "off":
+        return []
+    parts = mode.split("+")
+    known = {"bwrap", "systemd", "seatbelt"}
+    unknown = [p for p in parts if p not in known]
+    if unknown:
+        raise SystemExit(f"MK_SANDBOX: unknown sandbox '{'+'.join(unknown)}' "
+                         f"(use off/auto/bwrap/systemd/bwrap+systemd/seatbelt)")
+
+    run_dir = Path(run_dir).resolve()
+    prefix: list[str] = []
+    # systemd-run (cgroup resource caps) wraps everything else.
+    if "systemd" in parts:
+        _require("systemd-run", "linux")
+        prefix += ["systemd-run", "--user", "--scope", "-q",
+                   "-p", "MemoryMax=3G", "-p", "CPUQuota=400%", "-p", "TasksMax=512", "--"]
+    if "bwrap" in parts:
+        _require("bwrap", "linux")
+        prefix += _bwrap_args(run_dir, files, interactive)
+    if "seatbelt" in parts:
+        _require("sandbox-exec", "mac")
+        prefix += _seatbelt_args(run_dir, files)
+    return prefix
+
+
+def _require(tool: str, need_os: str) -> None:
+    if host_os() != need_os:
+        raise SystemExit(f"MK_SANDBOX: '{tool}' sandbox is {need_os}-only "
+                         f"(host is {host_os()}); use MK_SANDBOX=off or auto")
+    if not shutil.which(tool):
+        raise SystemExit(f"MK_SANDBOX: '{tool}' not found on PATH -- install it or use MK_SANDBOX=off")
+
+
+def _bwrap_args(run_dir: Path, files, interactive: bool) -> list[str]:
+    """bubblewrap: read-only system dirs, writable run_dir + tmpfs /tmp, host net
+    kept (slirp hostfwd binds a host loopback port, so we must NOT --unshare-net),
+    /dev/kvm passed through when present. New PID namespace; new session only when
+    headless (it detaches the controlling tty the interactive console needs)."""
+    # /tmp and /var/tmp are writable tmpfs: qemu's -snapshot overlay temp lands in
+    # one of them (RHEL qemu-kvm uses /var/tmp), so both must exist and be writable.
+    args = ["bwrap", "--die-with-parent", "--unshare-pid",
+            "--proc", "/proc", "--dev", "/dev",
+            "--tmpfs", "/tmp", "--tmpfs", "/var/tmp"]
+    for p in ("/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64", "/opt"):
+        if os.path.exists(p):
+            args += ["--ro-bind", p, p]
+    if os.path.exists("/dev/kvm"):
+        args += ["--dev-bind", "/dev/kvm", "/dev/kvm"]
+    args += ["--bind", str(run_dir), str(run_dir)]
+    bound = {run_dir}
+    for f in files:
+        d = Path(f).resolve().parent
+        if d in bound or run_dir in d.parents or not d.is_dir():
+            continue
+        bound.add(d)
+        args += ["--ro-bind", str(d), str(d)]
+    if not interactive:
+        args += ["--new-session"]
+    return args
+
+
+def _seatbelt_args(run_dir: Path, files) -> list[str]:
+    """macOS Seatbelt: a robust denylist (allow-default, then deny the dangerous
+    vectors). A tight deny-default allow-list is impractical here -- on modern
+    macOS the dyld shared cache lives under version-specific Cryptexes paths, so
+    deny-default SIGABRTs every process. Instead we let qemu run normally but deny
+    writes anywhere under $HOME (carving out the run dir + $TMPDIR) and deny reads
+    of credential dirs, so a compromised qemu can't tamper/persist across $HOME or
+    exfiltrate ~/.ssh. Inherited by the exec'd qemu. Best-effort (deprecated CLI).
+    `files` is accepted for symmetry with the Linux path; default-allow covers it."""
+    home = os.path.expanduser("~")
+    tmp = os.environ.get("TMPDIR", "/tmp")
+    profile = f'''(version 1)
+(allow default)
+(deny file-write* (subpath "{home}"))
+(allow file-write* (subpath "{run_dir}") (subpath "{tmp}"))
+(deny file-read* (subpath "{home}/.ssh") (subpath "{home}/.aws") (subpath "{home}/.gnupg"))
+'''
+    f = tempfile.NamedTemporaryFile("w", suffix=".sb", prefix="mk-seatbelt-", delete=False)
+    f.write(profile)
+    f.close()
+    return ["sandbox-exec", "-f", f.name]

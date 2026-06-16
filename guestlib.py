@@ -130,8 +130,12 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
         "-serial", f"file:{serial_log}",
         "-monitor", "none",
     ]
+    # Optional outer sandbox confining the qemu process (MK_SANDBOX); empty by default.
+    prefix = mklib.sandbox_prefix(arch, run_dir=HERE, files=[kimg, img, seed])
+    if prefix:
+        log(f"sandbox: {os.environ.get('MK_SANDBOX')} ({prefix[0]})")
     log(f"booting kernel ({arch}, accel={accel}; serial -> {serial_log.name}) ...")
-    return subprocess.Popen(qemu, preexec_fn=_no_core_dumps)
+    return subprocess.Popen(prefix + qemu, preexec_fn=_no_core_dumps)
 
 
 def _no_core_dumps() -> None:

@@ -79,27 +79,28 @@ def boot_interactive() -> int:
     # interactive console is wired explicitly with -serial mon:stdio (also gives the
     # Ctrl-a escape) instead of -nographic.
     qbin = mklib.qemu_binary(arch)
-    os.execvp(
+    qemu = [
         qbin,
-        [
-            qbin,
-            *mklib.qemu_hardening_args(),
-            "-display", "none",
-            "-serial", "mon:stdio",
-            "-machine", prof["qemu_machine"],
-            "-cpu", cpu, "-accel", accel,
-            "-m", "2048", "-smp", "4",
-            "-kernel", str(kimg),
-            "-drive", f"file={img},if=virtio,format=qcow2",
-            "-drive", f"file={seed},if=virtio,format=raw,readonly=on",
-            "-netdev", f"user,id=net0,hostfwd=tcp::{ssh_port}-:22{restrict}",
-            "-device", "virtio-net-pci,netdev=net0",
-            "-object", "rng-builtin,id=rng0",
-            "-device", "virtio-rng-pci,rng=rng0",
-            "-append", append,
-            "-snapshot",
-        ],
-    )
+        *mklib.qemu_hardening_args(),
+        "-display", "none",
+        "-serial", "mon:stdio",
+        "-machine", prof["qemu_machine"],
+        "-cpu", cpu, "-accel", accel,
+        "-m", "2048", "-smp", "4",
+        "-kernel", str(kimg),
+        "-drive", f"file={img},if=virtio,format=qcow2",
+        "-drive", f"file={seed},if=virtio,format=raw,readonly=on",
+        "-netdev", f"user,id=net0,hostfwd=tcp::{ssh_port}-:22{restrict}",
+        "-device", "virtio-net-pci,netdev=net0",
+        "-object", "rng-builtin,id=rng0",
+        "-device", "virtio-rng-pci,rng=rng0",
+        "-append", append,
+        "-snapshot",
+    ]
+    # Optional outer sandbox (MK_SANDBOX); interactive=True keeps the controlling tty.
+    cmd = mklib.sandbox_prefix(arch, run_dir=HERE, files=[kimg, img, seed],
+                               interactive=True) + qemu
+    os.execvp(cmd[0], cmd)
 
 
 # ----------------------------------------------------------------------------
