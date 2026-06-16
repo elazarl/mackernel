@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -34,6 +35,17 @@ from guestlib import die, log, run  # noqa: E402
 
 g.TAG = "run-kernel"
 HERE = Path(__file__).resolve().parent
+
+# Machine-readable progress for the service layer: when --progress is set, each
+# phase transition prints one `MKPROGRESS {json}` line to stdout (harmless extra
+# output for CLI users; the service greps for the sentinel).
+_PROGRESS = False
+PROGRESS_SENTINEL = "MKPROGRESS"
+
+
+def progress(phase: str, **extra) -> None:
+    if _PROGRESS:
+        print(f"{PROGRESS_SENTINEL} {json.dumps({'phase': phase, **extra})}", flush=True)
 
 META_KEYS = {"url", "commit", "patch", "arch"}
 ROLES = ("user", "module", "kconf", "init")
@@ -204,7 +216,14 @@ def prepare_kernel_tree(meta: dict, linux_src: Path) -> Path:
         die(f"commit '{treeish}' not found after fetch (must be reachable from a ref)")
     short = sha.stdout.strip()[:12]
 
-    wt = Path(f"{linux_src}-wt") / short
+    # Worktree cache root: MK_WT_ROOT isolates concurrent jobs (the service gives
+    # each job its own root so same-commit builds don't collide); default sits
+    # next to the source tree.
+    wt_root = Path(os.environ.get("MK_WT_ROOT") or f"{linux_src}-wt")
+    wt = wt_root / short
+    # Drop registrations whose dirs were deleted out from under git (e.g. a job's
+    # work dir was cleaned), so `worktree add` to that path doesn't fail.
+    run(["git", "-C", str(linux_src), "worktree", "prune"])
     if not (wt / ".git").exists():
         wt.parent.mkdir(parents=True, exist_ok=True)
         log(f"creating worktree {wt} @ {short}")
@@ -294,6 +313,12 @@ def fetch_bundle(src: str) -> Path:
 
 def run_bundle(src, args) -> int:
     os.chdir(HERE)
+    # Optional per-job log dir: configure+build -> compile.log, serial -> dmesg.log,
+    # guest output -> exec.log. Without it, behaviour is unchanged (inherits stdio).
+    log_dir = Path(args.log_dir).resolve() if args.log_dir else None
+    if log_dir:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    progress("fetch")
     bundle_path = fetch_bundle(str(src))
     b = parse_bundle(bundle_path)
 
@@ -320,19 +345,27 @@ def run_bundle(src, args) -> int:
         fp = scratch / f"frag{idx}-{name}"
         fp.write_text(content)
         fragments.append(fp)
+    # configure + build output -> compile.log (append) when a log dir is set.
+    clog = open(log_dir / "compile.log", "w") if log_dir else None
+    cap = {"stdout": clog, "stderr": subprocess.STDOUT} if clog else {}
     need_config = bool(fragments) or not mklib.config_path(tree).is_file()
     if need_config:
         frag_args = []
         for fp in fragments:
             frag_args += ["--fragment", str(fp)]
         log("configuring kernel ...")
+        progress("configure")
         if run([sys.executable, str(HERE / "configure-kernel.py"), *frag_args],
-               cwd=HERE, env=env).returncode != 0:
+               cwd=HERE, env=env, **cap).returncode != 0:
             die("kernel configure failed")
     if bool(fragments) or not mklib.kernel_image(tree, arch).is_file():
         log("building kernel ...")
-        if run([sys.executable, str(HERE / "build-kernel.py")], cwd=HERE, env=env).returncode != 0:
+        progress("build")
+        if run([sys.executable, str(HERE / "build-kernel.py")], cwd=HERE, env=env,
+               **cap).returncode != 0:
             die("kernel build failed")
+    if clog:
+        clog.close()
 
     image, is_local = mklib.resolve_image(arch)
 
@@ -375,7 +408,8 @@ def run_bundle(src, args) -> int:
     port = g.free_port(args.ssh_port)
     if port != args.ssh_port:
         log(f"port {args.ssh_port} busy, using {port} instead")
-    boot_log = HERE / "run-kernel-boot.log"
+    boot_log = (log_dir / "dmesg.log") if log_dir else (HERE / "run-kernel-boot.log")
+    progress("boot")
     proc = g.boot_qemu(arch, tree, img, seed, port, boot_log)
     rc = 1
     gdir = "/tmp/mkbundle"
@@ -396,6 +430,8 @@ def run_bundle(src, args) -> int:
         if execs:
             g.ssh_run(port, key, user, "chmod +x " + " ".join(f"{gdir}/{e}" for e in execs))
 
+        if kos:
+            progress("insmod")
         for ko in kos:
             log(f"insmod {ko.name} ...")
             if g.ssh_run(port, key, user, f"sudo insmod {gdir}/{ko.name}") != 0:
@@ -410,10 +446,17 @@ def run_bundle(src, args) -> int:
             cmd = "sudo dmesg | tail -n 40"
         else:
             die("bundle has nothing to run (no user binary, init script, or module)")
-        print("\033[1;32m---------------- guest output ----------------\033[0m", flush=True)
-        rc = g.ssh_run(port, key, user, cmd)
-        print("\033[1;32m----------------------------------------------\033[0m", flush=True)
+        progress("run")
+        # Guest output -> exec.log when a log dir is set, else streamed to stdout.
+        if log_dir:
+            with open(log_dir / "exec.log", "w") as elog:
+                rc = g.ssh_run(port, key, user, cmd, stdout=elog, stderr=subprocess.STDOUT)
+        else:
+            print("\033[1;32m---------------- guest output ----------------\033[0m", flush=True)
+            rc = g.ssh_run(port, key, user, cmd)
+            print("\033[1;32m----------------------------------------------\033[0m", flush=True)
         log(f"guest command exited with status {rc}")
+        progress("done", exit=rc)
     finally:
         if args.keep_running:
             log(f"--keep-running: QEMU still up. SSH: ssh -p {port} -i {key} {user}@127.0.0.1")
@@ -436,7 +479,14 @@ def main() -> int:
                     help="seconds to wait for guest SSH in bundle mode (default 180)")
     ap.add_argument("--keep-running", action="store_true",
                     help="leave QEMU running after the bundle finishes")
+    ap.add_argument("--log-dir",
+                    help="write compile.log / dmesg.log / exec.log into this dir (service mode)")
+    ap.add_argument("--progress", action="store_true",
+                    help="emit 'MKPROGRESS {json}' phase lines on stdout (service mode)")
     args = ap.parse_args()
+
+    global _PROGRESS
+    _PROGRESS = args.progress
 
     if args.bundle is None:
         return boot_interactive()

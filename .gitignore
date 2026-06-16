@@ -16,3 +16,9 @@ id_mackernel.pub
 __pycache__/
 # oh-my-claudecode local state
 .omc/
+# rust server build + runtime
+server/target/
+server/work/
+# react ui build + deps
+server/ui/node_modules/
+server/ui/dist/
