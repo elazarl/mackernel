@@ -167,10 +167,12 @@ def compile_c(srcs, out_name: str, image: str, is_local: bool,
         shutil.rmtree(builddir, ignore_errors=True)
         die("no .c files to compile")
 
+    mklib.ensure_pulled(image, is_local, plat_args)
     podman = ["podman", "run", "--rm", *plat_args]
     if is_local:
         podman += ["--pull=never"]
     podman += [
+        *mklib.hardening_args(),
         "-v", f"{builddir}:/build", "-w", "/build", image,
         "gcc-15", "-static", "-O2", "-pthread", *cflags,
         "-o", out_name, *cfiles,

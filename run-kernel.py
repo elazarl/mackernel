@@ -234,6 +234,7 @@ def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool) -
 
     prof = mklib.arch_profile(arch)
     pull = ["--pull=never"] if is_local else []
+    mklib.ensure_pulled(image, is_local, mklib.platform_args(arch))
     ka = prof["kernel_arch"]
     # `make Image` doesn't emit Module.symvers (the exported-symbol table external
     # modules link against), so build the in-tree `modules` target first to
@@ -241,6 +242,7 @@ def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool) -
     # build the out-of-tree module.
     cmd = [
         "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
+        *mklib.hardening_args(),
         "-v", f"{tree}:/linux", "-v", f"{moddir}:/mod", "-w", "/mod", image,
         "bash", "-c",
         f'set -e; make -C /linux ARCH={ka} CC=gcc-15 modules; '

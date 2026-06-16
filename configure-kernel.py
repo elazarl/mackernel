@@ -183,9 +183,12 @@ def main() -> int:
     # For a local image, --pull=never keeps podman from consulting a (possibly
     # broken) registry credential helper to re-resolve the --platform manifest.
     pull = ["--pull=never"] if is_local else []
+    # Pre-pull remote images so the hardened (network-less) run finds them locally.
+    mklib.ensure_pulled(image, is_local, mklib.platform_args(arch))
     subprocess.run(
         [
             "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
+            *mklib.hardening_args(),
             "-v", f"{linux_src}:/linux",
             "-v", f"{HERE / 'kconf'}:/kconf:ro",
             *out_mount,

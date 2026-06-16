@@ -168,6 +168,38 @@ def platform_args(arch: str) -> list[str]:
     return ["--platform", arch_profile(arch)["container_platform"]]
 
 
+def hardening_args() -> list[str]:
+    """podman flags for least-privilege build/compile containers. Compilation
+    needs no network and no privilege escalation, and can run on a read-only root
+    filesystem -- the work dirs (kernel tree, build/seed scratch) are bind-mounted
+    read-write separately, so builds still write their outputs. /tmp and /run are
+    writable tmpfs for the toolchain's scratch.
+
+    All Linux capabilities are dropped except DAC_OVERRIDE: under rootless podman
+    on macOS the bind-mounted tree is presented with a uid the container doesn't
+    match, so the build needs DAC_OVERRIDE to read/write it (without it even
+    `stat Makefile` is denied). That one cap is benign -- it only bypasses file
+    permission bits inside our own mounts."""
+    return [
+        "--network=none",
+        "--cap-drop=all",
+        "--cap-add=dac_override",
+        "--security-opt", "no-new-privileges",
+        "--read-only",
+        "--tmpfs", "/tmp:rw,exec",
+        "--tmpfs", "/run:rw",
+    ]
+
+
+def ensure_pulled(ref: str, is_local: bool, plat_args: list[str]) -> None:
+    """Pull a remote image up front so a later hardened (--network=none) run finds
+    it locally -- a network-less container cannot pull on demand. No-op for the
+    already-present local image."""
+    if is_local:
+        return
+    subprocess.run(["podman", "pull", *plat_args, ref], check=True)
+
+
 def qemu_accel_cpu(arch: str) -> tuple[str, str]:
     """Return (accel, cpu). Hardware acceleration only when the target arch
     matches the host arch; otherwise QEMU emulates with TCG (slow but works)."""
