@@ -10,8 +10,12 @@ Single source of truth for the two axes that make the project portable:
     accelerator (hvf on a native Mac, kvm on native Linux, tcg when emulating a
     foreign arch) and thus the -cpu model.
 """
+# Keep annotations lazy so `str | None` etc. parse on Python 3.9 (e.g. RHEL 9).
+from __future__ import annotations
+
 import os
 import platform
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -147,7 +151,7 @@ def build_dir_mount() -> tuple[list[str], str]:
     if not bd:
         return [], ""
     Path(bd).mkdir(parents=True, exist_ok=True)
-    return ["-v", f"{Path(bd).resolve()}:/out"], "/out"
+    return ["-v", volume(Path(bd).resolve(), "/out")], "/out"
 
 
 def kernel_image(linux_src, arch: str) -> Path:
@@ -166,6 +170,31 @@ def platform_args(arch: str) -> list[str]:
     if normalize_arch(arch) == host_arch():
         return []
     return ["--platform", arch_profile(arch)["container_platform"]]
+
+
+_SELINUX_ENFORCING = None
+
+
+def selinux_enforcing() -> bool:
+    """True on a host with SELinux in enforcing mode (RHEL/Fedora). Cached."""
+    global _SELINUX_ENFORCING
+    if _SELINUX_ENFORCING is None:
+        try:
+            _SELINUX_ENFORCING = Path("/sys/fs/selinux/enforce").read_text().strip() == "1"
+        except OSError:
+            _SELINUX_ENFORCING = False
+    return _SELINUX_ENFORCING
+
+
+def volume(host, container: str, *, ro: bool = False) -> str:
+    """Build a podman `-v` value. Adds the `:z` relabel suffix when SELinux is
+    enforcing so a rootless container can access the bind mount (without it RHEL
+    denies access -- `stat: Permission denied`). `:z` is a no-op on non-SELinux
+    hosts, so this stays cross-platform."""
+    opts = ["ro"] if ro else []
+    if selinux_enforcing():
+        opts.append("z")
+    return f"{host}:{container}" + ((":" + ",".join(opts)) if opts else "")
 
 
 def hardening_args() -> list[str]:
@@ -216,6 +245,25 @@ def ensure_pulled(ref: str, is_local: bool, plat_args: list[str]) -> None:
     if is_local:
         return
     subprocess.run(["podman", "pull", *plat_args, ref], check=True)
+
+
+def qemu_binary(arch: str) -> str:
+    """The qemu-system binary to launch. The QEMU env var overrides everything;
+    otherwise use the per-arch default name if it's on PATH; otherwise fall back
+    to RHEL/Fedora's qemu-kvm (shipped at /usr/libexec/qemu-kvm, not as
+    qemu-system-x86_64) for x86_64. Returns the default name as a last resort so
+    the failure (and the fix: install qemu or set QEMU=) is clear at exec time."""
+    env = os.environ.get("QEMU")
+    if env:
+        return env
+    name = arch_profile(arch)["qemu_binary"]
+    if shutil.which(name):
+        return name
+    if normalize_arch(arch) == "x86_64":
+        for cand in ("/usr/libexec/qemu-kvm", "/usr/bin/qemu-kvm"):
+            if os.path.exists(cand):
+                return cand
+    return name
 
 
 def qemu_accel_cpu(arch: str) -> tuple[str, str]:

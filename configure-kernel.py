@@ -176,7 +176,7 @@ def main() -> int:
             print(f"error: fragment not found: {f}", file=sys.stderr)
             return 1
         cpath = f"/frags/frag{i}.config"
-        frag_mounts += ["-v", f"{fp}:{cpath}:ro"]
+        frag_mounts += ["-v", mklib.volume(fp, cpath, ro=True)]
         frag_paths.append(cpath)
         print(f"extra fragment: {f}", flush=True)
 
@@ -189,8 +189,8 @@ def main() -> int:
         [
             "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
             *mklib.hardening_args(),
-            "-v", f"{linux_src}:/linux",
-            "-v", f"{HERE / 'kconf'}:/kconf:ro",
+            "-v", mklib.volume(linux_src, "/linux"),
+            "-v", mklib.volume(HERE / 'kconf', "/kconf", ro=True),
             *out_mount,
             *frag_mounts,
             "-w", "/linux",

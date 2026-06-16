@@ -47,7 +47,7 @@ def main() -> int:
         [
             "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
             *mklib.hardening_args(),
-            "-v", f"{linux_src}:/linux",
+            "-v", mklib.volume(linux_src, "/linux"),
             *out_mount,
             "-w", "/linux",
             "-e", f"ARCH={prof['kernel_arch']}",

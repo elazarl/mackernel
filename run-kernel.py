@@ -78,10 +78,11 @@ def boot_interactive() -> int:
     # -nodefaults (from qemu_hardening_args) suppresses the implicit serial, so the
     # interactive console is wired explicitly with -serial mon:stdio (also gives the
     # Ctrl-a escape) instead of -nographic.
+    qbin = mklib.qemu_binary(arch)
     os.execvp(
-        prof["qemu_binary"],
+        qbin,
         [
-            prof["qemu_binary"],
+            qbin,
             *mklib.qemu_hardening_args(),
             "-display", "none",
             "-serial", "mon:stdio",
@@ -251,7 +252,8 @@ def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool) -
     cmd = [
         "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
         *mklib.hardening_args(),
-        "-v", f"{tree}:/linux", "-v", f"{moddir}:/mod", "-w", "/mod", image,
+        "-v", mklib.volume(tree, "/linux"), "-v", mklib.volume(moddir, "/mod"),
+        "-w", "/mod", image,
         "bash", "-c",
         f'set -e; make -C /linux ARCH={ka} CC=gcc-15 modules; '
         f'make -C /linux M=/mod ARCH={ka} CC=gcc-15 modules',

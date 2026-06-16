@@ -112,7 +112,7 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
     # Set GUEST_NET=open to allow guest egress (e.g. apt).
     restrict = "" if os.environ.get("GUEST_NET") == "open" else ",restrict=on"
     qemu = [
-        prof["qemu_binary"],
+        mklib.qemu_binary(arch),
         *mklib.qemu_hardening_args(),
         "-machine", prof["qemu_machine"],
         "-cpu", cpu, "-accel", accel,
@@ -191,7 +191,7 @@ def compile_c(srcs, out_name: str, image: str, is_local: bool,
         podman += ["--pull=never"]
     podman += [
         *mklib.hardening_args(),
-        "-v", f"{builddir}:/build", "-w", "/build", image,
+        "-v", mklib.volume(builddir, "/build"), "-w", "/build", image,
         "gcc-15", "-static", "-O2", "-pthread", *cflags,
         "-o", out_name, *cfiles,
     ]
