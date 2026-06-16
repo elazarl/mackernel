@@ -8,6 +8,7 @@ mode). Per-arch QEMU/image settings come from mklib.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import socket
 import subprocess
@@ -105,17 +106,24 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
     prof = mklib.arch_profile(arch)
     accel, cpu = mklib.qemu_accel_cpu(arch)
     kimg = mklib.kernel_image(linux_src, arch)
+    # Guest network isolation: slirp restrict=on lets the host reach the guest
+    # via the forwarded SSH port but blocks the guest from initiating any outbound
+    # connection (it can't phone home). Boot/cloud-init/sshd need no egress.
+    # Set GUEST_NET=open to allow guest egress (e.g. apt).
+    restrict = "" if os.environ.get("GUEST_NET") == "open" else ",restrict=on"
     qemu = [
         prof["qemu_binary"],
+        *mklib.qemu_hardening_args(),
         "-machine", prof["qemu_machine"],
         "-cpu", cpu, "-accel", accel,
         "-m", "2048", "-smp", "4",
         "-kernel", str(kimg),
         "-drive", f"file={img},if=virtio,format=qcow2",
         "-drive", f"file={seed},if=virtio,format=raw,readonly=on",
-        "-netdev", f"user,id=net0,hostfwd=tcp::{port}-:22",
+        "-netdev", f"user,id=net0,hostfwd=tcp::{port}-:22{restrict}",
         "-device", "virtio-net-pci,netdev=net0",
-        "-device", "virtio-rng-pci",
+        "-object", "rng-builtin,id=rng0",
+        "-device", "virtio-rng-pci,rng=rng0",
         "-append", f"console={prof['console']} root=/dev/vda1 rw",
         "-snapshot",
         "-display", "none",
@@ -123,7 +131,17 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
         "-monitor", "none",
     ]
     log(f"booting kernel ({arch}, accel={accel}; serial -> {serial_log.name}) ...")
-    return subprocess.Popen(qemu)
+    return subprocess.Popen(qemu, preexec_fn=_no_core_dumps)
+
+
+def _no_core_dumps() -> None:
+    """preexec hook: forbid core dumps from the qemu process (no guest RAM dumped
+    to disk on a crash). Best-effort -- ignored if the platform lacks RLIMIT_CORE."""
+    try:
+        import resource
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (ImportError, ValueError, OSError):
+        pass
 
 
 def teardown(proc: subprocess.Popen) -> None:

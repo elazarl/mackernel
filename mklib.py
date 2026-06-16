@@ -191,6 +191,24 @@ def hardening_args() -> list[str]:
     ]
 
 
+def qemu_hardening_args() -> list[str]:
+    """Least-surface flags for the qemu-system process (the VM-boot step), to
+    complement the locked-down build containers.
+
+    Cross-platform: ignore host/user qemu config files and create no implicit
+    devices (boot_qemu adds every device it needs explicitly), shrinking the
+    emulated attack surface. On Linux, also turn on QEMU's seccomp sandbox to
+    whitelist host syscalls and deny privilege escalation / process spawning /
+    resource control. macOS has no seccomp, so `-sandbox` is omitted there -- the
+    HVF hardware-VM boundary plus an optional Seatbelt (`sandbox-exec`) profile
+    around the process cover that host (see docs/qemu-hardening notes)."""
+    args = ["-no-user-config", "-nodefaults"]
+    if host_os() == "linux":
+        args += ["-sandbox",
+                 "on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny"]
+    return args
+
+
 def ensure_pulled(ref: str, is_local: bool, plat_args: list[str]) -> None:
     """Pull a remote image up front so a later hardened (--network=none) run finds
     it locally -- a network-less container cannot pull on demand. No-op for the

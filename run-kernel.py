@@ -73,20 +73,28 @@ def boot_interactive() -> int:
     print(f"    SSH:  ssh -p {ssh_port} -i id_mackernel mac@127.0.0.1"
           "   (after cloud-init finishes)")
     print("    quit: Ctrl-a x", flush=True)
+    # Guest egress isolation (override with GUEST_NET=open); see guestlib.boot_qemu.
+    restrict = "" if os.environ.get("GUEST_NET") == "open" else ",restrict=on"
+    # -nodefaults (from qemu_hardening_args) suppresses the implicit serial, so the
+    # interactive console is wired explicitly with -serial mon:stdio (also gives the
+    # Ctrl-a escape) instead of -nographic.
     os.execvp(
         prof["qemu_binary"],
         [
             prof["qemu_binary"],
-            "-nographic",
+            *mklib.qemu_hardening_args(),
+            "-display", "none",
+            "-serial", "mon:stdio",
             "-machine", prof["qemu_machine"],
             "-cpu", cpu, "-accel", accel,
             "-m", "2048", "-smp", "4",
             "-kernel", str(kimg),
             "-drive", f"file={img},if=virtio,format=qcow2",
             "-drive", f"file={seed},if=virtio,format=raw,readonly=on",
-            "-netdev", f"user,id=net0,hostfwd=tcp::{ssh_port}-:22",
+            "-netdev", f"user,id=net0,hostfwd=tcp::{ssh_port}-:22{restrict}",
             "-device", "virtio-net-pci,netdev=net0",
-            "-device", "virtio-rng-pci",
+            "-object", "rng-builtin,id=rng0",
+            "-device", "virtio-rng-pci,rng=rng0",
             "-append", append,
             "-snapshot",
         ],

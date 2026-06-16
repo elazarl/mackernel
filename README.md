@@ -357,3 +357,7 @@ To bump the version, edit `VERSION` and push — the workflow publishes the new 
 - **`kconf/x86_64.config` is validated under QEMU TCG emulation,** not on real x86 hardware.
 - `run-kernel.py` uses `-snapshot`, so writes are discarded on exit and the cloud image stays
   pristine and reusable.
+- **Hardening:** build/compile containers run least-privilege (no network, caps dropped,
+  read-only rootfs), and the QEMU run is locked down too (`-nodefaults`, no monitor, guest
+  egress blocked via slirp `restrict=on` — override `GUEST_NET=open`, seccomp `-sandbox` on
+  Linux). See [`docs/qemu-hardening.md`](docs/qemu-hardening.md).
