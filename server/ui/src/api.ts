@@ -13,31 +13,53 @@ export interface Job {
 export interface Sample { ts_ms: number; rss_bytes: number; disk_bytes: number; }
 export interface Peak { id: number; ram_peak: number; disk_peak: number; status: string; }
 
+const TOKEN_KEY = "mk_token";
 export function token(): string {
-  return localStorage.getItem("mk_token") || "";
+  return localStorage.getItem(TOKEN_KEY) || "";
+}
+export function hasToken(): boolean {
+  return token().length > 0;
+}
+export function setToken(t: string) {
+  localStorage.setItem(TOKEN_KEY, t.trim());
+}
+export function clearToken() {
+  localStorage.removeItem(TOKEN_KEY);
 }
 function headers(): HeadersInit {
   const t = token();
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
+// Wrap fetch so a rejected token (401) drops the stored token and tells the app to
+// re-prompt for the v7.1 commit, instead of silently retrying with a bad token.
+async function authed(input: string, init?: RequestInit): Promise<Response> {
+  const r = await fetch(input, { ...init, headers: { ...headers(), ...(init?.headers || {}) } });
+  if (r.status === 401) {
+    clearToken();
+    window.dispatchEvent(new Event("mk-unauthorized"));
+    throw new Error("unauthorized");
+  }
+  return r;
+}
+
 export async function listJobs(): Promise<Job[]> {
-  return (await fetch("/api/jobs", { headers: headers() })).json();
+  return (await authed("/api/jobs")).json();
 }
 export async function getJob(id: number): Promise<Job> {
-  return (await fetch(`/api/jobs/${id}`, { headers: headers() })).json();
+  return (await authed(`/api/jobs/${id}`)).json();
 }
 export async function submit(bundle: string): Promise<{ id: number }> {
-  return (await fetch("/api/jobs", { method: "POST", headers: headers(), body: bundle })).json();
+  return (await authed("/api/jobs", { method: "POST", body: bundle })).json();
 }
 export async function getMetrics(id: number): Promise<Sample[]> {
-  return (await fetch(`/api/jobs/${id}/metrics`, { headers: headers() })).json();
+  return (await authed(`/api/jobs/${id}/metrics`)).json();
 }
 export async function getPeaks(): Promise<Peak[]> {
-  return (await fetch("/api/metrics/peaks", { headers: headers() })).json();
+  return (await authed("/api/metrics/peaks")).json();
 }
 export async function getLog(id: number, kind: string): Promise<string> {
-  const r = await fetch(`/api/jobs/${id}/logs/${kind}`, { headers: headers() });
+  const r = await authed(`/api/jobs/${id}/logs/${kind}`);
   return r.ok ? r.text() : `(no ${kind} log yet)`;
 }
 // EventSource can't set headers; the token rides as a query param (Phase 5).

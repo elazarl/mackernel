@@ -21,7 +21,7 @@ cargo build --release                        # single binary at target/release/m
 ```bash
 MK_REPO=/path/to/mackernel \      # the repo holding run-kernel.py (default: ..)
 MK_SERVER_WORK=./work \           # per-job dirs, logs, and the DuckDB file
-MK_TOKEN=some-secret \            # bearer token for /api/* (omit = dev, unauthenticated)
+MK_TOKEN=some-secret \            # bearer token for /api/* (omit = built-in v7.1 token)
 MK_SERVER_BIND=127.0.0.1:8087 \
   ./target/release/mackernel-server
 ```
@@ -75,9 +75,13 @@ pinned-commit bundle). To keep disk bounded:
 default `~/linux`).
 
 ## Auth
-Bearer token via `MK_TOKEN` (header `Authorization: Bearer …`, or `?token=` for
-EventSource). **Google OAuth (OIDC) is planned but not yet implemented** — see the
-project plan; it will be config-gated (token-only when OIDC env is unset).
+`/api/*` requires a bearer token (header `Authorization: Bearer …`, or `?token=` for
+EventSource). The token defaults to the commit hash that the `v7.1` tag points to and
+is overridable with `MK_TOKEN`; the embedded UI is served unauthenticated and, on
+first visit, prompts for "the v7.1 commit" and sends it as the bearer token. A 401
+clears the stored token and re-prompts. **Google OAuth (OIDC) is planned but not yet
+implemented** — see the project plan; it will be config-gated (token-only when OIDC
+env is unset).
 
 ## Trust model
 The service builds and boots arbitrary (untrusted) kernels. It runs them with the

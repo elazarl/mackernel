@@ -36,6 +36,12 @@ use bus::Bus;
 use db::Db;
 use sched::{Cfg, SchedMsg};
 
+/// Default bearer token: the commit hash that the `v7.1` tag points to. Acts as a
+/// shared secret — the UI asks the user for "the v7.1 commit" and sends it as the
+/// bearer token, so only someone who knows that SHA can drive the service. Override
+/// with the `MK_TOKEN` env var.
+const DEFAULT_TOKEN: &str = "8cd9520d35a6c38db6567e97dd93b1f11f185dc6";
+
 #[derive(Clone)]
 struct AppState {
     db: Db,
@@ -77,9 +83,14 @@ async fn main() -> anyhow::Result<()> {
     let database = Db::open(&work.join("jobs.duckdb"))?;
     database.recover_orphans(now_ms())?; // any job left mid-flight by a prior run
 
-    let auth_token = std::env::var("MK_TOKEN").ok().filter(|t| !t.is_empty());
-    if auth_token.is_none() {
-        tracing::warn!("MK_TOKEN unset -- API is unauthenticated (dev mode)");
+    // Bearer token for /api/*. Defaults to DEFAULT_TOKEN (the commit hash the v7.1
+    // tag points to) so the API is authenticated out of the box; MK_TOKEN overrides
+    // it. The UI prompts the user for "the v7.1 commit" and sends that as the bearer.
+    let auth_token = std::env::var("MK_TOKEN").ok()
+        .filter(|t| !t.is_empty())
+        .or_else(|| Some(DEFAULT_TOKEN.to_string()));
+    if std::env::var_os("MK_TOKEN").is_none() {
+        tracing::info!("MK_TOKEN unset -- using built-in v7.1 token for /api/* auth");
     }
 
     let (tx, rx) = mpsc::unbounded_channel::<SchedMsg>();

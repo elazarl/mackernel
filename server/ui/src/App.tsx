@@ -4,8 +4,8 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  eventsUrl, getJob, getLog, getMetrics, getPeaks, gib, Job, listJobs,
-  mib, Peak, Sample, submit,
+  eventsUrl, getJob, getLog, getMetrics, getPeaks, gib, hasToken, Job, listJobs,
+  mib, Peak, Sample, setToken, submit,
 } from "./api";
 
 const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
@@ -17,6 +17,50 @@ const statusColor = (s: string) =>
     : s === "running" ? "#d29922" : "#8b949e";
 
 export function App() {
+  const [authed, setAuthed] = useState(hasToken());
+
+  // A rejected token (401) anywhere clears it and bounces back to the unlock gate.
+  useEffect(() => {
+    const onUnauthorized = () => setAuthed(false);
+    window.addEventListener("mk-unauthorized", onUnauthorized);
+    return () => window.removeEventListener("mk-unauthorized", onUnauthorized);
+  }, []);
+
+  if (!authed) return <Unlock onUnlock={() => setAuthed(true)} />;
+  return <Dashboard />;
+}
+
+// First-visit gate: ask for the commit hash of the v7.1 tag and use it as the
+// bearer token for /api/*. Remounting Dashboard on unlock kicks off a fresh poll.
+function Unlock({ onUnlock }: { onUnlock: () => void }) {
+  const [value, setValue] = useState("");
+  const submitToken = () => {
+    if (!value.trim()) return;
+    setToken(value);
+    onUnlock();
+  };
+  return (
+    <div className="wrap">
+      <style>{CSS}</style>
+      <h1>mackernel — reproducer runner</h1>
+      <section className="card unlock">
+        <h2>Unlock</h2>
+        <p className="muted">Enter the commit hash of the <code>v7.1</code> tag to continue.</p>
+        <input
+          type="password"
+          value={value}
+          autoFocus
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") submitToken(); }}
+          placeholder="v7.1 commit hash"
+        />
+        <button onClick={submitToken}>Unlock</button>
+      </section>
+    </div>
+  );
+}
+
+function Dashboard() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [peaks, setPeaks] = useState<Peak[]>([]);
   const [sel, setSel] = useState<number | null>(null);
@@ -184,6 +228,8 @@ const CSS = `
   .cols { display: grid; grid-template-columns: 380px 1fr; gap: 16px; align-items: start; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
   textarea { width: 100%; height: 140px; box-sizing: border-box; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; font-family: ui-monospace, monospace; padding: 8px; }
+  .unlock { max-width: 460px; } .unlock code { color: #c9d1d9; }
+  .unlock input { width: 100%; box-sizing: border-box; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; font-family: ui-monospace, monospace; padding: 8px; }
   button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer; margin-top: 8px; }
   .jobs { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow: auto; }
   .jobs li { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
