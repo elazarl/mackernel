@@ -9,11 +9,14 @@ import {
   eventsUrl, getJob, getLog, getMetrics, getPeaks, gib, hasToken, Job, listJobs,
   mib, Peak, Sample, setToken, submit,
 } from "./api";
-import { parseBundle, ParsedBundle, rolesOf } from "./bundle";
+import {
+  appendFile, BOILERPLATE, githubTree, KERNEL_URL, parseBundle, ParsedBundle,
+  rolesOf, upsertMeta,
+} from "./bundle";
 import specMd from "../../../docs/reproducer-spec.md?raw";
 
 const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
-const LOG_KINDS = ["compile", "dmesg", "exec"] as const;
+const LOG_KINDS = ["fetch", "compile", "dmesg", "exec"] as const;
 type LogKind = (typeof LOG_KINDS)[number];
 
 const statusColor = (s: string) =>
@@ -112,9 +115,12 @@ function Dashboard() {
               )}
             </div>
             {showRaw ? (
-              <textarea value={bundle} onChange={(e) => setBundle(e.target.value)}
-                onBlur={() => { if (parsed.files.length) setEditing(false); }}
-                placeholder="paste a SKILL.md-style bundle (---metadata---, user:/module:/kconf:/init: blocks)" />
+              <>
+                <RawTools text={bundle} onChange={setBundle} />
+                <textarea value={bundle} onChange={(e) => setBundle(e.target.value)}
+                  onBlur={() => { if (parsed.files.length) setEditing(false); }}
+                  placeholder="paste a SKILL.md-style bundle (---metadata---, user:/module:/kconf:/init: blocks)" />
+              </>
             ) : (
               <BundlePreview parsed={parsed} />
             )}
@@ -232,19 +238,57 @@ function JobDetail({ id }: { id: number }) {
   );
 }
 
+// Raw-mode toolbar: edit commit/arch frontmatter and insert file boilerplate.
+function RawTools({ text, onChange }: { text: string; onChange: (s: string) => void }) {
+  const meta = useMemo(() => parseBundle(text), [text]);
+  const valueOf = (k: string) => meta.meta.find((m) => m.key === k)?.value;
+  const editMeta = (k: string) => {
+    const v = window.prompt(`Set ${k}:`, valueOf(k) ?? "");
+    if (v != null && v.trim() !== "") onChange(upsertMeta(text, k, v.trim()));
+  };
+  const addFile = (role: string) => {
+    const b = BOILERPLATE[role];
+    onChange(appendFile(text, role, b.name, b.body));
+  };
+  const label = (k: string) => (valueOf(k) ? `${k}: ${valueOf(k)}` : `+ ${k}`);
+  return (
+    <div className="bartools">
+      <button className="chip" onClick={() => editMeta("commit")}>{label("commit")}</button>
+      <button className="chip" onClick={() => editMeta("arch")}>{label("arch")}</button>
+      <span className="barsep" />
+      <button className="chip" onClick={() => addFile("user")}>+ C</button>
+      <button className="chip" onClick={() => addFile("module")}>+ module</button>
+      <button className="chip" onClick={() => addFile("kconf")}>+ kconf</button>
+      <button className="chip" onClick={() => addFile("init")}>+ init</button>
+    </div>
+  );
+}
+
 // Structured view of a pasted bundle: frontmatter metadata + one tab per role present.
 function BundlePreview({ parsed }: { parsed: ParsedBundle }) {
   const roles = useMemo(() => rolesOf(parsed), [parsed]);
   const [tab, setTab] = useState(roles[0] ?? "");
   useEffect(() => { if (!roles.includes(tab)) setTab(roles[0] ?? ""); }, [roles, tab]);
 
+  const get = (k: string) => parsed.meta.find((m) => m.key === k)?.value;
+  const commit = get("commit"), arch = get("arch"), patch = get("patch"), url = get("url");
+  const requestsKernel = !!(commit || patch || url);
+
   return (
     <div className="preview">
       {parsed.meta.length ? (
         <dl className="meta">
-          {parsed.meta.map((m) => (
-            <div key={m.key}><dt>{m.key}</dt><dd>{m.value}</dd></div>
-          ))}
+          {/* Hardened: a bundle that requests a kernel always builds Linus's tree,
+              so its commit tree-ish links to GitHub. */}
+          {requestsKernel && <div><dt>kernel</dt>
+            <dd>torvalds/linux <span className="muted">· hardened</span></dd></div>}
+          {commit && <div><dt>commit</dt><dd>
+            <a href={githubTree(commit)} target="_blank" rel="noreferrer">{commit}</a>
+          </dd></div>}
+          {arch && <div><dt>arch</dt><dd>{arch}</dd></div>}
+          {patch && <div><dt>patch</dt><dd>{patch}</dd></div>}
+          {url && url !== KERNEL_URL && <div><dt>url</dt>
+            <dd className="ignored"><s>{url}</s> · ignored</dd></div>}
         </dl>
       ) : (
         <p className="muted">no metadata block (builds LINUX_SRC as-is)</p>
@@ -326,6 +370,11 @@ const CSS = `
   .meta { margin: 0 0 8px; } .meta > div { display: flex; gap: 8px; padding: 2px 0; }
   .meta dt { color: #8b949e; min-width: 64px; } .meta dd { margin: 0; font-family: ui-monospace, monospace; word-break: break-all; }
   .fname { color: #8b949e; font-family: ui-monospace, monospace; font-size: 12px; margin: 8px 0 2px; }
+  .bartools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .chip { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 3px 9px; font-size: 12px; margin: 0; font-family: ui-monospace, monospace; cursor: pointer; }
+  .chip:hover { border-color: #58a6ff; }
+  .barsep { width: 1px; align-self: stretch; background: #30363d; margin: 0 2px; }
+  .ignored { color: #8b949e; }
   .modal { position: fixed; inset: 0; background: rgba(1, 4, 9, .7); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; z-index: 10; }
   .modal-body { background: #161b22; border: 1px solid #30363d; border-radius: 8px; max-width: 820px; width: 100%; padding: 20px 28px 28px; position: relative; }
   .modal-close { position: absolute; top: 6px; right: 12px; background: none; border: 0; color: #8b949e; font-size: 24px; line-height: 1; cursor: pointer; margin: 0; padding: 4px; }

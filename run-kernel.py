@@ -50,6 +50,22 @@ def progress(phase: str, **extra) -> None:
 META_KEYS = {"url", "commit", "patch", "arch"}
 ROLES = ("user", "module", "kconf", "init")
 
+# Hardened mode (always on): a bundle never chooses its own kernel remote. Any
+# bundle that requests a remote tree (url/commit/patch) is forced to build from
+# Linus's tree; a bundle's own `url:` is ignored. Metadata-less bundles still
+# build LINUX_SRC as-is (no fetch).
+KERNEL_URL = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
+
+
+def enforce_hardened(meta: dict) -> dict:
+    """Force the kernel source to KERNEL_URL whenever the bundle requests a remote
+    tree (url/commit/patch). Returns the (mutated) meta dict."""
+    if meta.get("url") or meta.get("commit") or meta.get("patch"):
+        if meta.get("url") and meta["url"] != KERNEL_URL:
+            log(f"hardened: ignoring bundle url {meta['url']!r}; forcing {KERNEL_URL}")
+        meta["url"] = KERNEL_URL
+    return meta
+
 
 # ----------------------------------------------------------------------------
 # Interactive mode (no bundle argument): boot to a serial console.
@@ -190,64 +206,81 @@ def _parse_kv(block: list[str]) -> dict | None:
 # Kernel source: single git tree + cached worktrees
 # ----------------------------------------------------------------------------
 
-def prepare_kernel_tree(meta: dict, linux_src: Path) -> Path:
+def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = None) -> Path:
     """Resolve the kernel tree to build. With no url/commit/patch, use linux_src
     as-is. Otherwise materialize a cached git worktree at the requested commit
-    (adding+fetching the remote for a url) and apply the patch there."""
+    (adding+fetching the remote for a url) and apply the patch there. When
+    `log_path` is given, the fetch/worktree/patch step is captured there and kept
+    as the job's fetch.log (only created when an actual fetch/prepare happens)."""
     url, commit, patch = meta.get("url"), meta.get("commit"), meta.get("patch")
     if not (url or commit or patch):
-        return linux_src
+        return linux_src  # no remote work -> no fetch, no fetch.log
 
     if not (linux_src / ".git").exists():
         die(f"bundle needs a git kernel tree at LINUX_SRC={linux_src}")
 
-    if url:
-        remote = "mk-" + hashlib.sha1(url.encode()).hexdigest()[:8]
-        existing = run(["git", "-C", str(linux_src), "remote"],
-                       capture_output=True, text=True).stdout.split()
-        if remote not in existing:
-            log(f"adding remote {remote} -> {url}")
-            run(["git", "-C", str(linux_src), "remote", "add", remote, url], check=True)
-        log(f"fetching {remote} (all refs) ...")
-        if run(["git", "-C", str(linux_src), "fetch", "--tags", remote]).returncode != 0:
-            die(f"git fetch {remote} failed")
+    # Capture this step's git output into fetch.log (in addition to live logging).
+    # flog() flushes before each captured subprocess so the lines stay ordered.
+    fl = open(log_path, "w") if log_path else None
+    cap = {"stdout": fl, "stderr": subprocess.STDOUT} if fl else {}
 
-    treeish = commit or "HEAD"
-    sha = run(["git", "-C", str(linux_src), "rev-parse", "--verify", f"{treeish}^{{commit}}"],
-              capture_output=True, text=True)
-    if sha.returncode != 0:
-        die(f"commit '{treeish}' not found after fetch (must be reachable from a ref)")
-    short = sha.stdout.strip()[:12]
+    def flog(msg: str) -> None:
+        log(msg)
+        if fl:
+            print(f"[fetch] {msg}", file=fl, flush=True)
 
-    # Worktree cache root: MK_WT_ROOT isolates concurrent jobs (the service gives
-    # each job its own root so same-commit builds don't collide); default sits
-    # next to the source tree.
-    wt_root = Path(os.environ.get("MK_WT_ROOT") or f"{linux_src}-wt")
-    wt = wt_root / short
-    # Drop registrations whose dirs were deleted out from under git (e.g. a job's
-    # work dir was cleaned), so `worktree add` to that path doesn't fail.
-    run(["git", "-C", str(linux_src), "worktree", "prune"])
-    if not (wt / ".git").exists():
-        wt.parent.mkdir(parents=True, exist_ok=True)
-        log(f"creating worktree {wt} @ {short}")
-        if run(["git", "-C", str(linux_src), "worktree", "add", "--detach",
-                str(wt), short]).returncode != 0:
-            die("git worktree add failed")
-    else:
-        log(f"reusing cached worktree {wt}")
+    try:
+        if url:
+            remote = "mk-" + hashlib.sha1(url.encode()).hexdigest()[:8]
+            existing = run(["git", "-C", str(linux_src), "remote"],
+                           capture_output=True, text=True).stdout.split()
+            if remote not in existing:
+                flog(f"adding remote {remote} -> {url}")
+                run(["git", "-C", str(linux_src), "remote", "add", remote, url], check=True)
+            flog(f"fetching {remote} (all refs) ...")
+            if run(["git", "-C", str(linux_src), "fetch", "--tags", remote], **cap).returncode != 0:
+                die(f"git fetch {remote} failed")
 
-    if patch:
-        marker = wt / ".mk-patched"
-        if not marker.exists():
-            pf = wt / ".mk.patch"
-            log(f"downloading patch {patch} ...")
-            if run(["curl", "-LfsS", "-o", str(pf), patch]).returncode != 0:
-                die("patch download failed")
-            log("applying patch ...")
-            if run(["git", "-C", str(wt), "apply", str(pf)]).returncode != 0:
-                die("git apply failed (clear the cached worktree to retry)")
-            marker.write_text(patch + "\n")
-    return wt
+        treeish = commit or "HEAD"
+        sha = run(["git", "-C", str(linux_src), "rev-parse", "--verify", f"{treeish}^{{commit}}"],
+                  capture_output=True, text=True)
+        if sha.returncode != 0:
+            die(f"commit '{treeish}' not found after fetch (must be reachable from a ref)")
+        short = sha.stdout.strip()[:12]
+        flog(f"resolved {treeish} -> {short}")
+
+        # Worktree cache root: MK_WT_ROOT isolates concurrent jobs (the service gives
+        # each job its own root so same-commit builds don't collide); default sits
+        # next to the source tree.
+        wt_root = Path(os.environ.get("MK_WT_ROOT") or f"{linux_src}-wt")
+        wt = wt_root / short
+        # Drop registrations whose dirs were deleted out from under git (e.g. a job's
+        # work dir was cleaned), so `worktree add` to that path doesn't fail.
+        run(["git", "-C", str(linux_src), "worktree", "prune"], **cap)
+        if not (wt / ".git").exists():
+            wt.parent.mkdir(parents=True, exist_ok=True)
+            flog(f"creating worktree {wt} @ {short}")
+            if run(["git", "-C", str(linux_src), "worktree", "add", "--detach",
+                    str(wt), short], **cap).returncode != 0:
+                die("git worktree add failed")
+        else:
+            flog(f"reusing cached worktree {wt}")
+
+        if patch:
+            marker = wt / ".mk-patched"
+            if not marker.exists():
+                pf = wt / ".mk.patch"
+                flog(f"downloading patch {patch} ...")
+                if run(["curl", "-LfsS", "-o", str(pf), patch], **cap).returncode != 0:
+                    die("patch download failed")
+                flog("applying patch ...")
+                if run(["git", "-C", str(wt), "apply", str(pf)], **cap).returncode != 0:
+                    die("git apply failed (clear the cached worktree to retry)")
+                marker.write_text(patch + "\n")
+        return wt
+    finally:
+        if fl:
+            fl.close()
 
 
 # ----------------------------------------------------------------------------
@@ -324,6 +357,7 @@ def run_bundle(src, args) -> int:
     progress("fetch")
     bundle_path = fetch_bundle(str(src))
     b = parse_bundle(bundle_path)
+    enforce_hardened(b.meta)  # always build from Linus's tree; ignore bundle url
 
     # Bundle builds are in-tree in the (cached) worktree, so a kernel module can
     # build against /linux directly; BUILD_DIR would split that out, so ignore it.
@@ -335,7 +369,8 @@ def run_bundle(src, args) -> int:
         os.environ["ARCH"] = mklib.normalize_arch(b.meta["arch"])
     arch = mklib.target_arch()
     base_src = Path(os.environ.get("LINUX_SRC", os.path.expanduser("~/linux")))
-    tree = prepare_kernel_tree(b.meta, base_src)
+    tree = prepare_kernel_tree(b.meta, base_src,
+                               log_path=(log_dir / "fetch.log") if log_dir else None)
     log(f"kernel tree: {tree}")
 
     scratch = Path(tempfile.mkdtemp(prefix=".mk-bundle-", dir=HERE))

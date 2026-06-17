@@ -145,6 +145,7 @@ async fn get_job(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json
 
 async fn get_log(State(st): State<AppState>, Path((id, kind)): Path<(i64, String)>) -> Result<String, StatusCode> {
     let file = match kind.as_str() {
+        "fetch" => "fetch.log",
         "compile" => "compile.log",
         "dmesg" => "dmesg.log",
         "exec" => "exec.log",

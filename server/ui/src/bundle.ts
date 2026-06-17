@@ -93,3 +93,68 @@ export function rolesOf(parsed: ParsedBundle): string[] {
   for (const f of parsed.files) if (!seen.includes(f.role)) seen.push(f.role);
   return seen.sort((a, b) => roleRank(a) - roleRank(b));
 }
+
+// --- hardened-mode constants (must match KERNEL_URL in run-kernel.py) ----------
+// The kernel is always built from Linus's tree, so a commit tree-ish maps to GitHub.
+export const KERNEL_URL =
+  "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git";
+export const githubTree = (ref: string) =>
+  `https://github.com/torvalds/linux/tree/${encodeURIComponent(ref)}`;
+
+// --- raw-mode editing helpers --------------------------------------------------
+
+// Line indices of the column-0 `---…---` frontmatter block (outside any fence), or
+// null. Reuses the fence tracking from parseBundle so `---` inside code is ignored.
+function frontmatterRange(lines: string[]): { open: number; close: number } | null {
+  const dashes: number[] = [];
+  let fence: string | null = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (fence === null) {
+      const m = line.match(FENCE_OPEN);
+      if (m) { fence = m[1]; continue; }
+      if (line === "---") dashes.push(i);
+    } else if (new RegExp("^`{" + fence.length + ",}\\s*$").test(line)) {
+      fence = null;
+    }
+  }
+  return dashes.length >= 2 ? { open: dashes[0], close: dashes[1] } : null;
+}
+
+// Set a frontmatter key: update it in place if present, insert into the existing
+// block, or prepend a new `---` block when the bundle has none.
+export function upsertMeta(text: string, key: string, value: string): string {
+  const lines = text.split(/\r?\n/);
+  const kv = `${key}: ${value}`;
+  const keyRe = new RegExp(`^${key}\\s*:`);
+  const fm = frontmatterRange(lines);
+  if (fm) {
+    for (let i = fm.open + 1; i < fm.close; i++) {
+      if (keyRe.test(lines[i].trim())) { lines[i] = kv; return lines.join("\n"); }
+    }
+    lines.splice(fm.close, 0, kv);
+    return lines.join("\n");
+  }
+  return `---\n${kv}\n---\n\n${text}`;
+}
+
+// Boilerplate for the "add file" buttons, keyed by role.
+export const BOILERPLATE: Record<string, { name: string; body: string }> = {
+  user: { name: "repro.c", body: '#include <stdio.h>\n\nint main(void) {\n    return 0;\n}\n' },
+  module: {
+    name: "mod.c",
+    body: '#include <linux/module.h>\n#include <linux/kernel.h>\n\n' +
+      'static int __init mod_init(void) {\n    pr_info("mod: loaded\\n");\n    return 0;\n}\n' +
+      'static void __exit mod_exit(void) { }\n\n' +
+      'module_init(mod_init);\nmodule_exit(mod_exit);\nMODULE_LICENSE("GPL");\n',
+  },
+  kconf: { name: "extra.config", body: 'CONFIG_DEBUG_INFO=y\n' },
+  init: { name: "init.sh", body: '#!/bin/bash\nset -e\n' },
+};
+
+// Append a ```role:name fenced block (blank-line separated) to the bundle text.
+export function appendFile(text: string, role: string, name: string, body: string): string {
+  const block = "```" + role + ":" + name + "\n" + body.replace(/\n+$/, "") + "\n```\n";
+  const base = text.replace(/\s+$/, "");
+  return base === "" ? block : base + "\n\n" + block;
+}
