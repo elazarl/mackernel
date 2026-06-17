@@ -7,6 +7,8 @@ export default defineConfig({
   plugins: [react()],
   build: { outDir: "dist", emptyOutDir: true },
   server: {
+    // Allow importing the spec from the repo's docs/ (outside the ui root) via ?raw.
+    fs: { allow: ["..", "../..", "../../.."] },
     proxy: {
       "/api": { target: "http://127.0.0.1:8087", changeOrigin: true },
     },

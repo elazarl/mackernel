@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   Bar, BarChart, CartesianGrid, Legend, Line, LineChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -7,6 +9,8 @@ import {
   eventsUrl, getJob, getLog, getMetrics, getPeaks, gib, hasToken, Job, listJobs,
   mib, Peak, Sample, setToken, submit,
 } from "./api";
+import { parseBundle, ParsedBundle, rolesOf } from "./bundle";
+import specMd from "../../../docs/reproducer-spec.md?raw";
 
 const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
 const LOG_KINDS = ["compile", "dmesg", "exec"] as const;
@@ -65,6 +69,10 @@ function Dashboard() {
   const [peaks, setPeaks] = useState<Peak[]>([]);
   const [sel, setSel] = useState<number | null>(null);
   const [bundle, setBundle] = useState("");
+  const [editing, setEditing] = useState(true);
+  const [showSpec, setShowSpec] = useState(false);
+  const parsed = useMemo(() => parseBundle(bundle), [bundle]);
+  const showRaw = editing || !bundle.trim();
 
   useEffect(() => {
     const tick = async () => {
@@ -79,6 +87,7 @@ function Dashboard() {
     if (!bundle.trim()) return;
     const { id } = await submit(bundle);
     setBundle("");
+    setEditing(true);
     setSel(id);
     setJobs(await listJobs());
   };
@@ -86,14 +95,30 @@ function Dashboard() {
   return (
     <div className="wrap">
       <style>{CSS}</style>
-      <h1>mackernel — reproducer runner</h1>
+      <div className="topbar">
+        <h1>mackernel — reproducer runner</h1>
+        <button className="linkbtn" onClick={() => setShowSpec(true)}>Spec</button>
+      </div>
+      {showSpec && <SpecModal onClose={() => setShowSpec(false)} />}
       <div className="cols">
         <div className="left">
           <section className="card">
-            <h2>Submit a bundle</h2>
-            <textarea value={bundle} onChange={(e) => setBundle(e.target.value)}
-              placeholder="paste a SKILL.md-style bundle (---metadata---, user:/module:/kconf:/init: blocks)" />
-            <button onClick={onSubmit}>Run reproducer</button>
+            <div className="cardhead">
+              <h2>Submit a bundle</h2>
+              {bundle.trim() && (
+                <button className="linkbtn" onClick={() => setEditing((e) => !e)}>
+                  {showRaw ? "Show structured" : "Edit raw"}
+                </button>
+              )}
+            </div>
+            {showRaw ? (
+              <textarea value={bundle} onChange={(e) => setBundle(e.target.value)}
+                onBlur={() => { if (parsed.files.length) setEditing(false); }}
+                placeholder="paste a SKILL.md-style bundle (---metadata---, user:/module:/kconf:/init: blocks)" />
+            ) : (
+              <BundlePreview parsed={parsed} />
+            )}
+            <button onClick={onSubmit} disabled={!bundle.trim()}>Run reproducer</button>
           </section>
           <section className="card">
             <h2>Jobs</h2>
@@ -207,6 +232,57 @@ function JobDetail({ id }: { id: number }) {
   );
 }
 
+// Structured view of a pasted bundle: frontmatter metadata + one tab per role present.
+function BundlePreview({ parsed }: { parsed: ParsedBundle }) {
+  const roles = useMemo(() => rolesOf(parsed), [parsed]);
+  const [tab, setTab] = useState(roles[0] ?? "");
+  useEffect(() => { if (!roles.includes(tab)) setTab(roles[0] ?? ""); }, [roles, tab]);
+
+  return (
+    <div className="preview">
+      {parsed.meta.length ? (
+        <dl className="meta">
+          {parsed.meta.map((m) => (
+            <div key={m.key}><dt>{m.key}</dt><dd>{m.value}</dd></div>
+          ))}
+        </dl>
+      ) : (
+        <p className="muted">no metadata block (builds LINUX_SRC as-is)</p>
+      )}
+
+      {roles.length ? (
+        <>
+          <div className="tabs">
+            {roles.map((r) => (
+              <button key={r} className={tab === r ? "tab active" : "tab"} onClick={() => setTab(r)}>{r}</button>
+            ))}
+          </div>
+          {parsed.files.filter((f) => f.role === tab).map((f, idx) => (
+            <div key={idx}>
+              <div className="fname">{f.name}</div>
+              <pre className="log">{f.body}</pre>
+            </div>
+          ))}
+        </>
+      ) : (
+        <p className="muted">no code blocks detected</p>
+      )}
+    </div>
+  );
+}
+
+// Modal overlay rendering the embedded reproducer spec (docs/reproducer-spec.md).
+function SpecModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body" onClick={(e) => e.stopPropagation()}>
+        <button className="modal-close" onClick={onClose} aria-label="close">×</button>
+        <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{specMd}</ReactMarkdown></div>
+      </div>
+    </div>
+  );
+}
+
 function toSample(v: any): Sample {
   return v.rss_bytes != null ? v : { ts_ms: v.ts_ms, rss_bytes: v.rss, disk_bytes: v.disk };
 }
@@ -243,4 +319,23 @@ const CSS = `
   .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
   .tab { background: #21262d; color: #c9d1d9; margin: 0; } .tab.active { background: #1f6feb; }
   .log { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; max-height: 360px; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; }
+  .topbar { display: flex; align-items: baseline; gap: 12px; }
+  .cardhead { display: flex; align-items: center; justify-content: space-between; }
+  .linkbtn { background: none; border: 0; color: #58a6ff; cursor: pointer; padding: 0; margin: 0; font-size: 13px; text-decoration: underline; }
+  .preview { margin-bottom: 8px; }
+  .meta { margin: 0 0 8px; } .meta > div { display: flex; gap: 8px; padding: 2px 0; }
+  .meta dt { color: #8b949e; min-width: 64px; } .meta dd { margin: 0; font-family: ui-monospace, monospace; word-break: break-all; }
+  .fname { color: #8b949e; font-family: ui-monospace, monospace; font-size: 12px; margin: 8px 0 2px; }
+  .modal { position: fixed; inset: 0; background: rgba(1, 4, 9, .7); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; z-index: 10; }
+  .modal-body { background: #161b22; border: 1px solid #30363d; border-radius: 8px; max-width: 820px; width: 100%; padding: 20px 28px 28px; position: relative; }
+  .modal-close { position: absolute; top: 6px; right: 12px; background: none; border: 0; color: #8b949e; font-size: 24px; line-height: 1; cursor: pointer; margin: 0; padding: 4px; }
+  .md { color: #c9d1d9; } .md a { color: #58a6ff; }
+  .md h1, .md h2, .md h3 { color: #c9d1d9; text-transform: none; letter-spacing: 0; }
+  .md h1 { font-size: 20px; } .md h2 { font-size: 16px; } .md h3 { font-size: 14px; }
+  .md table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+  .md th, .md td { border: 1px solid #30363d; padding: 4px 9px; text-align: left; }
+  .md th { background: #21262d; }
+  .md code { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 1px 4px; font-family: ui-monospace, monospace; font-size: 12px; }
+  .md pre { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; overflow: auto; }
+  .md pre code { border: 0; padding: 0; background: none; }
 `;
