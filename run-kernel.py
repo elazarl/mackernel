@@ -67,6 +67,15 @@ def enforce_hardened(meta: dict) -> dict:
     return meta
 
 
+def _stage(path: Path, content: str) -> Path:
+    """Write a staged bundle file, creating parent dirs first. Role filenames may
+    contain '/' (e.g. `kconf:drivers/misc/Kconfig`), so the target's parent dir
+    might not exist yet -- without this, write_text() raises FileNotFoundError."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return path
+
+
 # ----------------------------------------------------------------------------
 # Interactive mode (no bundle argument): boot to a serial console.
 # ----------------------------------------------------------------------------
@@ -293,7 +302,7 @@ def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool) -
     moddir = Path(tempfile.mkdtemp(prefix=".mk-mod-", dir=HERE))
     stems = []
     for name, content in modfiles:
-        (moddir / name).write_text(content)
+        _stage(moddir / name, content)
         stems.append(Path(name).stem)
     (moddir / "Makefile").write_text("".join(f"obj-m += {s}.o\n" for s in stems))
 
@@ -380,8 +389,10 @@ def run_bundle(src, args) -> int:
     env = {**os.environ, "LINUX_SRC": str(tree)}
     fragments = []
     for idx, (name, content) in enumerate(b.files["kconf"]):
-        fp = scratch / f"frag{idx}-{name}"
-        fp.write_text(content)
+        # The fragment's on-disk name is synthetic (configure-kernel.py merges by
+        # path), so flatten to the basename -- a `kconf:drivers/misc/Kconfig` block
+        # becomes frag0-Kconfig rather than a nested path.
+        fp = _stage(scratch / f"frag{idx}-{Path(name).name}", content)
         fragments.append(fp)
     # configure + build output -> compile.log (append) when a log dir is set.
     clog = open(log_dir / "compile.log", "w") if log_dir else None
@@ -418,9 +429,7 @@ def run_bundle(src, args) -> int:
     # 3. Compile userspace C into one static binary; copy other user: files too.
     user_files = []
     for name, content in b.files["user"]:
-        p = scratch / name
-        p.write_text(content)
-        user_files.append(p)
+        user_files.append(_stage(scratch / name, content))
     binary = None
     if any(p.suffix == ".c" for p in user_files):
         cs = [p for p in user_files if p.suffix == ".c"]
@@ -436,8 +445,7 @@ def run_bundle(src, args) -> int:
     init_path = None
     if b.files["init"]:
         init_name, content = b.files["init"][0]
-        init_path = scratch / init_name
-        init_path.write_text(content)
+        init_path = _stage(scratch / init_name, content)
     data_files = [p for p in user_files if p.suffix != ".c"]
 
     # 6. Boot and run.
