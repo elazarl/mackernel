@@ -290,10 +290,12 @@ def sandbox_mode() -> str:
     return m
 
 
-def sandbox_prefix(arch: str, *, run_dir, files, interactive: bool = False) -> list[str]:
+def sandbox_prefix(arch: str, *, run_dir, files, writable=(), interactive: bool = False) -> list[str]:
     """Command prefix that confines the qemu process, prepended to the qemu argv.
     Empty when MK_SANDBOX is off. `run_dir` is bind-mounted read-write (serial log
-    + -snapshot scratch); `files` (kernel image / cloud image / seed) read-only.
+    + -snapshot scratch); `writable` lists extra dirs to bind read-write (e.g. a
+    `--log-dir` outside run_dir, where qemu writes the serial log); `files` (kernel
+    image / cloud image / seed) read-only.
     Raises SystemExit if a requested tool is unavailable (never silently unsandboxed)."""
     mode = sandbox_mode()
     if mode == "off":
@@ -314,10 +316,10 @@ def sandbox_prefix(arch: str, *, run_dir, files, interactive: bool = False) -> l
                    "-p", "MemoryMax=3G", "-p", "CPUQuota=400%", "-p", "TasksMax=512", "--"]
     if "bwrap" in parts:
         _require("bwrap", "linux")
-        prefix += _bwrap_args(run_dir, files, interactive)
+        prefix += _bwrap_args(run_dir, files, writable, interactive)
     if "seatbelt" in parts:
         _require("sandbox-exec", "mac")
-        prefix += _seatbelt_args(run_dir, files)
+        prefix += _seatbelt_args(run_dir, files, writable)
     return prefix
 
 
@@ -329,7 +331,7 @@ def _require(tool: str, need_os: str) -> None:
         raise SystemExit(f"MK_SANDBOX: '{tool}' not found on PATH -- install it or use MK_SANDBOX=off")
 
 
-def _bwrap_args(run_dir: Path, files, interactive: bool) -> list[str]:
+def _bwrap_args(run_dir: Path, files, writable, interactive: bool) -> list[str]:
     """bubblewrap: read-only system dirs, writable run_dir + tmpfs /tmp, host net
     kept (slirp hostfwd binds a host loopback port, so we must NOT --unshare-net),
     /dev/kvm passed through when present. New PID namespace; new session only when
@@ -346,6 +348,14 @@ def _bwrap_args(run_dir: Path, files, interactive: bool) -> list[str]:
         args += ["--dev-bind", "/dev/kvm", "/dev/kvm"]
     args += ["--bind", str(run_dir), str(run_dir)]
     bound = {run_dir}
+    # Extra writable dirs (e.g. a --log-dir outside run_dir): bound after the /tmp
+    # tmpfs so a log dir living under /tmp isn't shadowed by it.
+    for w in writable:
+        d = Path(w).resolve()
+        if d in bound or run_dir in d.parents or not d.is_dir():
+            continue
+        bound.add(d)
+        args += ["--bind", str(d), str(d)]
     for f in files:
         d = Path(f).resolve().parent
         if d in bound or run_dir in d.parents or not d.is_dir():
@@ -357,7 +367,7 @@ def _bwrap_args(run_dir: Path, files, interactive: bool) -> list[str]:
     return args
 
 
-def _seatbelt_args(run_dir: Path, files) -> list[str]:
+def _seatbelt_args(run_dir: Path, files, writable) -> list[str]:
     """macOS Seatbelt: a robust denylist (allow-default, then deny the dangerous
     vectors). A tight deny-default allow-list is impractical here -- on modern
     macOS the dyld shared cache lives under version-specific Cryptexes paths, so
@@ -368,10 +378,11 @@ def _seatbelt_args(run_dir: Path, files) -> list[str]:
     `files` is accepted for symmetry with the Linux path; default-allow covers it."""
     home = os.path.expanduser("~")
     tmp = os.environ.get("TMPDIR", "/tmp")
+    extra = "".join(f' (subpath "{Path(w).resolve()}")' for w in writable)
     profile = f'''(version 1)
 (allow default)
 (deny file-write* (subpath "{home}"))
-(allow file-write* (subpath "{run_dir}") (subpath "{tmp}"))
+(allow file-write* (subpath "{run_dir}") (subpath "{tmp}"){extra})
 (deny file-read* (subpath "{home}/.ssh") (subpath "{home}/.aws") (subpath "{home}/.gnupg"))
 '''
     f = tempfile.NamedTemporaryFile("w", suffix=".sb", prefix="mk-seatbelt-", delete=False)

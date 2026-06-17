@@ -60,6 +60,7 @@ export function App() {
                   #{j.id} <em>{j.status}</em>
                   {j.phase && j.status === "running" && <span className="ph"> · {j.phase}</span>}
                   {j.exit_code != null && <span className="ph"> · exit {j.exit_code}</span>}
+                  {j.reaped_ms != null && <span className="ph"> · logs expired</span>}
                 </li>
               ))}
             </ul>
@@ -155,6 +156,7 @@ function JobDetail({ id }: { id: number }) {
             <button key={k} className={logKind === k ? "tab active" : "tab"} onClick={() => setLogKind(k)}>{k}</button>
           ))}
         </div>
+        {job?.reaped_ms != null && <p className="muted">logs expired (job dir reclaimed after retention)</p>}
         <pre className="log">{logText}</pre>
       </section>
     </div>

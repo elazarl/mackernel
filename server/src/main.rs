@@ -89,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tokio::spawn(scheduler_loop(state.clone(), rx));
+    tokio::spawn(cleanup_loop(state.clone()));
 
     // /api/* requires the bearer token (when configured); the embedded UI is
     // served unauthenticated so it can load and prompt for the token.
@@ -359,7 +360,71 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
     st.db.finish(id, now_ms(), outcome, exit, ram, disk)?;
     st.bus.publish(id, json!({ "kind": "done", "status": outcome, "exit": exit,
                                "ram_peak": ram, "disk_peak": disk }).to_string());
+    // Reclaim the per-job kernel worktree (the ~3 GB build tree) now that the job is
+    // done; logs + metrics + the DuckDB row stay. Each job owns its MK_WT_ROOT, so
+    // this never races another job. Absent for no-metadata jobs (built in LINUX_SRC).
+    if !st.cfg.keep_worktrees {
+        let wt = dir.join("wt");
+        if wt.exists() {
+            match tokio::fs::remove_dir_all(&wt).await {
+                Ok(()) => {
+                    info!("job {id}: reclaimed worktree {}", wt.display());
+                    let _ = st.db.add_event(id, now_ms(), "reclaimed", "worktree removed");
+                    // Drop the now-dangling worktree registration so `.git/worktrees`
+                    // doesn't accumulate prunable entries between jobs.
+                    let _ = tokio::process::Command::new("git")
+                        .arg("-C").arg(&st.cfg.linux_src).arg("worktree").arg("prune")
+                        .output().await;
+                }
+                Err(e) => error!("job {id}: worktree reclaim failed: {e}"),
+            }
+        }
+    }
     st.bus.close(id);
     info!("job {id}: {outcome} (exit={:?}, ram_peak={ram}, disk_peak={disk})", exit);
     Ok(())
+}
+
+/// Periodic disk retention: delete the whole work/<id> dir (logs included) for jobs
+/// finished more than `retention_days` ago; the DuckDB row (status/peaks) is kept and
+/// flagged `reaped_ms`. Runs ~30 s after start, then hourly.
+async fn cleanup_loop(st: AppState) {
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let mut tick = tokio::time::interval(Duration::from_secs(3600));
+    loop {
+        tick.tick().await;
+        sweep(&st).await;
+    }
+}
+
+async fn sweep(st: &AppState) {
+    let cutoff = now_ms() - (st.cfg.retention_days as i64) * 86_400_000;
+    let ids = match st.db.reapable(cutoff) {
+        Ok(v) => v,
+        Err(e) => { error!("cleanup: reapable query failed: {e}"); return; }
+    };
+    let mut reaped = 0u64;
+    for id in ids {
+        let d = st.work.join(id.to_string());
+        // Path guard: only ever remove a dir that sits directly under the work root.
+        if d.parent() != Some(st.work.as_path()) {
+            error!("cleanup: refusing to remove out-of-tree path {}", d.display());
+            continue;
+        }
+        if d.exists() {
+            if let Err(e) = tokio::fs::remove_dir_all(&d).await {
+                error!("cleanup: rm {} failed: {e}", d.display());
+                continue;
+            }
+        }
+        let _ = st.db.mark_reaped(id, now_ms());
+        reaped += 1;
+    }
+    if reaped > 0 {
+        // Drop git-worktree registrations left behind by reclaimed/reaped worktrees.
+        let _ = tokio::process::Command::new("git")
+            .arg("-C").arg(&st.cfg.linux_src).arg("worktree").arg("prune")
+            .output().await;
+        info!("cleanup: reaped {reaped} job dir(s) finished >{} days ago", st.cfg.retention_days);
+    }
 }

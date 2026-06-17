@@ -21,6 +21,7 @@ pub struct Job {
     pub exit_code: Option<i64>,
     pub ram_peak: i64,
     pub disk_peak: i64,
+    pub reaped_ms: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -56,6 +57,7 @@ impl Db {
                 disk_peak BIGINT NOT NULL DEFAULT 0,
                 submitter VARCHAR
             );
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS reaped_ms BIGINT;
             CREATE TABLE IF NOT EXISTS events (
                 job_id BIGINT NOT NULL, ts_ms BIGINT NOT NULL,
                 phase VARCHAR NOT NULL, message VARCHAR
@@ -138,7 +140,7 @@ impl Db {
     pub fn get_job(&self, id: i64) -> Result<Option<Job>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms
              FROM jobs WHERE id=?",
         )?;
         let mut rows = stmt.query(duckdb::params![id])?;
@@ -152,7 +154,7 @@ impl Db {
     pub fn list_jobs(&self) -> Result<Vec<Job>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms
              FROM jobs ORDER BY id DESC",
         )?;
         let mut rows = stmt.query([])?;
@@ -197,6 +199,27 @@ impl Db {
         )?;
         Ok(())
     }
+
+    /// Finished jobs older than `before_ms` whose on-disk dir hasn't been reaped yet.
+    pub fn reapable(&self, before_ms: i64) -> Result<Vec<i64>> {
+        let c = self.lock();
+        let mut stmt = c.prepare(
+            "SELECT id FROM jobs WHERE finished_ms IS NOT NULL AND finished_ms < ? AND reaped_ms IS NULL ORDER BY id",
+        )?;
+        let mut rows = stmt.query(duckdb::params![before_ms])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(r.get(0)?);
+        }
+        Ok(out)
+    }
+
+    /// Record that a job's on-disk dir (logs included) was removed by the sweep.
+    pub fn mark_reaped(&self, id: i64, ts_ms: i64) -> Result<()> {
+        self.lock()
+            .execute("UPDATE jobs SET reaped_ms=? WHERE id=?", duckdb::params![ts_ms, id])?;
+        Ok(())
+    }
 }
 
 fn row_to_job(r: &duckdb::Row<'_>) -> Result<Job> {
@@ -210,5 +233,6 @@ fn row_to_job(r: &duckdb::Row<'_>) -> Result<Job> {
         exit_code: r.get(6)?,
         ram_peak: r.get(7)?,
         disk_peak: r.get(8)?,
+        reaped_ms: r.get(9)?,
     })
 }

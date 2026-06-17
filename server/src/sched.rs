@@ -12,6 +12,10 @@ pub struct Cfg {
     pub max_jobs: usize,    // hard cap regardless of resources
     pub est_ram: u64,       // default per-job RAM estimate (refined by learned peaks)
     pub est_disk: u64,      // default per-job disk estimate
+    // Disk cleanup:
+    pub keep_worktrees: bool,   // skip reclaiming work/<id>/wt on job finish
+    pub retention_days: u64,    // delete a finished job's whole dir after this many days
+    pub linux_src: std::path::PathBuf, // kernel repo to `git worktree prune`
 }
 
 impl Cfg {
@@ -20,12 +24,17 @@ impl Cfg {
             std::env::var(k).ok().and_then(|v| v.parse::<f64>().ok())
                 .map(|gb| (gb * GB as f64) as u64).unwrap_or(d)
         };
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         Cfg {
             ram_reserve: g("MK_RAM_RESERVE_GB", 2 * GB),
             disk_reserve: g("MK_DISK_RESERVE_GB", 5 * GB),
             max_jobs: std::env::var("MK_MAX_JOBS").ok().and_then(|v| v.parse().ok()).unwrap_or(4),
             est_ram: g("MK_EST_RAM_GB", 3 * GB),
             est_disk: g("MK_EST_DISK_GB", 3 * GB),
+            keep_worktrees: std::env::var("MK_KEEP_WORKTREES").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false),
+            retention_days: std::env::var("MK_JOB_RETENTION_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(30),
+            linux_src: std::path::PathBuf::from(
+                std::env::var("MK_LINUX_SRC").unwrap_or_else(|_| format!("{home}/linux"))),
         }
     }
 }

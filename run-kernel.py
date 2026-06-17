@@ -157,10 +157,13 @@ def parse_bundle(path: Path) -> Bundle:
             i += 1
 
     # Second pass: find the metadata block. Consider every line that is exactly
-    # `---` and outside a fence; for each consecutive pair, the inner lines must
-    # all be `key: value` (or blank) and include >=1 recognized key.
+    # `---` at column 0 (no leading indent) and outside a fence; for each
+    # consecutive pair, the inner lines must all be `key: value` (or blank) and
+    # include >=1 recognized key. The column-0 rule matches YAML front-matter and
+    # git cover-letter convention while ignoring `---` inside an indented markdown
+    # code block (e.g. a documentation example of the metadata syntax).
     dashes = [idx for idx, ln in enumerate(lines)
-              if ln.strip() == "---" and idx not in in_fence_lines]
+              if ln.rstrip() == "---" and idx not in in_fence_lines]
     for a, c in zip(dashes, dashes[1:]):
         parsed = _parse_kv(lines[a + 1:c])
         if parsed is not None and (META_KEYS & parsed.keys()):

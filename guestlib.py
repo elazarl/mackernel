@@ -131,7 +131,10 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
         "-monitor", "none",
     ]
     # Optional outer sandbox confining the qemu process (MK_SANDBOX); empty by default.
-    prefix = mklib.sandbox_prefix(arch, run_dir=HERE, files=[kimg, img, seed])
+    # The serial log may live outside HERE (the service's --log-dir), so bind its
+    # dir read-write or qemu can't create the log inside the jail.
+    prefix = mklib.sandbox_prefix(arch, run_dir=HERE, files=[kimg, img, seed],
+                                  writable=[Path(serial_log).resolve().parent])
     if prefix:
         log(f"sandbox: {os.environ.get('MK_SANDBOX')} ({prefix[0]})")
     log(f"booting kernel ({arch}, accel={accel}; serial -> {serial_log.name}) ...")

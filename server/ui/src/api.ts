@@ -8,6 +8,7 @@ export interface Job {
   exit_code: number | null;
   ram_peak: number;
   disk_peak: number;
+  reaped_ms: number | null;
 }
 export interface Sample { ts_ms: number; rss_bytes: number; disk_bytes: number; }
 export interface Peak { id: number; ram_peak: number; disk_peak: number; status: string; }
