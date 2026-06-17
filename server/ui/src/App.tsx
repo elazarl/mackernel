@@ -16,7 +16,10 @@ import {
 import specMd from "../../../docs/reproducer-spec.md?raw";
 
 const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
-const LOG_KINDS = ["fetch", "compile", "dmesg", "exec"] as const;
+// `run` is the run-kernel.py orchestrator log: it always carries the failure reason
+// (a die() message or an uncaught traceback), even for early crashes that never reach
+// the phase-specific logs — so it's the reliable place to look when a job fails.
+const LOG_KINDS = ["fetch", "compile", "dmesg", "exec", "run"] as const;
 type LogKind = (typeof LOG_KINDS)[number];
 
 const statusColor = (s: string) =>
@@ -167,9 +170,11 @@ function JobDetail({ id }: { id: number }) {
   const [logKind, setLogKind] = useState<LogKind>("exec");
   const [logText, setLogText] = useState("");
   const t0 = useRef<number>(0);
+  const userPicked = useRef(false);
 
   useEffect(() => {
     setSamples([]); setJob(null);
+    userPicked.current = false;
     let live = true;
     (async () => {
       const j = await getJob(id); if (!live) return; setJob(j);
@@ -187,6 +192,12 @@ function JobDetail({ id }: { id: number }) {
     };
     return () => { live = false; es.close(); };
   }, [id]);
+
+  // On failure, jump to the orchestrator log (the reliable failure reason) unless the
+  // user has already chosen a tab themselves.
+  useEffect(() => {
+    if (!userPicked.current && job?.status === "failed") setLogKind("run");
+  }, [job?.status]);
 
   useEffect(() => { getLog(id, logKind).then(setLogText); }, [id, logKind, job?.status]);
 
@@ -228,7 +239,8 @@ function JobDetail({ id }: { id: number }) {
       <section className="card">
         <div className="tabs">
           {LOG_KINDS.map((k) => (
-            <button key={k} className={logKind === k ? "tab active" : "tab"} onClick={() => setLogKind(k)}>{k}</button>
+            <button key={k} className={logKind === k ? "tab active" : "tab"}
+              onClick={() => { userPicked.current = true; setLogKind(k); }}>{k}</button>
           ))}
         </div>
         {job?.reaped_ms != null && <p className="muted">logs expired (job dir reclaimed after retention)</p>}
