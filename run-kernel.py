@@ -296,7 +296,8 @@ def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = Non
 # Build a kernel module (.ko) against the (built) kernel tree
 # ----------------------------------------------------------------------------
 
-def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool) -> list[Path]:
+def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool,
+                  log_file=None) -> list[Path]:
     """Build each module .c into its own .ko via `make -C <tree> M=<dir> modules`.
     Returns the host paths of the .ko files (in declaration order)."""
     moddir = Path(tempfile.mkdtemp(prefix=".mk-mod-", dir=HERE))
@@ -324,7 +325,11 @@ def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool) -
         f'make -C /linux M=/mod ARCH={ka} CC=gcc-15 modules',
     ]
     log(f"building module(s) {', '.join(s + '.ko' for s in stems)} ...")
-    if run(cmd).returncode != 0:
+    cap = {"stdout": log_file, "stderr": subprocess.STDOUT} if log_file else {}
+    if log_file:
+        print(f"\n=== building module(s): {', '.join(s + '.ko' for s in stems)} ===",
+              file=log_file, flush=True)
+    if run(cmd, **cap).returncode != 0:
         die("kernel module build failed")
     kos = [moddir / f"{s}.ko" for s in stems]
     for ko in kos:
@@ -413,8 +418,8 @@ def run_bundle(src, args) -> int:
         if run([sys.executable, str(HERE / "build-kernel.py")], cwd=HERE, env=env,
                **cap).returncode != 0:
             die("kernel build failed")
-    if clog:
-        clog.close()
+    # Keep compile.log open through the userspace + module container builds below so
+    # their podman output is captured there too (closed after step 4).
 
     image, is_local = mklib.resolve_image(arch)
 
@@ -435,10 +440,13 @@ def run_bundle(src, args) -> int:
         cs = [p for p in user_files if p.suffix == ".c"]
         binname = cs[0].stem if len(cs) == 1 else bundle_path.stem
         binary = g.compile_c(user_files, binname, image, is_local,
-                             mklib.platform_args(arch), [])
+                             mklib.platform_args(arch), [], log_file=clog)
 
     # 4. Build kernel module(s).
-    kos = build_modules(b.files["module"], tree, arch, image, is_local) if b.files["module"] else []
+    kos = build_modules(b.files["module"], tree, arch, image, is_local,
+                        log_file=clog) if b.files["module"] else []
+    if clog:
+        clog.close()
 
     # 5. Init script (+ any non-.c user data files) staged for the guest.
     init_name = None

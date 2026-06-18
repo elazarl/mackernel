@@ -175,13 +175,16 @@ def ensure_seed(seed: Path) -> None:
 
 
 def compile_c(srcs, out_name: str, image: str, is_local: bool,
-              plat_args: list[str], cflags: list[str]) -> Path:
+              plat_args: list[str], cflags: list[str], log_file=None) -> Path:
     """Compile all .c files in `srcs` together into one static binary named
     `out_name`, inside the build container; non-.c files (headers, data) are
     copied alongside so includes resolve. Returns the host path of the binary.
 
     Builds for the guest's architecture (plat_args is empty for native, or
-    --platform for an emulated foreign arch), so the binary matches the kernel."""
+    --platform for an emulated foreign arch), so the binary matches the kernel.
+
+    When `log_file` is given, the container's output is captured there (the job's
+    compile.log) instead of inheriting stdio."""
     builddir = Path(tempfile.mkdtemp(prefix=".mk-build-", dir=HERE))
     cfiles = []
     for s in srcs:
@@ -203,7 +206,10 @@ def compile_c(srcs, out_name: str, image: str, is_local: bool,
         "-o", out_name, *cfiles,
     ]
     log(f"compiling {', '.join(cfiles)} statically in {image} ...")
-    if run(podman).returncode != 0:
+    cap = {"stdout": log_file, "stderr": subprocess.STDOUT} if log_file else {}
+    if log_file:
+        print(f"\n=== compiling userspace: {', '.join(cfiles)} ===", file=log_file, flush=True)
+    if run(podman, **cap).returncode != 0:
         shutil.rmtree(builddir, ignore_errors=True)
         die("static compilation failed")
     binary = builddir / out_name
