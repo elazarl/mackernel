@@ -10,8 +10,8 @@ import {
   mib, Peak, Sample, setToken, submit,
 } from "./api";
 import {
-  appendFile, BOILERPLATE, githubTree, KERNEL_URL, parseBundle, ParsedBundle,
-  rolesOf, upsertMeta,
+  appendFile, BOILERPLATE, EXAMPLES, githubTree, KERNEL_URL, parseBundle,
+  ParsedBundle, rolesOf, upsertMeta,
 } from "./bundle";
 import specMd from "../../../docs/reproducer-spec.md?raw";
 
@@ -116,6 +116,15 @@ function Dashboard() {
                   {showRaw ? "Show structured" : "Edit raw"}
                 </button>
               )}
+            </div>
+            <div className="examples">
+              <span className="exlabel">Examples:</span>
+              {EXAMPLES.map((ex) => (
+                <button key={ex.label} className="chip" title={ex.blurb}
+                  onClick={() => { setBundle(ex.bundle); setEditing(false); }}>
+                  {ex.label}
+                </button>
+              ))}
             </div>
             {showRaw ? (
               <>
@@ -382,6 +391,8 @@ const CSS = `
   .meta { margin: 0 0 8px; } .meta > div { display: flex; gap: 8px; padding: 2px 0; }
   .meta dt { color: #8b949e; min-width: 64px; } .meta dd { margin: 0; font-family: ui-monospace, monospace; word-break: break-all; }
   .fname { color: #8b949e; font-family: ui-monospace, monospace; font-size: 12px; margin: 8px 0 2px; }
+  .examples { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
+  .exlabel { color: #8b949e; font-size: 12px; }
   .bartools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
   .chip { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 3px 9px; font-size: 12px; margin: 0; font-family: ui-monospace, monospace; cursor: pointer; }
   .chip:hover { border-color: #58a6ff; }

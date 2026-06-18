@@ -152,6 +152,130 @@ export const BOILERPLATE: Record<string, { name: string; body: string }> = {
   init: { name: "init.sh", body: '#!/bin/bash\nset -e\n' },
 };
 
+// Ready-to-run example reproducers, loadable from the UI with one click. Each is a
+// complete bundle string (see docs/reproducer-spec.md); `label`/`blurb` describe it.
+export interface Example { label: string; blurb: string; bundle: string; }
+
+export const EXAMPLES: Example[] = [
+  {
+    label: "greeter",
+    blurb: "userspace + module + init; no kernel pinned (builds LINUX_SRC)",
+    bundle: `# greeter — minimal bundle
+
+Builds a tiny userspace program and a kernel module, boots, loads the module,
+and runs the start script. The program exits 1, which becomes the run's status.
+
+\`\`\`user:file.c
+#include <stdio.h>
+#include "file.h"
+
+int main(void) {
+    printf("hello from userspace, returning %d\\n", R);
+    return R;
+}
+\`\`\`
+
+\`\`\`user:file.h
+#define R 1
+\`\`\`
+
+\`\`\`module:greeter.c
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+
+static int __init greeter_init(void)
+{
+    pr_info("greeter: module loaded\\n");
+    return 0;
+}
+
+static void __exit greeter_exit(void)
+{
+    pr_info("greeter: module unloaded\\n");
+}
+
+module_init(greeter_init);
+module_exit(greeter_exit);
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("mackernel bundle example module");
+\`\`\`
+
+\`\`\`init:init.sh
+#!/bin/bash
+set -e
+echo "loaded modules:"; lsmod | grep greeter || true
+echo "kernel says:"; sudo dmesg | grep greeter || true
+./file
+\`\`\`
+`,
+  },
+  {
+    label: "null-deref panic",
+    blurb: "module dereferences NULL on load; pinned to v6.12",
+    bundle: `---
+commit: v6.12
+---
+
+# null-deref — a module that oopses on insmod
+
+Pins the kernel to the v6.12 tag, then loads a module whose init deliberately
+writes through a NULL pointer. The oops shows up in \`dmesg\`.
+
+\`\`\`kconf:extra.config
+CONFIG_PRINTK_CALLER=y
+\`\`\`
+
+\`\`\`module:oops.c
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+
+static int __init oops_init(void)
+{
+    int *p = NULL;
+    pr_info("oops: about to dereference NULL\\n");
+    *p = 0xdead;          /* NULL pointer dereference */
+    return 0;
+}
+
+static void __exit oops_exit(void) { }
+
+module_init(oops_init);
+module_exit(oops_exit);
+MODULE_LICENSE("GPL");
+\`\`\`
+
+\`\`\`init:init.sh
+#!/bin/bash
+set -e
+sudo dmesg | grep -i -A20 'BUG\\|oops\\|null pointer' || true
+\`\`\`
+`,
+  },
+  {
+    label: "userspace syscall",
+    blurb: "userspace-only repro exercising a syscall; no module",
+    bundle: `# uname — userspace-only bundle
+
+No kernel pinned and no module — just a C program run in the guest. Reports the
+running kernel release via the \`uname(2)\` syscall.
+
+\`\`\`user:repro.c
+#include <stdio.h>
+#include <sys/utsname.h>
+
+int main(void) {
+    struct utsname u;
+    if (uname(&u) != 0) { perror("uname"); return 1; }
+    printf("kernel: %s %s\\n", u.sysname, u.release);
+    return 0;
+}
+\`\`\`
+`,
+  },
+];
+
 // Append a ```role:name fenced block (blank-line separated) to the bundle text.
 export function appendFile(text: string, role: string, name: string, body: string): string {
   const block = "```" + role + ":" + name + "\n" + body.replace(/\n+$/, "") + "\n```\n";

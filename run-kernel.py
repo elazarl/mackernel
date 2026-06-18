@@ -238,6 +238,10 @@ def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = Non
         if fl:
             print(f"[fetch] {msg}", file=fl, flush=True)
 
+    def have_commit(treeish: str) -> bool:
+        return run(["git", "-C", str(linux_src), "rev-parse", "--verify", "-q",
+                    f"{treeish}^{{commit}}"], capture_output=True, text=True).returncode == 0
+
     try:
         if url:
             remote = "mk-" + hashlib.sha1(url.encode()).hexdigest()[:8]
@@ -246,9 +250,13 @@ def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = Non
             if remote not in existing:
                 flog(f"adding remote {remote} -> {url}")
                 run(["git", "-C", str(linux_src), "remote", "add", remote, url], check=True)
-            flog(f"fetching {remote} (all refs) ...")
-            if run(["git", "-C", str(linux_src), "fetch", "--tags", remote], **cap).returncode != 0:
-                die(f"git fetch {remote} failed")
+            # Fetch only when the requested commit isn't already present locally.
+            if commit and have_commit(commit):
+                flog(f"commit {commit} already present, skipping fetch")
+            else:
+                flog(f"fetching {remote} (all refs) ...")
+                if run(["git", "-C", str(linux_src), "fetch", "--tags", remote], **cap).returncode != 0:
+                    die(f"git fetch {remote} failed")
 
         treeish = commit or "HEAD"
         sha = run(["git", "-C", str(linux_src), "rev-parse", "--verify", f"{treeish}^{{commit}}"],

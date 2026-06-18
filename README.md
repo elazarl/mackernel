@@ -205,8 +205,10 @@ The bundle can be a local file or an **http(s) URL** — lkml (`lore.kernel.org`
 `gist.github.com` page URLs are fetched in their raw form automatically, so you can point
 it straight at a reproducer someone posted.
 
-The file has an optional `---`-delimited metadata block (it may appear **anywhere**, so a
-patch-set cover letter works as a source) plus fenced code blocks tagged `role:filename`:
+The full bundle format is specified in [`docs/reproducer-spec.md`](docs/reproducer-spec.md)
+(also viewable via the **Spec** button in the server UI). In brief: the file has an optional
+`---`-delimited metadata block (it may appear **anywhere**, so a patch-set cover letter works
+as a source) plus fenced code blocks tagged `role:filename`:
 
 ````markdown
 ---
