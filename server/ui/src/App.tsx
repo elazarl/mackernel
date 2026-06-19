@@ -168,14 +168,17 @@ function Dashboard() {
         </div>
         <div className="right">
           {sel == null ? <p className="muted">Select a job to see live progress, metrics, and logs.</p>
-            : <JobDetail id={sel} />}
+            : <JobDetail id={sel} onEdit={(text) => {
+                setBundle(text); setEditing(true);
+                window.scrollTo({ top: 0, behavior: "smooth" });
+              }} />}
         </div>
       </div>
     </div>
   );
 }
 
-function JobDetail({ id }: { id: number }) {
+function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void }) {
   const [job, setJob] = useState<Job | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
@@ -238,7 +241,10 @@ function JobDetail({ id }: { id: number }) {
       </section>
       {bundleText.trim() && (
         <section className="card">
-          <h2>Reproducer</h2>
+          <div className="cardhead">
+            <h2>Reproducer</h2>
+            <button className="linkbtn" onClick={() => onEdit(bundleText)}>Edit reproducer</button>
+          </div>
           {bundle.files.length || bundle.meta.length
             ? <BundlePreview parsed={bundle} />
             : <pre className="log">{bundleText}</pre>}
