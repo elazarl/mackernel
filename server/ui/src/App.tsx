@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MDEditor from "@uiw/react-md-editor";
 import {
-  Bar, BarChart, CartesianGrid, Legend, Line, LineChart,
+  Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ReferenceLine,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
@@ -20,9 +20,10 @@ const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
 // `run` is the run-kernel.py orchestrator log: it always carries the failure reason
 // (a die() message or an uncaught traceback), even for early crashes that never reach
 // the phase-specific logs — so it's the reliable place to look when a job fails.
-// `issues` is server-side: a grep of every log for error/fatal/panic/sanitizer markers.
 // `dmesg` is the guest kernel ring buffer; `console` is the raw QEMU serial capture.
-const LOG_KINDS = ["fetch", "compile", "console", "dmesg", "exec", "run", "issues"] as const;
+// (`issues` — a server-side grep of all logs for error/panic/sanitizer markers — is
+// surfaced separately as a card at the top, not as a log tab.)
+const LOG_KINDS = ["fetch", "compile", "console", "dmesg", "exec", "run"] as const;
 type LogKind = (typeof LOG_KINDS)[number];
 
 const statusColor = (s: string) =>
@@ -170,12 +171,16 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
   const [logKind, setLogKind] = useState<LogKind>("exec");
   const [logText, setLogText] = useState("");
   const [bundleText, setBundleText] = useState("");
+  const [issues, setIssues] = useState("");
+  const [maxRepro, setMaxRepro] = useState(false);
+  // Phase start times (ms) keyed by phase name — used to mark the timeline.
+  const [phaseTs, setPhaseTs] = useState<Record<string, number>>({});
   const bundle = useMemo(() => parseBundle(bundleText), [bundleText]);
   const t0 = useRef<number>(0);
   const userPicked = useRef(false);
 
   useEffect(() => {
-    setSamples([]); setJob(null);
+    setSamples([]); setJob(null); setPhaseTs({});
     userPicked.current = false;
     let live = true;
     (async () => {
@@ -189,12 +194,18 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
       try {
         const v = JSON.parse(e.data);
         if (v.kind === "metric") setSamples((s) => [...s, v as any].map(toSample));
+        if (v.kind === "phase" && v.phase && v.ts_ms)
+          setPhaseTs((p) => (p[v.phase] ? p : { ...p, [v.phase]: v.ts_ms }));
         if (v.kind === "phase" || v.kind === "done") getJob(id).then(setJob);
       } catch {}
     };
     getLog(id, "bundle").then(setBundleText).catch(() => setBundleText(""));
     return () => { live = false; es.close(); };
   }, [id]);
+
+  // Issues: server-side grep of all logs. Refetch as the job advances.
+  useEffect(() => { getLog(id, "issues").then(setIssues).catch(() => setIssues("")); }, [id, job?.status]);
+  const hasIssues = issues.trim() !== "" && !issues.startsWith("no error");
 
   // On failure, jump to the orchestrator log (the reliable failure reason) unless the
   // user has already chosen a tab themselves.
@@ -209,9 +220,18 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
     RAM: +mib(s.rss_bytes ?? (s as any).rss),
     Disk: +mib(s.disk_bytes ?? (s as any).disk),
   }));
+  const marks = Object.entries(phaseTs)
+    .map(([phase, ts]) => ({ phase, t: Math.max(0, Math.round((ts - t0.current) / 1000)) }))
+    .sort((a, b) => a.t - b.t);
 
   return (
     <div>
+      {hasIssues && (
+        <section className="card issues-card">
+          <h2>⚠ Issues</h2>
+          <pre className="log">{issues}</pre>
+        </section>
+      )}
       <section className="card">
         <h2>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}</h2>
         <div className="stepper">
@@ -229,22 +249,41 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
         <section className="card">
           <div className="cardhead">
             <h2>Reproducer</h2>
-            <button className="linkbtn" onClick={() => onEdit(bundleText)}>Edit reproducer</button>
+            <span>
+              <button className="linkbtn" onClick={() => setMaxRepro(true)}>Maximize</button>
+              {" · "}
+              <button className="linkbtn" onClick={() => onEdit(bundleText)}>Edit reproducer</button>
+            </span>
           </div>
           {bundle.files.length || bundle.meta.length
             ? <BundlePreview parsed={bundle} />
             : <pre className="log">{bundleText}</pre>}
         </section>
       )}
+      {maxRepro && (
+        <div className="modal" onClick={() => setMaxRepro(false)}>
+          <div className="modal-body" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setMaxRepro(false)} aria-label="close">×</button>
+            <h2>Reproducer</h2>
+            {bundle.files.length || bundle.meta.length
+              ? <BundlePreview parsed={bundle} />
+              : <pre className="log">{bundleText}</pre>}
+          </div>
+        </div>
+      )}
       <section className="card">
         <h2>Resource usage</h2>
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={data}>
             <CartesianGrid strokeDasharray="3 3" stroke="#30363d" />
-            <XAxis dataKey="t" stroke="#8b949e" unit="s" />
+            <XAxis dataKey="t" type="number" domain={[0, "dataMax"]} stroke="#8b949e" unit="s" />
             <YAxis stroke="#8b949e" unit="M" />
             <Tooltip contentStyle={{ background: "#161b22", border: "1px solid #30363d" }} />
             <Legend />
+            {marks.map((m) => (
+              <ReferenceLine key={m.phase} x={m.t} stroke="#8b949e" strokeDasharray="4 3"
+                label={{ value: m.phase, position: "insideTopRight", fill: "#8b949e", fontSize: 10 }} />
+            ))}
             <Line type="monotone" dataKey="RAM" stroke="#58a6ff" dot={false} isAnimationActive={false} />
             <Line type="monotone" dataKey="Disk" stroke="#bc8cff" dot={false} isAnimationActive={false} />
           </LineChart>
@@ -383,6 +422,7 @@ const CSS = `
   .jobs em { color: #8b949e; font-style: normal; } .ph { color: #8b949e; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .muted { color: #8b949e; }
+  .issues-card { border-color: #f85149; } .issues-card h2 { color: #f85149; }
   .stepper { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
   .step { padding: 3px 9px; border-radius: 999px; border: 1px solid #30363d; color: #8b949e; font-size: 12px; }
   .step.cur { border-color: #d29922; color: #d29922; } .step.done { border-color: #3fb950; color: #3fb950; } .step.fail { border-color: #f85149; color: #f85149; }

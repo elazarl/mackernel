@@ -170,17 +170,22 @@ async fn get_log(State(st): State<AppState>, Path((id, kind)): Path<(i64, String
 /// grouped by source file. This replaces the old KASAN-only special case with a
 /// generic "anything interesting went wrong" view.
 fn collect_issues(logs: &std::path::Path) -> String {
-    const MARKERS: &[&str] = &[
-        "KASAN", "UBSAN", "KCSAN", "KFENCE", "KMSAN", "sanitizer",
+    // General markers apply to every log. Sanitizer markers only apply to the
+    // runtime logs: the build/fetch logs mention KASAN/sanitizer as compile
+    // flags (e.g. -fsanitize=kernel-address), which are not problems.
+    const GENERAL: &[&str] = &[
         "BUG:", "Oops", "panic", "general protection", "use-after-free",
         "WARNING:", "FATAL", "fatal", "Call Trace", "segfault", "error:", "Error",
     ];
+    const SANITIZER: &[&str] = &["KASAN", "UBSAN", "KCSAN", "KFENCE", "KMSAN", "sanitizer"];
     let mut out = String::new();
     for file in ["console.log", "dmesg.log", "exec.log", "compile.log", "fetch.log", "run.log"] {
         let Ok(content) = std::fs::read_to_string(logs.join(file)) else { continue };
+        let runtime = matches!(file, "console.log" | "dmesg.log" | "exec.log");
         let hits: Vec<&str> = content
             .lines()
-            .filter(|l| MARKERS.iter().any(|m| l.contains(m)))
+            .filter(|l| GENERAL.iter().any(|m| l.contains(m))
+                || (runtime && SANITIZER.iter().any(|m| l.contains(m))))
             .collect();
         if !hits.is_empty() {
             out.push_str(&format!("===== {file} ({} line(s)) =====\n", hits.len()));
@@ -389,7 +394,7 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
                     if let Some(phase) = v.get("phase").and_then(|p| p.as_str()) {
                         let _ = st.db.set_phase(id, phase);
                         let _ = st.db.add_event(id, now_ms(), phase, "");
-                        st.bus.publish(id, json!({ "kind": "phase", "phase": phase }).to_string());
+                        st.bus.publish(id, json!({ "kind": "phase", "phase": phase, "ts_ms": now_ms() }).to_string());
                     }
                     if let Some(e) = v.get("exit").and_then(|e| e.as_i64()) {
                         exit_from_progress = Some(e);
