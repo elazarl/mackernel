@@ -10,9 +10,21 @@ export interface Job {
   disk_peak: number;
   reaped_ms: number | null;
   summary: string | null;
+  // Provenance for jobs created from an external source (LKML candidate); null otherwise.
+  source_url: string | null;
+  title: string | null;
 }
 export interface Sample { ts_ms: number; rss_bytes: number; disk_bytes: number; }
 export interface Peak { id: number; ram_peak: number; disk_peak: number; status: string; }
+// A reproducer cover letter found on LKML, runnable with one click.
+export interface Candidate {
+  msgid: string;
+  list: string | null;
+  title: string | null;
+  source_url: string;
+  detected_ms: number;
+  job_id: number | null;
+}
 
 const TOKEN_KEY = "mk_token";
 export function token(): string {
@@ -52,6 +64,12 @@ export async function getJob(id: number): Promise<Job> {
 }
 export async function submit(bundle: string): Promise<{ id: number }> {
   return (await authed("/api/jobs", { method: "POST", body: bundle })).json();
+}
+export async function listCandidates(): Promise<Candidate[]> {
+  return (await authed("/api/candidates")).json();
+}
+export async function runCandidate(msgid: string): Promise<{ id: number }> {
+  return (await authed(`/api/candidates/${encodeURIComponent(msgid)}/run`, { method: "POST" })).json();
 }
 export async function getMetrics(id: number): Promise<Sample[]> {
   return (await authed(`/api/jobs/${id}/metrics`)).json();

@@ -25,6 +25,23 @@ pub struct Job {
     /// Natural-language summary (see src/summarize.rs): a preliminary one-liner when the
     /// job starts, replaced by a two-sentence summary (incl. output) when it finishes.
     pub summary: Option<String>,
+    /// Provenance, set for jobs created from an external source (LKML candidate): the
+    /// thread/permalink to link to, and the mail subject to label the row. NULL otherwise.
+    pub source_url: Option<String>,
+    pub title: Option<String>,
+}
+
+/// A cover letter found on LKML whose frontmatter matches the reproducer spec, shown
+/// on the site as a runnable candidate. `bundle` is omitted from the API list (it can
+/// be large); the UI only needs the metadata + link.
+#[derive(Serialize, Clone)]
+pub struct Candidate {
+    pub msgid: String,
+    pub list: Option<String>,
+    pub title: Option<String>,
+    pub source_url: String,
+    pub detected_ms: i64,
+    pub job_id: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -62,6 +79,11 @@ impl Db {
             );
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS reaped_ms BIGINT;
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS summary VARCHAR;
+            -- Provenance for jobs created from an external source (e.g. an LKML
+            -- candidate): the thread/permalink and the mail subject, surfaced as a
+            -- link + label in the UI. NULL for plain paste-box submissions.
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source_url VARCHAR;
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title VARCHAR;
             CREATE TABLE IF NOT EXISTS events (
                 job_id BIGINT NOT NULL, ts_ms BIGINT NOT NULL,
                 phase VARCHAR NOT NULL, message VARCHAR
@@ -69,6 +91,19 @@ impl Db {
             CREATE TABLE IF NOT EXISTS metrics (
                 job_id BIGINT NOT NULL, ts_ms BIGINT NOT NULL,
                 rss_bytes BIGINT NOT NULL, disk_bytes BIGINT NOT NULL
+            );
+            -- Every LKML message id the monitor has already evaluated, so it never
+            -- re-fetches/re-parses one across polls (qualifying or not).
+            CREATE TABLE IF NOT EXISTS lkml_seen (
+                msgid VARCHAR PRIMARY KEY, list VARCHAR, seen_ms BIGINT NOT NULL
+            );
+            -- Cover letters whose frontmatter matched the reproducer spec: shown on
+            -- the site as runnable candidates. `bundle` is the cover-letter text with
+            -- `thread:` already injected, so Run is a pass-through to create_job.
+            CREATE TABLE IF NOT EXISTS candidates (
+                msgid VARCHAR PRIMARY KEY, list VARCHAR, title VARCHAR,
+                source_url VARCHAR NOT NULL, bundle VARCHAR NOT NULL,
+                detected_ms BIGINT NOT NULL, job_id BIGINT
             );
             "#,
         )?;
@@ -80,11 +115,19 @@ impl Db {
     }
 
     pub fn create_job(&self, now_ms: i64, submitter: Option<&str>) -> Result<i64> {
+        self.create_job_full(now_ms, submitter, None, None)
+    }
+
+    /// Like `create_job`, but also records provenance (source link + title) for jobs
+    /// created from an external source such as an LKML candidate.
+    pub fn create_job_full(&self, now_ms: i64, submitter: Option<&str>,
+                           source_url: Option<&str>, title: Option<&str>) -> Result<i64> {
         let c = self.lock();
         let id: i64 = c.query_row("SELECT nextval('job_seq')", [], |r| r.get(0))?;
         c.execute(
-            "INSERT INTO jobs (id, created_ms, status, submitter) VALUES (?, ?, 'queued', ?)",
-            duckdb::params![id, now_ms, submitter],
+            "INSERT INTO jobs (id, created_ms, status, submitter, source_url, title)
+             VALUES (?, ?, 'queued', ?, ?, ?)",
+            duckdb::params![id, now_ms, submitter, source_url, title],
         )?;
         Ok(id)
     }
@@ -152,7 +195,7 @@ impl Db {
     pub fn get_job(&self, id: i64) -> Result<Option<Job>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, source_url, title
              FROM jobs WHERE id=?",
         )?;
         let mut rows = stmt.query(duckdb::params![id])?;
@@ -166,7 +209,7 @@ impl Db {
     pub fn list_jobs(&self) -> Result<Vec<Job>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, source_url, title
              FROM jobs ORDER BY id DESC",
         )?;
         let mut rows = stmt.query([])?;
@@ -232,6 +275,79 @@ impl Db {
             .execute("UPDATE jobs SET reaped_ms=? WHERE id=?", duckdb::params![ts_ms, id])?;
         Ok(())
     }
+
+    // --- LKML monitor: seen-set + candidates ---------------------------------
+
+    /// True if the monitor has already evaluated this message id (any prior poll).
+    pub fn lkml_seen(&self, msgid: &str) -> Result<bool> {
+        let c = self.lock();
+        let n: i64 = c.query_row(
+            "SELECT count(*) FROM lkml_seen WHERE msgid=?",
+            duckdb::params![msgid], |r| r.get(0))?;
+        Ok(n > 0)
+    }
+
+    /// Mark a message id as evaluated so it is never re-fetched. Idempotent.
+    pub fn lkml_mark_seen(&self, msgid: &str, list: &str, now_ms: i64) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO lkml_seen (msgid, list, seen_ms) VALUES (?, ?, ?)
+             ON CONFLICT (msgid) DO NOTHING",
+            duckdb::params![msgid, list, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Record a qualifying cover letter as a runnable candidate. Idempotent on msgid.
+    pub fn add_candidate(&self, msgid: &str, list: &str, title: &str,
+                         source_url: &str, bundle: &str, now_ms: i64) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO candidates (msgid, list, title, source_url, bundle, detected_ms)
+             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (msgid) DO NOTHING",
+            duckdb::params![msgid, list, title, source_url, bundle, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Candidates for the site, newest first (without the bundle text).
+    pub fn list_candidates(&self) -> Result<Vec<Candidate>> {
+        let c = self.lock();
+        let mut stmt = c.prepare(
+            "SELECT msgid, list, title, source_url, detected_ms, job_id
+             FROM candidates ORDER BY detected_ms DESC",
+        )?;
+        let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(Candidate {
+                msgid: r.get(0)?, list: r.get(1)?, title: r.get(2)?,
+                source_url: r.get(3)?, detected_ms: r.get(4)?, job_id: r.get(5)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The stored bundle text + (source_url, title) for a candidate, or None.
+    pub fn get_candidate_bundle(&self, msgid: &str) -> Result<Option<(String, String, Option<String>)>> {
+        let c = self.lock();
+        let mut stmt = c.prepare(
+            "SELECT bundle, source_url, title FROM candidates WHERE msgid=?",
+        )?;
+        let mut rows = stmt.query(duckdb::params![msgid])?;
+        if let Some(r) = rows.next()? {
+            Ok(Some((r.get(0)?, r.get(1)?, r.get(2)?)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Link a candidate to the job created from it (after Run).
+    pub fn set_candidate_job(&self, msgid: &str, job_id: i64) -> Result<()> {
+        self.lock().execute(
+            "UPDATE candidates SET job_id=? WHERE msgid=?",
+            duckdb::params![job_id, msgid],
+        )?;
+        Ok(())
+    }
 }
 
 fn row_to_job(r: &duckdb::Row<'_>) -> Result<Job> {
@@ -247,5 +363,7 @@ fn row_to_job(r: &duckdb::Row<'_>) -> Result<Job> {
         disk_peak: r.get(8)?,
         reaped_ms: r.get(9)?,
         summary: r.get(10)?,
+        source_url: r.get(11)?,
+        title: r.get(12)?,
     })
 }

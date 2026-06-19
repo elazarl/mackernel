@@ -3,6 +3,7 @@
 mod bus;
 mod db;
 mod embed;
+mod lkml;
 mod metrics;
 mod sched;
 mod summarize;
@@ -142,6 +143,12 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(scheduler_loop(state.clone(), rx));
     tokio::spawn(cleanup_loop(state.clone()));
+    // LKML monitor: only runs when MK_LKML_LISTS names at least one list (otherwise we
+    // never poll lore.kernel.org). Detected reproducer cover letters become candidates
+    // shown on the site; nothing builds until a human clicks Run.
+    if !state.cfg.lkml_lists.is_empty() {
+        tokio::spawn(lkml::monitor_loop(state.clone()));
+    }
 
     // /api/* requires the bearer token (when configured); the embedded UI is
     // served unauthenticated so it can load and prompt for the token.
@@ -152,6 +159,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/events", get(global_events))
         .route("/api/jobs/:id/metrics", get(get_metrics))
         .route("/api/jobs/:id/logs/:kind", get(get_log))
+        .route("/api/candidates", get(list_candidates))
+        .route("/api/candidates/:msgid/run", post(run_candidate))
         .route("/api/metrics/peaks", get(get_peaks))
         .route("/api/highlight.css", get(highlight_css))
         .route("/api/highlight/:lang", post(highlight_code))
@@ -186,6 +195,32 @@ async fn list_jobs(State(st): State<AppState>) -> Result<Json<Vec<db::Job>>, Sta
 
 async fn get_job(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json<db::Job>, StatusCode> {
     st.db.get_job(id).map_err(ise)?.map(Json).ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn list_candidates(State(st): State<AppState>) -> Result<Json<Vec<db::Candidate>>, StatusCode> {
+    Ok(Json(st.db.list_candidates().map_err(ise)?))
+}
+
+/// Run an LKML candidate: create a job from its stored bundle (which already carries
+/// the injected `thread:` key, so run-kernel.py `git am`s the thread's series), and
+/// record the lore link + subject as the job's provenance. Mirrors `submit`.
+async fn run_candidate(State(st): State<AppState>, Path(msgid): Path<String>)
+    -> Result<Json<serde_json::Value>, StatusCode>
+{
+    let (bundle, source_url, title) = st.db.get_candidate_bundle(&msgid).map_err(ise)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let id = st.db
+        .create_job_full(now_ms(), Some("lkml"), Some(&source_url), title.as_deref())
+        .map_err(ise)?;
+    let dir = st.work.join(id.to_string());
+    std::fs::create_dir_all(dir.join("logs")).map_err(ise)?;
+    std::fs::write(dir.join("bundle.md"), bundle.as_bytes()).map_err(ise)?;
+    st.tx.send(SchedMsg::New(id)).map_err(ise)?;
+    st.db.set_candidate_job(&msgid, id).map_err(ise)?;
+    info!("queued job {id} from lkml candidate {msgid}");
+    st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
+    st.bus.publish_global(json!({ "kind": "candidates" }).to_string());
+    Ok(Json(json!({ "id": id })))
 }
 
 async fn get_log(State(st): State<AppState>, Path((id, kind)): Path<(i64, String)>) -> Result<String, StatusCode> {

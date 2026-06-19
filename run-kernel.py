@@ -18,8 +18,10 @@ README for the bundle format.
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
+import mailbox
 import os
 import re
 import subprocess
@@ -47,7 +49,7 @@ def progress(phase: str, **extra) -> None:
     if _PROGRESS:
         print(f"{PROGRESS_SENTINEL} {json.dumps({'phase': phase, **extra})}", flush=True)
 
-META_KEYS = {"url", "commit", "patch", "arch"}
+META_KEYS = {"url", "commit", "patch", "arch", "thread"}
 ROLES = ("user", "module", "kconf", "init")
 
 # Hardened mode (always on): a bundle never chooses its own kernel remote. Any
@@ -59,8 +61,8 @@ KERNEL_URL = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
 
 def enforce_hardened(meta: dict) -> dict:
     """Force the kernel source to KERNEL_URL whenever the bundle requests a remote
-    tree (url/commit/patch). Returns the (mutated) meta dict."""
-    if meta.get("url") or meta.get("commit") or meta.get("patch"):
+    tree (url/commit/patch/thread). Returns the (mutated) meta dict."""
+    if meta.get("url") or meta.get("commit") or meta.get("patch") or meta.get("thread"):
         if meta.get("url") and meta["url"] != KERNEL_URL:
             log(f"hardened: ignoring bundle url {meta['url']!r}; forcing {KERNEL_URL}")
         meta["url"] = KERNEL_URL
@@ -222,7 +224,8 @@ def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = Non
     `log_path` is given, the fetch/worktree/patch step is captured there and kept
     as the job's fetch.log (only created when an actual fetch/prepare happens)."""
     url, commit, patch = meta.get("url"), meta.get("commit"), meta.get("patch")
-    if not (url or commit or patch):
+    thread = meta.get("thread")
+    if not (url or commit or patch or thread):
         return linux_src  # no remote work -> no fetch, no fetch.log
 
     if not (linux_src / ".git").exists():
@@ -294,10 +297,105 @@ def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = Non
                 if run(["git", "-C", str(wt), "apply", str(pf)], **cap).returncode != 0:
                     die("git apply failed (clear the cached worktree to retry)")
                 marker.write_text(patch + "\n")
+        if thread:
+            marker = wt / ".mk-thread-patched"
+            if not marker.exists():
+                apply_thread(wt, thread, flog, cap)
+                marker.write_text(thread + "\n")
         return wt
     finally:
         if fl:
             fl.close()
+
+
+# ----------------------------------------------------------------------------
+# Apply a whole patch series from a lore.kernel.org thread
+# ----------------------------------------------------------------------------
+
+def _decode_part(part) -> str:
+    """Decoded text of one email part (best effort)."""
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        return part.get_payload() or ""
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace")
+    except (LookupError, ValueError):
+        return payload.decode("utf-8", errors="replace")
+
+
+def _message_text(msg) -> str:
+    """Plain-text body of a mail (joining text/plain parts of a multipart)."""
+    if msg.is_multipart():
+        return "\n".join(_decode_part(p) for p in msg.walk()
+                         if p.get_content_type() == "text/plain")
+    return _decode_part(msg)
+
+
+_PATCH_IDX_RE = re.compile(r"\[PATCH[^\]]*?\b(\d+)\s*/\s*\d+\]", re.IGNORECASE)
+
+
+def select_thread_patches(mbox_path: Path) -> list:
+    """From a public-inbox thread mbox, return the messages to `git am`, in series
+    order. Keep only `[PATCH ...]` mails that actually carry a diff -- this drops the
+    `0/N` cover letter (no diff) and plain replies/acks -- and order them by the n/m
+    in the subject (so 1/3, 2/3, 3/3 apply in order; ties keep mbox order)."""
+    selected = []  # (series_index, mbox_order, message)
+    for order, msg in enumerate(mailbox.mbox(str(mbox_path))):
+        subject = " ".join((msg.get("Subject") or "").split())
+        if "[patch" not in subject.lower():
+            continue
+        if "\ndiff --git " not in "\n" + _message_text(msg):
+            continue
+        m = _PATCH_IDX_RE.search(subject)
+        selected.append((int(m.group(1)) if m else 0, order, msg))
+    selected.sort(key=lambda t: (t[0], t[1]))
+    return [msg for _, _, msg in selected]
+
+
+def apply_thread(wt: Path, thread: str, flog, cap) -> None:
+    """Fetch the lore thread mbox for `thread`, keep the `[PATCH n/m]` mails that
+    carry a diff (dropping the `0/N` cover letter and non-patch replies), order them
+    by series index, and `git am` them onto the worktree.
+
+    Known limitation: a thread carrying multiple revisions (v1 + v2) is not
+    de-duplicated -- every patch mail with a diff is applied. `b4 am` would be the
+    upgrade path if that becomes a problem in practice."""
+    base = thread.rstrip("/")
+    if base.endswith("/raw"):
+        base = base[: -len("/raw")]
+    mbox_url = base + "/t.mbox.gz"
+
+    gz = wt / ".mk-thread.mbox.gz"
+    flog(f"downloading thread mbox {mbox_url} ...")
+    if run(["curl", "-LfsS", "-o", str(gz), mbox_url], **cap).returncode != 0:
+        die("thread mbox download failed")
+    raw = wt / ".mk-thread.mbox"
+    try:
+        with gzip.open(gz, "rb") as f:
+            raw.write_bytes(f.read())
+    except OSError as e:
+        die(f"thread mbox decompress failed: {e}")
+
+    patches = select_thread_patches(raw)
+    if not patches:
+        die("thread contained no applicable [PATCH] mails with diffs")
+
+    am_box = wt / ".mk-thread-am.mbox"
+    am_box.unlink(missing_ok=True)
+    out = mailbox.mbox(str(am_box))
+    out.lock()
+    for msg in patches:
+        out.add(msg)
+    out.flush()
+    out.unlock()
+    out.close()
+
+    flog(f"applying {len(patches)} patch(es) from thread ...")
+    if run(["git", "-C", str(wt), "am", "-3", str(am_box)], **cap).returncode != 0:
+        run(["git", "-C", str(wt), "am", "--abort"], **cap)
+        die(f"git am failed applying thread series ({len(patches)} patch(es)); "
+            "clear the cached worktree to retry")
 
 
 # ----------------------------------------------------------------------------

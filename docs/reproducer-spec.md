@@ -28,6 +28,7 @@ A `---`-delimited block, at column 0 and outside any code fence, holding
 | `url`    | git remote to fetch the kernel from                                 |
 | `commit` | commit / tag / branch to build (e.g. `v6.12`)                       |
 | `patch`  | URL or path to a patch applied on top of `commit`                   |
+| `thread` | lore.kernel.org thread URL; its `[PATCH n/m]` series is `git am`'d on top of `commit` |
 | `arch`   | target arch (`x86_64` / `arm64`); overrides `ARCH` env and host     |
 
 With no metadata block, the kernel at `LINUX_SRC` (default `~/linux`) is built
@@ -77,7 +78,7 @@ set -e
 ## Execution model
 
 1. Resolve kernel tree — `LINUX_SRC` as-is, or a cached git worktree at `commit`
-   (fetching `url`) with `patch` applied.
+   (fetching `url`) with `patch` and/or a `thread:` patch series applied.
 2. Merge `kconf:` fragments and build the kernel + any `module:` sources.
 3. Compile `user:` files into guest binaries.
 4. Boot the kernel under QEMU (HVF/KVM/TCG) against the Ubuntu cloud image.

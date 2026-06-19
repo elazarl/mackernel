@@ -215,6 +215,7 @@ as a source) plus fenced code blocks tagged `role:filename`:
 url: git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git   # optional remote
 commit: v6.12                                                            # optional treeish
 patch: https://example.com/series.patch                                  # optional patch URL
+thread: https://lore.kernel.org/all/<cover-msgid>/                       # optional; git am the thread's [PATCH n/m] series
 arch: x86_64                                                             # optional; else native
 ---
 

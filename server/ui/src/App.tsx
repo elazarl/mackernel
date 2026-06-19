@@ -7,8 +7,9 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  eventsUrl, getJob, getLog, getMetrics, getPeaks, gib, globalEventsUrl, hasToken,
-  highlight, highlightCss, Job, listJobs, mib, Peak, Sample, setToken, submit,
+  Candidate, eventsUrl, getJob, getLog, getMetrics, getPeaks, gib, globalEventsUrl, hasToken,
+  highlight, highlightCss, Job, listCandidates, listJobs, mib, Peak, runCandidate, Sample,
+  setToken, submit,
 } from "./api";
 import {
   EXAMPLES, githubTree, KERNEL_URL, parseBundle, ParsedBundle, rolesOf,
@@ -86,6 +87,7 @@ function Unlock({ onUnlock }: { onUnlock: () => void }) {
 function Dashboard() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [peaks, setPeaks] = useState<Peak[]>([]);
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [sel, setSel] = useState<number | null>(null);
   const [bundle, setBundle] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
@@ -102,7 +104,11 @@ function Dashboard() {
   // job list changed. Idle = no requests.
   useEffect(() => {
     const tick = async () => {
-      try { setJobs(await listJobs()); setPeaks(await getPeaks()); } catch {}
+      try {
+        setJobs(await listJobs());
+        setPeaks(await getPeaks());
+        setCandidates(await listCandidates());
+      } catch {}
     };
     tick();
     const es = new EventSource(globalEventsUrl());
@@ -115,6 +121,13 @@ function Dashboard() {
     const { id } = await submit(bundle);
     setBundle("");
     setModalOpen(false);
+    setSel(id);
+  };
+
+  // Run a detected LKML cover letter: the server creates a job from the stored bundle
+  // (thread series applied at build time) and we jump to it.
+  const onRunCandidate = async (c: Candidate) => {
+    const { id } = await runCandidate(c.msgid);
     setSel(id);
   };
 
@@ -154,6 +167,27 @@ function Dashboard() {
               ))}
             </div>
           </section>
+          {candidates.length > 0 && (
+            <section className="card">
+              <h2>From LKML <span className="muted">· {candidates.length} candidate{candidates.length === 1 ? "" : "s"}</span></h2>
+              <ul className="jobs">
+                {candidates.map((c) => (
+                  <li key={c.msgid}>
+                    <div className="jobrow">
+                      <a href={c.source_url} target="_blank" rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}>{c.title || c.msgid}</a>
+                      {c.list && <span className="ph"> · {c.list}</span>}
+                    </div>
+                    <div className="candactions">
+                      {c.job_id != null
+                        ? <button className="chip" onClick={() => setSel(c.job_id!)}>view job #{c.job_id}</button>
+                        : <button className="chip" onClick={() => onRunCandidate(c)}>Run</button>}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           <section className="card">
             <h2>Jobs{jobs.length > JOB_LIMIT && <span className="muted"> · newest {JOB_LIMIT} of {jobs.length}</span>}</h2>
             <ul className="jobs">
@@ -165,7 +199,12 @@ function Dashboard() {
                     {j.phase && j.status === "running" && <span className="ph"> · {j.phase}</span>}
                     {j.exit_code != null && <span className="ph"> · exit {j.exit_code}</span>}
                     {j.reaped_ms != null && <span className="ph"> · logs expired</span>}
+                    {j.source_url && (
+                      <a className="srclink" href={j.source_url} target="_blank" rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}>lore ↗</a>
+                    )}
                   </div>
+                  {j.title && <div className="jobsum" title={j.title}>{j.title}</div>}
                   {j.summary && <div className="jobsum" title={j.summary}>{j.summary}</div>}
                 </li>
               ))}
@@ -532,6 +571,8 @@ const CSS = `
   .jobrow { display: flex; align-items: center; gap: 6px; }
   .jobsum { font-size: .82em; color: var(--muted); line-height: 1.3; padding-left: 14px; }
   .jobs em { color: var(--muted); font-style: normal; } .ph { color: var(--muted); }
+  .srclink { margin-left: auto; font-size: .82em; color: var(--accent, #58a6ff); text-decoration: none; }
+  .candactions { padding-left: 14px; } .candactions .chip { margin-top: 4px; }
   .summary { background: var(--subtle); border-left: 3px solid var(--accent, #58a6ff);
              padding: 8px 10px; border-radius: 6px; margin: 8px 0; line-height: 1.4; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
