@@ -22,6 +22,9 @@ pub struct Job {
     pub ram_peak: i64,
     pub disk_peak: i64,
     pub reaped_ms: Option<i64>,
+    /// Natural-language summary (see src/summarize.rs): a preliminary one-liner when the
+    /// job starts, replaced by a two-sentence summary (incl. output) when it finishes.
+    pub summary: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -58,6 +61,7 @@ impl Db {
                 submitter VARCHAR
             );
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS reaped_ms BIGINT;
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS summary VARCHAR;
             CREATE TABLE IF NOT EXISTS events (
                 job_id BIGINT NOT NULL, ts_ms BIGINT NOT NULL,
                 phase VARCHAR NOT NULL, message VARCHAR
@@ -108,6 +112,14 @@ impl Db {
         Ok(())
     }
 
+    /// Store/replace a job's natural-language summary (called at job start, then again
+    /// at job finish — the later call supersedes the preliminary one).
+    pub fn set_summary(&self, id: i64, summary: &str) -> Result<()> {
+        self.lock()
+            .execute("UPDATE jobs SET summary=? WHERE id=?", duckdb::params![summary, id])?;
+        Ok(())
+    }
+
     pub fn add_event(&self, id: i64, ts_ms: i64, phase: &str, message: &str) -> Result<()> {
         self.lock().execute(
             "INSERT INTO events (job_id, ts_ms, phase, message) VALUES (?, ?, ?, ?)",
@@ -140,7 +152,7 @@ impl Db {
     pub fn get_job(&self, id: i64) -> Result<Option<Job>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary
              FROM jobs WHERE id=?",
         )?;
         let mut rows = stmt.query(duckdb::params![id])?;
@@ -154,7 +166,7 @@ impl Db {
     pub fn list_jobs(&self) -> Result<Vec<Job>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary
              FROM jobs ORDER BY id DESC",
         )?;
         let mut rows = stmt.query([])?;
@@ -234,5 +246,6 @@ fn row_to_job(r: &duckdb::Row<'_>) -> Result<Job> {
         ram_peak: r.get(7)?,
         disk_peak: r.get(8)?,
         reaped_ms: r.get(9)?,
+        summary: r.get(10)?,
     })
 }

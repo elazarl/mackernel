@@ -24,3 +24,11 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 rust-embed = "8"
 mime_guess = "2"
 arborium = { version = "2.18.0", features = ["lang-c", "lang-bash"] }
+
+# In-process CPU-only LLM summarizer (see src/summarize.rs). Pinned to the candle
+# commit these APIs were verified against. Default features = CPU gemm backend
+# (no mkl/accelerate/cuda) — correct for the AMD home host.
+candle-core = { git = "https://github.com/huggingface/candle", rev = "376d54c7fb12ad04c5928cc94ed61c44102ec0ad" }
+candle-transformers = { git = "https://github.com/huggingface/candle", rev = "376d54c7fb12ad04c5928cc94ed61c44102ec0ad" }
+hf-hub = "0.5"
+tokenizers = "0.22"

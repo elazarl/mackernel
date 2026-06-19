@@ -26,7 +26,10 @@ impl Cfg {
         };
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
         Cfg {
-            ram_reserve: g("MK_RAM_RESERVE_GB", 2 * GB),
+            // Reserve host RAM. The in-process summary model adds ~2.3 GB resident to
+            // the server itself (see src/summarize.rs), which isn't part of any job's
+            // per-job reservation, so the default headroom is bumped to cover it.
+            ram_reserve: g("MK_RAM_RESERVE_GB", 4 * GB),
             disk_reserve: g("MK_DISK_RESERVE_GB", 5 * GB),
             max_jobs: std::env::var("MK_MAX_JOBS").ok().and_then(|v| v.parse().ok()).unwrap_or(4),
             est_ram: g("MK_EST_RAM_GB", 3 * GB),

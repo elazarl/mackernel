@@ -159,11 +159,14 @@ function Dashboard() {
             <ul className="jobs">
               {[...jobs].sort((a, b) => b.id - a.id).slice(0, JOB_LIMIT).map((j) => (
                 <li key={j.id} className={sel === j.id ? "active" : ""} onClick={() => setSel(j.id)}>
-                  <span className="dot" style={{ background: statusColor(j.status) }} />
-                  #{j.id} <em>{j.status}</em>
-                  {j.phase && j.status === "running" && <span className="ph"> · {j.phase}</span>}
-                  {j.exit_code != null && <span className="ph"> · exit {j.exit_code}</span>}
-                  {j.reaped_ms != null && <span className="ph"> · logs expired</span>}
+                  <div className="jobrow">
+                    <span className="dot" style={{ background: statusColor(j.status) }} />
+                    #{j.id} <em>{j.status}</em>
+                    {j.phase && j.status === "running" && <span className="ph"> · {j.phase}</span>}
+                    {j.exit_code != null && <span className="ph"> · exit {j.exit_code}</span>}
+                    {j.reaped_ms != null && <span className="ph"> · logs expired</span>}
+                  </div>
+                  {j.summary && <div className="jobsum" title={j.summary}>{j.summary}</div>}
                 </li>
               ))}
             </ul>
@@ -182,14 +185,15 @@ function Dashboard() {
         </div>
         <div className="right">
           {sel == null ? <p className="muted">Select a job to see live progress, metrics, and logs.</p>
-            : <JobDetail id={sel} onEdit={(text) => { setBundle(text); setModalOpen(true); }} />}
+            : <JobDetail id={sel} summary={jobs.find((j) => j.id === sel)?.summary ?? null}
+                onEdit={(text) => { setBundle(text); setModalOpen(true); }} />}
         </div>
       </div>
     </div>
   );
 }
 
-function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void }) {
+function JobDetail({ id, summary, onEdit }: { id: number; summary: string | null; onEdit: (text: string) => void }) {
   const [job, setJob] = useState<Job | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
@@ -282,6 +286,7 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
             <span key={p} className={"step " + stepClass(job, p)}>{p}</span>
           ))}
         </div>
+        {summary && <p className="summary">📝 {summary}</p>}
         {job && (
           <p className="muted">
             exit {job.exit_code ?? "—"} · peak RAM {gib(job.ram_peak)} GB · peak disk {gib(job.disk_peak)} GB
@@ -522,9 +527,14 @@ const CSS = `
   .unlock input { width: 100%; box-sizing: border-box; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; font-family: ui-monospace, monospace; padding: 8px; }
   button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer; margin-top: 8px; }
   .jobs { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow: auto; }
-  .jobs li { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+  .jobs li { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
   .jobs li.active { background: var(--subtle); }
+  .jobrow { display: flex; align-items: center; gap: 6px; }
+  .jobsum { font-size: .82em; color: var(--muted); line-height: 1.3; padding-left: 14px;
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
   .jobs em { color: var(--muted); font-style: normal; } .ph { color: var(--muted); }
+  .summary { background: var(--subtle); border-left: 3px solid var(--accent, #58a6ff);
+             padding: 8px 10px; border-radius: 6px; margin: 8px 0; line-height: 1.4; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .muted { color: var(--muted); }
   .issues-card { border-color: #f85149; } .issues-card h2 { color: #f85149; }

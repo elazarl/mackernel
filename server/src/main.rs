@@ -5,6 +5,7 @@ mod db;
 mod embed;
 mod metrics;
 mod sched;
+mod summarize;
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -30,7 +31,7 @@ use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use bus::Bus;
 use db::Db;
@@ -51,6 +52,10 @@ struct AppState {
     bus: Bus,
     cfg: Cfg,
     auth_token: Option<String>,
+    /// In-process LLM summarizer, populated by a background loader once the model is
+    /// downloaded/loaded. `None`/empty until ready (or if loading failed/disabled), in
+    /// which case summarization is silently skipped.
+    summarizer: Arc<std::sync::OnceLock<Arc<summarize::Summarizer>>>,
 }
 
 fn now_ms() -> i64 {
@@ -67,6 +72,26 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "info".into()))
         .init();
+
+    // Debug subcommand: `mackernel-server summarize <bundle.md> [logs-dir]` loads the
+    // model and prints a summary (end-summary if a logs dir is given, else start). Used
+    // to verify the summarizer end-to-end without booting the full service.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("summarize") {
+        let bundle_path = argv.get(2).cloned().unwrap_or_default();
+        let md = std::fs::read_to_string(&bundle_path)?;
+        let s = summarize::Summarizer::load()?;
+        info!("loaded summary model: {}", s.kind().label());
+        let out = match argv.get(3) {
+            Some(logs) => {
+                let issues = collect_issues(std::path::Path::new(logs));
+                s.summarize_end(&md, &issues, Some(1), "done")?
+            }
+            None => s.summarize_start(&md)?,
+        };
+        println!("SUMMARY: {out}");
+        return Ok(());
+    }
 
     let bind = std::env::var("MK_SERVER_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let work = env_path("MK_SERVER_WORK", "./work");
@@ -93,10 +118,26 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("MK_TOKEN unset -- using built-in v7.1 token for /api/* auth");
     }
 
+    // Load the summary model in the background so a first-boot download (~1-2.5 GB)
+    // doesn't block serving. Until it's ready, summarization is skipped.
+    let summarizer = Arc::new(std::sync::OnceLock::<Arc<summarize::Summarizer>>::new());
+    if summarize::Summarizer::enabled() {
+        let slot = summarizer.clone();
+        tokio::task::spawn_blocking(move || match summarize::Summarizer::load() {
+            Ok(s) => {
+                info!("summary model ready ({})", s.kind().label());
+                let _ = slot.set(Arc::new(s));
+            }
+            Err(e) => warn!("summary model unavailable, summaries disabled: {e:#}"),
+        });
+    } else {
+        info!("MK_SUMMARY_DISABLE set -- job summaries disabled");
+    }
+
     let (tx, rx) = mpsc::unbounded_channel::<SchedMsg>();
     let state = AppState {
         db: database, work: work.clone(), repo: repo.clone(), tx,
-        bus: Bus::default(), cfg: Cfg::from_env(), auth_token,
+        bus: Bus::default(), cfg: Cfg::from_env(), auth_token, summarizer,
     };
 
     tokio::spawn(scheduler_loop(state.clone(), rx));
@@ -400,6 +441,49 @@ async fn scheduler_loop(st: AppState, mut rx: mpsc::UnboundedReceiver<SchedMsg>)
     }
 }
 
+/// Spawn a background task that computes a job summary and stores + broadcasts it.
+/// `stage` is "start" (bundle only, preliminary) or "end" (bundle + run output). The
+/// CPU-bound model call runs on a blocking thread, so it never stalls the async runtime,
+/// and it never blocks the job pipeline — failures are logged and leave the summary as-is.
+/// No-op until the model has finished loading (`OnceLock` empty).
+fn spawn_summary(st: &AppState, id: i64, stage: &'static str) {
+    let Some(sumz) = st.summarizer.get().cloned() else { return };
+    let dir = st.work.join(id.to_string());
+    let (db, bus) = (st.db.clone(), st.bus.clone());
+    // For the end summary, snapshot the just-finished row (status/exit) now.
+    let job = if stage == "end" { st.db.get_job(id).ok().flatten() } else { None };
+    tokio::spawn(async move {
+        let Ok(bundle) = tokio::fs::read_to_string(dir.join("bundle.md")).await else { return };
+        let logs = dir.join("logs");
+        let result = tokio::task::spawn_blocking(move || {
+            if stage == "start" {
+                sumz.summarize_start(&bundle)
+            } else {
+                let issues = collect_issues(&logs);
+                let (exit, outcome) = job
+                    .map(|j| (j.exit_code, j.status))
+                    .unwrap_or((None, "done".to_string()));
+                sumz.summarize_end(&bundle, &issues, exit, &outcome)
+            }
+        })
+        .await;
+        match result {
+            Ok(Ok(text)) if !text.is_empty() => {
+                if let Err(e) = db.set_summary(id, &text) {
+                    warn!("job {id}: storing {stage} summary failed: {e:#}");
+                    return;
+                }
+                bus.publish(id, json!({ "kind": "summary", "stage": stage, "summary": text }).to_string());
+                bus.publish_global(json!({ "kind": "jobs" }).to_string());
+                info!("job {id}: {stage} summary ready");
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => warn!("job {id}: {stage} summary failed: {e:#}"),
+            Err(e) => warn!("job {id}: {stage} summary task panicked: {e}"),
+        }
+    });
+}
+
 async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
     let dir = st.work.join(id.to_string());
     let logs = dir.join("logs");
@@ -407,6 +491,8 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
     st.db.set_running(id, now_ms())?;
     st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     info!("job {id}: starting");
+    // Preliminary summary from the bundle alone (runs concurrently with the build).
+    spawn_summary(st, id, "start");
 
     let mut child = tokio::process::Command::new("python3")
         .arg(st.repo.join("run-kernel.py"))
@@ -502,6 +588,8 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
     st.bus.publish(id, json!({ "kind": "done", "status": outcome, "exit": exit,
                                "ram_peak": ram, "disk_peak": disk }).to_string());
     st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
+    // Final summary including the run output (supersedes the preliminary one).
+    spawn_summary(st, id, "end");
     // Reclaim the per-job kernel worktree (the ~3 GB build tree) now that the job is
     // done; logs + metrics + the DuckDB row stay. Each job owns its MK_WT_ROOT, so
     // this never races another job. Absent for no-metadata jobs (built in LINUX_SRC).
