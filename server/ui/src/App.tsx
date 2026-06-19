@@ -352,7 +352,8 @@ function BundleModal(
 // server; everything else renders as plain text.
 function langOf(name: string, role: string): string | null {
   if (/\.(c|h)$/i.test(name)) return "c";
-  if (role === "init" || /\.(sh|bash)$/i.test(name)) return "bash";
+  // kconfig (.config) is A=y with # comments — bash highlights those well enough.
+  if (role === "init" || role === "kconf" || /\.(sh|bash|config)$/i.test(name)) return "bash";
   return null;
 }
 
