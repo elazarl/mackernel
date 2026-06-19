@@ -8,7 +8,7 @@ export interface ParsedBundle { meta: BundleMeta[]; files: BundleFile[]; }
 
 // Recognized metadata keys and the canonical tab order (per the spec). Roles not in
 // this list still get a tab, ordered after the known ones.
-const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch"];
+const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch", "patch-compare", "thread-compare"];
 export const ROLE_ORDER = ["user", "module", "kconf", "init"];
 
 const FENCE_OPEN = /^(`{3,})(.*)$/;     // ```role:filename  (or any info string)
@@ -85,6 +85,18 @@ export function parseBundle(text: string): ParsedBundle {
 function roleRank(role: string): number {
   const idx = ROLE_ORDER.indexOf(role);
   return idx === -1 ? ROLE_ORDER.length : idx;
+}
+
+// Does a parsed bundle request a baseline-vs-patched comparison? Returns the mode
+// ("patch" strips the bundle's patch:; "thread" git-ams a lore series) or null. Both
+// modes produce baseline/patched runs, so the UI renders either side by side.
+const TRUTHY = ["1", "true", "yes", "on"];
+export function compareMode(parsed: ParsedBundle): "patch" | "thread" | null {
+  const get = (k: string) => parsed.meta.find((m) => m.key === k)?.value;
+  const pc = get("patch-compare");
+  if (pc && TRUTHY.includes(pc.trim().toLowerCase()) && get("patch")) return "patch";
+  if (get("thread-compare")) return "thread";
+  return null;
 }
 
 // Distinct roles present, in canonical order — the set of tabs to show.
@@ -279,6 +291,49 @@ int main(void) {
     printf("kernel: %s %s\\n", u.sysname, u.release);
     return 0;
 }
+\`\`\`
+`,
+  },
+  {
+    label: "patch-compare",
+    blurb: "run v6.12 with & without a patch, side by side",
+    bundle: `---
+commit: v6.12
+patch: https://example.com/fix.patch
+patch-compare: true
+---
+
+# patch-compare — baseline vs patched, in parallel
+
+Builds and runs v6.12 twice: **baseline** (this patch stripped) and **patched**
+(the patch applied). The two runs appear side by side. Swap \`patch:\` for the
+patch you want to evaluate.
+
+\`\`\`init:init.sh
+#!/bin/bash
+set -e
+sudo dmesg | tail -n 20
+\`\`\`
+`,
+  },
+  {
+    label: "thread-compare",
+    blurb: "run v6.12 with & without an LKML series, side by side",
+    bundle: `---
+commit: v6.12
+thread-compare: https://lore.kernel.org/lkml/example-thread@mail/
+---
+
+# thread-compare — baseline vs an LKML series, in parallel
+
+Downloads the whole patch series from the lore thread (mbox) and \`git am\`s it on
+top of v6.12 for the **patched** run; **baseline** is plain v6.12. Replace the
+\`thread-compare:\` URL with the lore thread you want to evaluate.
+
+\`\`\`init:init.sh
+#!/bin/bash
+set -e
+sudo dmesg | tail -n 20
 \`\`\`
 `,
   },

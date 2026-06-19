@@ -27,6 +27,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,13 +44,17 @@ HERE = Path(__file__).resolve().parent
 # output for CLI users; the service greps for the sentinel).
 _PROGRESS = False
 PROGRESS_SENTINEL = "MKPROGRESS"
+# Compare mode runs two variants in parallel threads; serialize the progress/log
+# writes so their MKPROGRESS lines (which the service greps) never interleave.
+_PRINT_LOCK = threading.Lock()
 
 
 def progress(phase: str, **extra) -> None:
     if _PROGRESS:
-        print(f"{PROGRESS_SENTINEL} {json.dumps({'phase': phase, **extra})}", flush=True)
+        with _PRINT_LOCK:
+            print(f"{PROGRESS_SENTINEL} {json.dumps({'phase': phase, **extra})}", flush=True)
 
-META_KEYS = {"url", "commit", "patch", "arch", "thread"}
+META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare"}
 ROLES = ("user", "module", "kconf", "init")
 
 # Hardened mode (always on): a bundle never chooses its own kernel remote. Any
@@ -61,8 +66,9 @@ KERNEL_URL = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
 
 def enforce_hardened(meta: dict) -> dict:
     """Force the kernel source to KERNEL_URL whenever the bundle requests a remote
-    tree (url/commit/patch/thread). Returns the (mutated) meta dict."""
-    if meta.get("url") or meta.get("commit") or meta.get("patch") or meta.get("thread"):
+    tree (url/commit/patch/thread/thread-compare). Returns the (mutated) meta dict."""
+    if (meta.get("url") or meta.get("commit") or meta.get("patch")
+            or meta.get("thread") or meta.get("thread-compare")):
         if meta.get("url") and meta["url"] != KERNEL_URL:
             log(f"hardened: ignoring bundle url {meta['url']!r}; forcing {KERNEL_URL}")
         meta["url"] = KERNEL_URL
@@ -217,13 +223,18 @@ def _parse_kv(block: list[str]) -> dict | None:
 # Kernel source: single git tree + cached worktrees
 # ----------------------------------------------------------------------------
 
-def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = None) -> Path:
-    """Resolve the kernel tree to build. With no url/commit/patch, use linux_src
-    as-is. Otherwise materialize a cached git worktree at the requested commit
-    (adding+fetching the remote for a url) and apply the patch there. When
+def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = None,
+                        wt_root: Path | None = None) -> Path:
+    """Resolve the kernel tree to build. With no url/commit/patch/thread, use
+    linux_src as-is. Otherwise materialize a cached git worktree at the requested
+    commit (adding+fetching the remote for a url) and apply the patch / `git am` the
+    thread series there. `wt_root` overrides the worktree cache root (compare mode
+    gives each variant its own root so patched/unpatched trees never collide). When
     `log_path` is given, the fetch/worktree/patch step is captured there and kept
     as the job's fetch.log (only created when an actual fetch/prepare happens)."""
     url, commit, patch = meta.get("url"), meta.get("commit"), meta.get("patch")
+    # `thread`: a lore thread URL whose series is git-am'd on top. Set by a `thread:`
+    # frontmatter key, or injected by compare_variants for thread-compare's patched run.
     thread = meta.get("thread")
     if not (url or commit or patch or thread):
         return linux_src  # no remote work -> no fetch, no fetch.log
@@ -269,10 +280,11 @@ def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = Non
         short = sha.stdout.strip()[:12]
         flog(f"resolved {treeish} -> {short}")
 
-        # Worktree cache root: MK_WT_ROOT isolates concurrent jobs (the service gives
-        # each job its own root so same-commit builds don't collide); default sits
-        # next to the source tree.
-        wt_root = Path(os.environ.get("MK_WT_ROOT") or f"{linux_src}-wt")
+        # Worktree cache root: an explicit wt_root (compare mode: per-variant root)
+        # wins; else MK_WT_ROOT isolates concurrent jobs (the service gives each job
+        # its own root so same-commit builds don't collide); default sits next to the
+        # source tree.
+        wt_root = wt_root or Path(os.environ.get("MK_WT_ROOT") or f"{linux_src}-wt")
         wt = wt_root / short
         # Drop registrations whose dirs were deleted out from under git (e.g. a job's
         # work dir was cleaned), so `worktree add` to that path doesn't fail.
@@ -467,31 +479,19 @@ def fetch_bundle(src: str) -> Path:
     return dest
 
 
-def run_bundle(src, args) -> int:
-    os.chdir(HERE)
-    # Optional per-job log dir: configure+build -> compile.log, serial -> dmesg.log,
-    # guest output -> exec.log. Without it, behaviour is unchanged (inherits stdio).
-    log_dir = Path(args.log_dir).resolve() if args.log_dir else None
+def build_boot_run(b, tree: Path, arch: str, args, log_dir: Path | None,
+                   img: Path, seed: Path, image: str, is_local: bool,
+                   bundle_stem: str, ssh_port: int | None = None,
+                   variant: str | None = None) -> int:
+    """Configure+build the kernel in `tree`, compile userspace/modules, boot it under
+    QEMU, and run the bundle in the guest; return the guest command's exit status.
+    A `variant` tags the progress lines (compare mode runs two of these in parallel,
+    each with its own `tree`/`log_dir`/`ssh_port`)."""
     if log_dir:
         log_dir.mkdir(parents=True, exist_ok=True)
-    progress("fetch")
-    bundle_path = fetch_bundle(str(src))
-    b = parse_bundle(bundle_path)
-    enforce_hardened(b.meta)  # always build from Linus's tree; ignore bundle url
 
-    # Bundle builds are in-tree in the (cached) worktree, so a kernel module can
-    # build against /linux directly; BUILD_DIR would split that out, so ignore it.
-    os.environ.pop("BUILD_DIR", None)
-
-    # Target arch: frontmatter `arch:` wins, else ARCH env, else host arch. Set it
-    # in the environment so the configure/build subprocesses agree.
-    if b.meta.get("arch"):
-        os.environ["ARCH"] = mklib.normalize_arch(b.meta["arch"])
-    arch = mklib.target_arch()
-    base_src = Path(os.environ.get("LINUX_SRC", os.path.expanduser("~/linux")))
-    tree = prepare_kernel_tree(b.meta, base_src,
-                               log_path=(log_dir / "fetch.log") if log_dir else None)
-    log(f"kernel tree: {tree}")
+    def prog(phase: str, **extra) -> None:
+        progress(phase, **({"variant": variant} if variant else {}), **extra)
 
     scratch = Path(tempfile.mkdtemp(prefix=".mk-bundle-", dir=HERE))
 
@@ -514,47 +514,37 @@ def run_bundle(src, args) -> int:
         for fp in fragments:
             frag_args += ["--fragment", str(fp)]
         log("configuring kernel ...")
-        progress("configure")
+        prog("configure")
         if run([sys.executable, str(HERE / "configure-kernel.py"), *frag_args],
                cwd=HERE, env=env, **cap).returncode != 0:
             die("kernel configure failed")
     if bool(fragments) or not mklib.kernel_image(tree, arch).is_file():
         log("building kernel ...")
-        progress("build")
+        prog("build")
         if run([sys.executable, str(HERE / "build-kernel.py")], cwd=HERE, env=env,
                **cap).returncode != 0:
             die("kernel build failed")
     # Keep compile.log open through the userspace + module container builds below so
-    # their podman output is captured there too (closed after step 4).
+    # their podman output is captured there too (closed after step 3).
 
-    image, is_local = mklib.resolve_image(arch)
-
-    # 2. Cloud image + seed.
-    img = Path(os.environ.get("IMG", mklib.arch_profile(arch)["cloud_img"]))
-    img_url = os.environ.get(
-        "IMG_URL", f"https://cloud-images.ubuntu.com/noble/current/{img.name}")
-    seed = Path(os.environ.get("SEED", "seed.iso"))
-    g.ensure_cloud_image(img, img_url)
-    g.ensure_seed(seed)
-
-    # 3. Compile userspace C into one static binary; copy other user: files too.
+    # 2. Compile userspace C into one static binary; copy other user: files too.
     user_files = []
     for name, content in b.files["user"]:
         user_files.append(_stage(scratch / name, content))
     binary = None
     if any(p.suffix == ".c" for p in user_files):
         cs = [p for p in user_files if p.suffix == ".c"]
-        binname = cs[0].stem if len(cs) == 1 else bundle_path.stem
+        binname = cs[0].stem if len(cs) == 1 else bundle_stem
         binary = g.compile_c(user_files, binname, image, is_local,
                              mklib.platform_args(arch), [], log_file=clog)
 
-    # 4. Build kernel module(s).
+    # 3. Build kernel module(s).
     kos = build_modules(b.files["module"], tree, arch, image, is_local,
                         log_file=clog) if b.files["module"] else []
     if clog:
         clog.close()
 
-    # 5. Init script (+ any non-.c user data files) staged for the guest.
+    # 4. Init script (+ any non-.c user data files) staged for the guest.
     init_name = None
     init_path = None
     if b.files["init"]:
@@ -562,14 +552,14 @@ def run_bundle(src, args) -> int:
         init_path = _stage(scratch / init_name, content)
     data_files = [p for p in user_files if p.suffix != ".c"]
 
-    # 6. Boot and run.
+    # 5. Boot and run.
     key = Path(os.environ.get("SSH_KEY", "id_mackernel"))
     user = os.environ.get("GUEST_USER", "mac")
-    port = g.free_port(args.ssh_port)
+    port = ssh_port if ssh_port is not None else g.free_port(args.ssh_port)
     if port != args.ssh_port:
         log(f"port {args.ssh_port} busy, using {port} instead")
     boot_log = (log_dir / "console.log") if log_dir else (HERE / "run-kernel-boot.log")
-    progress("boot")
+    prog("boot")
     proc = g.boot_qemu(arch, tree, img, seed, port, boot_log)
     rc = 1
     gdir = "/tmp/mkbundle"
@@ -591,7 +581,7 @@ def run_bundle(src, args) -> int:
             g.ssh_run(port, key, user, "chmod +x " + " ".join(f"{gdir}/{e}" for e in execs))
 
         if kos:
-            progress("insmod")
+            prog("insmod")
         for ko in kos:
             log(f"insmod {ko.name} ...")
             if g.ssh_run(port, key, user, f"sudo insmod {gdir}/{ko.name}") != 0:
@@ -606,7 +596,7 @@ def run_bundle(src, args) -> int:
             cmd = "sudo dmesg | tail -n 40"
         else:
             die("bundle has nothing to run (no user binary, init script, or module)")
-        progress("run")
+        prog("run")
         # Guest output -> exec.log when a log dir is set, else streamed to stdout.
         if log_dir:
             with open(log_dir / "exec.log", "w") as elog:
@@ -621,7 +611,7 @@ def run_bundle(src, args) -> int:
         if log_dir:
             with open(log_dir / "dmesg.log", "w") as dlog:
                 g.ssh_run(port, key, user, "sudo dmesg", stdout=dlog, stderr=subprocess.STDOUT)
-        progress("done", exit=rc)
+        prog("done", exit=rc)
     finally:
         if args.keep_running:
             log(f"--keep-running: QEMU still up. SSH: ssh -p {port} -i {key} {user}@127.0.0.1")
@@ -629,6 +619,109 @@ def run_bundle(src, args) -> int:
         else:
             g.teardown(proc)
     return rc
+
+
+def _truthy(v) -> bool:
+    return str(v).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def compare_variants(meta: dict) -> tuple[dict, dict] | None:
+    """If `meta` requests a comparison, return (baseline_meta, patched_meta); else None.
+    patch-compare strips the bundle's own `patch:` for the baseline; thread-compare
+    git-ams a lore thread's series (via an internal `thread` key) for the patched
+    variant. patch-compare wins if both are set."""
+    if _truthy(meta.get("patch-compare")) and meta.get("patch"):
+        baseline = {k: v for k, v in meta.items() if k != "patch"}
+        return baseline, dict(meta)
+    if meta.get("thread-compare"):
+        baseline = {k: v for k, v in meta.items() if k != "thread-compare"}
+        return baseline, {**baseline, "thread": meta["thread-compare"]}
+    return None
+
+
+def run_bundle(src, args) -> int:
+    os.chdir(HERE)
+    # Optional per-job log dir: configure+build -> compile.log, serial -> dmesg.log,
+    # guest output -> exec.log. Without it, behaviour is unchanged (inherits stdio).
+    log_dir = Path(args.log_dir).resolve() if args.log_dir else None
+    if log_dir:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    progress("fetch")
+    bundle_path = fetch_bundle(str(src))
+    b = parse_bundle(bundle_path)
+    enforce_hardened(b.meta)  # always build from Linus's tree; ignore bundle url
+
+    # Bundle builds are in-tree in the (cached) worktree, so a kernel module can
+    # build against /linux directly; BUILD_DIR would split that out, so ignore it.
+    os.environ.pop("BUILD_DIR", None)
+
+    # Target arch: frontmatter `arch:` wins, else ARCH env, else host arch. Set it
+    # in the environment so the configure/build subprocesses agree.
+    if b.meta.get("arch"):
+        os.environ["ARCH"] = mklib.normalize_arch(b.meta["arch"])
+    arch = mklib.target_arch()
+    base_src = Path(os.environ.get("LINUX_SRC", os.path.expanduser("~/linux")))
+
+    # Shared resources, resolved+materialized once (compare mode's two threads must
+    # not race on the cloud-image download or the podman pull).
+    image, is_local = mklib.resolve_image(arch)
+    mklib.ensure_pulled(image, is_local, mklib.platform_args(arch))
+    img = Path(os.environ.get("IMG", mklib.arch_profile(arch)["cloud_img"]))
+    img_url = os.environ.get(
+        "IMG_URL", f"https://cloud-images.ubuntu.com/noble/current/{img.name}")
+    seed = Path(os.environ.get("SEED", "seed.iso"))
+    g.ensure_cloud_image(img, img_url)
+    g.ensure_seed(seed)
+    stem = bundle_path.stem
+
+    # Compare mode: build+boot+run a baseline (no patch/series) and a patched variant
+    # in parallel.
+    variants = compare_variants(b.meta)
+    if variants is not None:
+        baseline_meta, patched_meta = variants
+        # ponytail: two fixed variants, not an N-way matrix; parallel doubles peak
+        # RAM/CPU (two kernel builds + two QEMUs) -- the explicit ask.
+        wt_base = Path(os.environ.get("MK_WT_ROOT") or f"{base_src}-wt")
+        bdir = (log_dir / "baseline") if log_dir else None
+        pdir = (log_dir / "patched") if log_dir else None
+        # Tree prep touches the shared .git, so do both sequentially (never concurrent);
+        # the build/boot/run that follows is per-worktree and safely parallel.
+        tb = prepare_kernel_tree(baseline_meta, base_src,
+                                 log_path=(bdir / "fetch.log") if bdir else None,
+                                 wt_root=wt_base / "baseline")
+        tp = prepare_kernel_tree(patched_meta, base_src,
+                                 log_path=(pdir / "fetch.log") if pdir else None,
+                                 wt_root=wt_base / "patched")
+        log(f"compare: baseline tree {tb}; patched tree {tp}")
+        # Distinct ports; tiny TOCTOU window -- a clash just fails that boot, not silently.
+        p_b = g.free_port(args.ssh_port)
+        p_p = g.free_port(p_b + 1)
+        out: dict[str, int] = {}
+
+        def go(name, tree, ld, port, variant):
+            try:
+                out[name] = build_boot_run(b, tree, arch, args, ld, img, seed,
+                                           image, is_local, stem, port, variant)
+            except SystemExit as e:  # die() raises SystemExit; keep the other variant alive
+                out[name] = e.code if isinstance(e.code, int) else 1
+
+        threads = [threading.Thread(target=go, args=a) for a in (
+            ("base", tb, bdir, p_b, "baseline"),
+            ("patch", tp, pdir, p_p, "patched"),
+        )]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        rc_b, rc_p = out.get("base", 1), out.get("patch", 1)
+        log(f"compare: baseline exit={rc_b}, patched exit={rc_p}")
+        progress("done", exit=rc_p)  # authoritative final line; overall exit = patched
+        return rc_p
+
+    tree = prepare_kernel_tree(b.meta, base_src,
+                               log_path=(log_dir / "fetch.log") if log_dir else None)
+    log(f"kernel tree: {tree}")
+    return build_boot_run(b, tree, arch, args, log_dir, img, seed, image, is_local, stem)
 
 
 def main() -> int:

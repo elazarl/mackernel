@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
 
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{header::{AUTHORIZATION, CONTENT_TYPE}, StatusCode},
     middleware::Next,
     response::sse::{Event, KeepAlive, Sse},
@@ -224,15 +224,26 @@ async fn run_candidate(State(st): State<AppState>, Path(msgid): Path<String>)
     Ok(Json(json!({ "id": id })))
 }
 
-async fn get_log(State(st): State<AppState>, Path((id, kind)): Path<(i64, String)>) -> Result<String, StatusCode> {
+async fn get_log(
+    State(st): State<AppState>,
+    Path((id, kind)): Path<(i64, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<String, StatusCode> {
     let jobdir = st.work.join(id.to_string());
     let logs = jobdir.join("logs");
     if kind == "bundle" {
         return tokio::fs::read_to_string(jobdir.join("bundle.md")).await
             .map_err(|_| StatusCode::NOT_FOUND);
     }
+    // Compare jobs nest per-variant logs under logs/<variant>/. Whitelist the names so
+    // a `?variant=` value can't escape the logs dir.
+    let vdir = match q.get("variant").map(String::as_str) {
+        Some("baseline") => logs.join("baseline"),
+        Some("patched") => logs.join("patched"),
+        _ => logs.clone(),
+    };
     if kind == "issues" {
-        return Ok(collect_issues(&logs));
+        return Ok(collect_issues(&vdir));
     }
     let file = match kind.as_str() {
         "fetch" => "fetch.log",
@@ -243,7 +254,9 @@ async fn get_log(State(st): State<AppState>, Path((id, kind)): Path<(i64, String
         "run" => "run.log",
         _ => return Err(StatusCode::BAD_REQUEST),
     };
-    tokio::fs::read_to_string(logs.join(file)).await.map_err(|_| StatusCode::NOT_FOUND)
+    // run.log is the orchestrator's own output (one per job, top-level), not per-variant.
+    let dir = if kind == "run" { &logs } else { &vdir };
+    tokio::fs::read_to_string(dir.join(file)).await.map_err(|_| StatusCode::NOT_FOUND)
 }
 
 /// Extract kernel BUG/oops/KASAN reports from a dmesg capture. We anchor on
@@ -293,6 +306,22 @@ fn dmesg_reports(content: &str) -> Vec<serde_json::Value> {
 /// parsed into BUG reports (head + foldable call trace); other logs become a single
 /// block of matching lines.
 fn collect_issues(logs: &std::path::Path) -> String {
+    // Scan the dir's own logs, plus any per-variant subdirs (compare jobs) so the
+    // top-level call (used by the end-of-job summary) isn't blind. A `?variant=` call
+    // passes logs/<variant> directly, whose subdirs don't exist — so it stays clean.
+    let mut sections = scan_issue_dir(logs, "");
+    for variant in ["baseline", "patched"] {
+        let sub = logs.join(variant);
+        if sub.is_dir() {
+            sections.extend(scan_issue_dir(&sub, &format!("{variant}/")));
+        }
+    }
+    json!(sections).to_string()
+}
+
+/// Scan one log dir's files for problem markers; `prefix` labels the `file` field
+/// (e.g. "baseline/") so variant sources stay distinguishable in the merged result.
+fn scan_issue_dir(logs: &std::path::Path, prefix: &str) -> Vec<serde_json::Value> {
     // General markers apply to most logs. Sanitizer markers only apply to the
     // runtime console logs: the build/fetch logs mention KASAN/sanitizer as compile
     // flags (e.g. -fsanitize=kernel-address), which are not problems. "panic" is
@@ -321,10 +350,10 @@ fn collect_issues(logs: &std::path::Path) -> String {
             if hits.is_empty() { Vec::new() } else { vec![json!({ "head": hits, "trace": [] })] }
         };
         if !blocks.is_empty() {
-            sections.push(json!({ "file": file, "blocks": blocks }));
+            sections.push(json!({ "file": format!("{prefix}{file}"), "blocks": blocks }));
         }
     }
-    json!(sections).to_string()
+    sections
 }
 
 async fn events(

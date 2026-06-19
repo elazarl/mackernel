@@ -80,8 +80,10 @@ export async function getPhases(id: number): Promise<{ phase: string; ts_ms: num
 export async function getPeaks(): Promise<Peak[]> {
   return (await authed("/api/metrics/peaks")).json();
 }
-export async function getLog(id: number, kind: string): Promise<string> {
-  const r = await authed(`/api/jobs/${id}/logs/${kind}`);
+// `variant` ("baseline" | "patched") reads a compare job's per-variant log subdir.
+export async function getLog(id: number, kind: string, variant?: string): Promise<string> {
+  const q = variant ? `?variant=${encodeURIComponent(variant)}` : "";
+  const r = await authed(`/api/jobs/${id}/logs/${kind}${q}`);
   return r.ok ? r.text() : `(no ${kind} log yet)`;
 }
 // Server-side syntax highlighting via arborium (tree-sitter, Rust-only).

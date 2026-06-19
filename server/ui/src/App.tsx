@@ -12,7 +12,7 @@ import {
   setToken, submit,
 } from "./api";
 import {
-  EXAMPLES, githubTree, KERNEL_URL, parseBundle, ParsedBundle, rolesOf,
+  compareMode, EXAMPLES, githubTree, KERNEL_URL, parseBundle, ParsedBundle, rolesOf, upsertMeta,
 } from "./bundle";
 import specMd from "../../../docs/reproducer-spec.md?raw";
 
@@ -232,18 +232,19 @@ function Dashboard() {
   );
 }
 
+type IssueSection = { file: string; blocks: { head: string[]; trace: string[] }[] };
+
 function JobDetail({ id, summary, onEdit }: { id: number; summary: string | null; onEdit: (text: string) => void }) {
   const [job, setJob] = useState<Job | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
-  const [logText, setLogText] = useState("");
   const [bundleText, setBundleText] = useState("");
-  const [issues, setIssues] = useState<{ file: string; blocks: { head: string[]; trace: string[] }[] }[]>([]);
-  const [issueTab, setIssueTab] = useState("");
   const [maxRepro, setMaxRepro] = useState(false);
   // Phase start times (ms) keyed by phase name — used to mark the timeline.
   const [phaseTs, setPhaseTs] = useState<Record<string, number>>({});
   const bundle = useMemo(() => parseBundle(bundleText), [bundleText]);
+  // A patch-compare / thread-compare job ran baseline + patched; show them side by side.
+  const cmp = useMemo(() => compareMode(bundle), [bundle]);
   const t0 = useRef<number>(0);
   const userPicked = useRef(false);
 
@@ -278,22 +279,11 @@ function JobDetail({ id, summary, onEdit }: { id: number; summary: string | null
     return () => { live = false; es?.close(); };
   }, [id]);
 
-  // Issues: server-side grep of all logs, one entry per source. Refetch as the job advances.
-  useEffect(() => {
-    getLog(id, "issues")
-      .then((t) => { try { setIssues(JSON.parse(t)); } catch { setIssues([]); } })
-      .catch(() => setIssues([]));
-  }, [id, job?.status]);
-  const hasIssues = issues.length > 0;
-  const activeIssue = issues.find((s) => s.file === issueTab) ?? issues[0];
-
   // On failure, jump to the orchestrator log (the reliable failure reason) unless the
   // user has already chosen a tab themselves.
   useEffect(() => {
     if (!userPicked.current && job?.status === "failed") setLogKind("run");
   }, [job?.status]);
-
-  useEffect(() => { getLog(id, logKind).then(setLogText); }, [id, logKind, job?.status]);
 
   const data = samples.map((s) => ({
     t: Math.max(0, Math.round(((s.ts_ms ?? (s as any).ts_ms) - t0.current) / 1000)),
@@ -306,22 +296,17 @@ function JobDetail({ id, summary, onEdit }: { id: number; summary: string | null
 
   return (
     <div>
-      {hasIssues && (
-        <section className="card issues-card">
-          <h2>⚠ Issues</h2>
-          <div className="tabs">
-            {issues.map((s) => (
-              <button key={s.file} className={activeIssue?.file === s.file ? "tab active" : "tab"}
-                onClick={() => setIssueTab(s.file)}>
-                {s.file.replace(/\.log$/, "")} ({s.blocks.reduce((n, b) => n + b.head.length, 0)})
-              </button>
-            ))}
-          </div>
-          {activeIssue?.blocks.map((b, i) => <IssueBlock key={i} head={b.head} trace={b.trace} />)}
-        </section>
+      {cmp ? (
+        <div className="sidebyside">
+          <IssuesCard id={id} variant="baseline" label="baseline" status={job?.status} />
+          <IssuesCard id={id} variant="patched" label="patched" status={job?.status} />
+        </div>
+      ) : (
+        <IssuesCard id={id} status={job?.status} />
       )}
       <section className="card">
-        <h2>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}</h2>
+        <h2>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
+          {cmp && <span className="muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
         <div className="stepper">
           {PHASES.map((p) => (
             <span key={p} className={"step " + stepClass(job, p)}>{p}</span>
@@ -386,9 +371,57 @@ function JobDetail({ id, summary, onEdit }: { id: number; summary: string | null
           ))}
         </div>
         {job?.reaped_ms != null && <p className="muted">logs expired (job dir reclaimed after retention)</p>}
-        <pre className="log">{logText}</pre>
+        {cmp ? (
+          <div className="sidebyside">
+            <div><div className="fname">baseline</div><LogPane id={id} kind={logKind} variant="baseline" status={job?.status} /></div>
+            <div><div className="fname">patched</div><LogPane id={id} kind={logKind} variant="patched" status={job?.status} /></div>
+          </div>
+        ) : (
+          <LogPane id={id} kind={logKind} status={job?.status} />
+        )}
       </section>
     </div>
+  );
+}
+
+// One log pane: fetches the chosen log kind (optionally for a compare variant) and
+// refetches as the job advances. Compare mode renders two of these side by side.
+function LogPane({ id, kind, variant, status }: { id: number; kind: LogKind; variant?: string; status?: string }) {
+  const [text, setText] = useState("");
+  useEffect(() => { getLog(id, kind, variant).then(setText); }, [id, kind, variant, status]);
+  return <pre className="log">{text}</pre>;
+}
+
+// Issues card: server-side grep of the (variant's) logs, one tab per source, call
+// traces folded. Renders nothing when empty for a single job; keeps a labeled slot
+// for a compare column so the two columns stay aligned.
+function IssuesCard({ id, variant, label, status }: { id: number; variant?: string; label?: string; status?: string }) {
+  const [issues, setIssues] = useState<IssueSection[]>([]);
+  const [issueTab, setIssueTab] = useState("");
+  useEffect(() => {
+    getLog(id, "issues", variant)
+      .then((t) => { try { setIssues(JSON.parse(t)); } catch { setIssues([]); } })
+      .catch(() => setIssues([]));
+  }, [id, variant, status]);
+  const active = issues.find((s) => s.file === issueTab) ?? issues[0];
+  if (!issues.length) {
+    return label
+      ? <section className="card"><h2>⚠ Issues · {label}</h2><p className="muted">none</p></section>
+      : null;
+  }
+  return (
+    <section className="card issues-card">
+      <h2>⚠ Issues{label ? ` · ${label}` : ""}</h2>
+      <div className="tabs">
+        {issues.map((s) => (
+          <button key={s.file} className={active?.file === s.file ? "tab active" : "tab"}
+            onClick={() => setIssueTab(s.file)}>
+            {s.file.replace(/\.log$/, "")} ({s.blocks.reduce((n, b) => n + b.head.length, 0)})
+          </button>
+        ))}
+      </div>
+      {active?.blocks.map((b, i) => <IssueBlock key={i} head={b.head} trace={b.trace} />)}
+    </section>
   );
 }
 
@@ -401,6 +434,8 @@ function BundleModal(
 ) {
   const [view, setView] = useState<"edit" | "repro">("edit");
   const parsed = useMemo(() => parseBundle(bundle), [bundle]);
+  const cmp = compareMode(parsed);
+  const threadVal = parsed.meta.find((m) => m.key === "thread-compare")?.value ?? "";
   return (
     <div className="modal" onClick={onClose}>
       <div className="modal-body" onClick={(e) => e.stopPropagation()}>
@@ -411,6 +446,17 @@ function BundleModal(
             <button className={view === "repro" ? "tab active" : "tab"} onClick={() => setView("repro")}>Reproducer</button>
           </div>
           <button onClick={onRun} disabled={!bundle.trim()}>Run reproducer</button>
+        </div>
+        {/* Compare toggles: write into the frontmatter so the run produces baseline +
+            patched side by side. patch-compare needs a patch: in the bundle. */}
+        <div className="bartools">
+          <label><input type="checkbox" checked={cmp === "patch"}
+            onChange={(e) => onChange(upsertMeta(bundle, "patch-compare", e.target.checked ? "true" : "false"))} />
+            {" "}Compare with / without the patch</label>
+          <span className="barsep" />
+          <label>Compare vs lore thread:{" "}
+            <input type="text" className="threadurl" placeholder="https://lore.kernel.org/…" value={threadVal}
+              onChange={(e) => onChange(upsertMeta(bundle, "thread-compare", e.target.value.trim()))} /></label>
         </div>
         {view === "edit" ? (
           <div data-color-mode={theme}>
@@ -475,7 +521,8 @@ function BundlePreview({ parsed }: { parsed: ParsedBundle }) {
 
   const get = (k: string) => parsed.meta.find((m) => m.key === k)?.value;
   const commit = get("commit"), arch = get("arch"), patch = get("patch"), url = get("url");
-  const requestsKernel = !!(commit || patch || url);
+  const cmp = compareMode(parsed), threadCompare = get("thread-compare");
+  const requestsKernel = !!(commit || patch || url || threadCompare);
 
   return (
     <div className="preview">
@@ -490,6 +537,8 @@ function BundlePreview({ parsed }: { parsed: ParsedBundle }) {
           </dd></div>}
           {arch && <div><dt>arch</dt><dd>{arch}</dd></div>}
           {patch && <div><dt>patch</dt><dd>{patch}</dd></div>}
+          {cmp === "patch" && <div><dt>compare</dt><dd>baseline vs patched (with / without patch)</dd></div>}
+          {threadCompare && <div><dt>thread-compare</dt><dd>baseline vs series · {threadCompare}</dd></div>}
           {url && url !== KERNEL_URL && <div><dt>url</dt>
             <dd className="ignored"><s>{url}</s> · ignored</dd></div>}
         </dl>
@@ -597,6 +646,9 @@ const CSS = `
   .examples { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
   .exlabel { color: var(--muted); font-size: 12px; }
   .bartools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .bartools label { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 13px; }
+  .threadurl { background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; font-family: ui-monospace, monospace; font-size: 12px; padding: 4px 7px; width: 280px; }
+  .sidebyside { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
   .chip { background: var(--subtle); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; font-size: 12px; margin: 0; font-family: ui-monospace, monospace; cursor: pointer; }
   .chip:hover { border-color: var(--accent); }
   .barsep { width: 1px; align-self: stretch; background: var(--border); margin: 0 2px; }

@@ -23,13 +23,15 @@ is prose and ignored.
 A `---`-delimited block, at column 0 and outside any code fence, holding
 `key: value` lines. Recognized keys (others ignored):
 
-| Key      | Meaning                                                              |
-|----------|---------------------------------------------------------------------|
-| `url`    | git remote to fetch the kernel from                                 |
-| `commit` | commit / tag / branch to build (e.g. `v6.12`)                       |
-| `patch`  | URL or path to a patch applied on top of `commit`                   |
-| `thread` | lore.kernel.org thread URL; its `[PATCH n/m]` series is `git am`'d on top of `commit` |
-| `arch`   | target arch (`x86_64` / `arm64`); overrides `ARCH` env and host     |
+| Key              | Meaning                                                          |
+|------------------|------------------------------------------------------------------|
+| `url`            | git remote to fetch the kernel from                              |
+| `commit`         | commit / tag / branch to build (e.g. `v6.12`)                    |
+| `patch`          | URL or path to a patch applied on top of `commit`                |
+| `thread`         | lore.kernel.org thread URL; its `[PATCH n/m]` series is `git am`'d on top of `commit` |
+| `arch`           | target arch (`x86_64` / `arm64`); overrides `ARCH` env and host  |
+| `patch-compare`  | `true` to run twice — with and without `patch:` — in parallel    |
+| `thread-compare` | lore thread URL; run baseline vs the thread's series, in parallel|
 
 With no metadata block, the kernel at `LINUX_SRC` (default `~/linux`) is built
 as-is. Arch precedence: frontmatter `arch:` > `ARCH` env > host arch.
@@ -40,6 +42,39 @@ url: git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
 commit: v6.12
 patch: https://example.com/fix.patch
 arch: x86_64
+---
+```
+
+#### Comparison runs (`patch-compare` / `thread-compare`)
+
+Either key turns one bundle into **two runs, executed in parallel** — a **baseline**
+and a **patched** variant — so you can see what a patch (or a mailing-list series)
+changes. They build on separate worktrees and boot separate guests.
+
+- `patch-compare: true` (requires `patch:`) — baseline is `commit:` with the patch
+  *stripped*; patched is `commit:` with the patch applied (`git apply`).
+- `thread-compare: <lore-thread-url>` — baseline is plain `commit:`; patched is
+  `commit:` with the thread's whole patch series applied. The series is fetched as
+  the thread mbox (`<url>/t.mbox.gz`) and applied with `git am` (cover letter and
+  non-patch replies are dropped).
+
+With `--log-dir DIR`, each variant writes its own subdir of the usual logs:
+`DIR/baseline/` and `DIR/patched/`. The runs are reported verbatim (both exit codes
+are printed); the invocation's overall exit status follows the **patched** run. The
+dashboard shows the two variants side by side.
+
+```
+---
+commit: v6.12
+patch: https://example.com/fix.patch
+patch-compare: true
+---
+```
+
+```
+---
+commit: v6.12
+thread-compare: https://lore.kernel.org/lkml/cover.123@example/
 ---
 ```
 
@@ -84,6 +119,10 @@ set -e
 4. Boot the kernel under QEMU (HVF/KVM/TCG) against the Ubuntu cloud image.
 5. Copy the artifacts in and run `init:` over SSH, streaming output.
 6. Exit with the `init:` script's status.
+
+With `patch-compare` / `thread-compare`, steps 1–6 run twice in parallel (a
+baseline and a patched variant, each on its own worktree and guest); the overall
+exit status is the patched run's.
 
 Guest network egress is restricted by default (override with `GUEST_NET=open`);
 the QEMU process can be further confined with `MK_SANDBOX`.
