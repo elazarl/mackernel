@@ -26,7 +26,7 @@ use candle_transformers::utils::apply_repeat_penalty;
 use tokenizers::Tokenizer;
 
 const SYS_START: &str = "You summarize Linux kernel bug reproducers. The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
-const SYS_END: &str = "You summarize Linux kernel bug reproducers. Reply with exactly two short sentences and no preamble. Sentence 1: what the reproducer tests. Sentence 2: what happened on this run.";
+const SYS_END: &str = "You summarize Linux kernel bug reproducer runs. Reply with exactly one short sentence and no preamble describing what happened on this run — whether it reproduced and the outcome.";
 
 const REPEAT_PENALTY: f32 = 1.1;
 const REPEAT_LAST_N: usize = 64;

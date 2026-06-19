@@ -530,8 +530,7 @@ const CSS = `
   .jobs li { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
   .jobs li.active { background: var(--subtle); }
   .jobrow { display: flex; align-items: center; gap: 6px; }
-  .jobsum { font-size: .82em; color: var(--muted); line-height: 1.3; padding-left: 14px;
-            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .jobsum { font-size: .82em; color: var(--muted); line-height: 1.3; padding-left: 14px; }
   .jobs em { color: var(--muted); font-style: normal; } .ph { color: var(--muted); }
   .summary { background: var(--subtle); border-left: 3px solid var(--accent, #58a6ff);
              padding: 8px 10px; border-radius: 6px; margin: 8px 0; line-height: 1.4; }
