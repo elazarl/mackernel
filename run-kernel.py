@@ -55,7 +55,7 @@ def progress(phase: str, **extra) -> None:
             print(f"{PROGRESS_SENTINEL} {json.dumps({'phase': phase, **extra})}", flush=True)
 
 META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare"}
-ROLES = ("user", "module", "kconf", "init")
+ROLES = ("user", "module", "kconf", "patch", "init")
 
 # Hardened mode (always on): a bundle never chooses its own kernel remote. Any
 # bundle that requests a remote tree (url/commit/patch) is forced to build from
@@ -649,6 +649,13 @@ def run_bundle(src, args) -> int:
     progress("fetch")
     bundle_path = fetch_bundle(str(src))
     b = parse_bundle(bundle_path)
+    # Inline patch: a ```patch:foo.patch fence stages its diff to a file and is then
+    # treated exactly like patch: (a local file:// URL) -- so a bundle can carry the
+    # patch to apply (and to patch-compare against) without an external URL.
+    if b.files["patch"] and not b.meta.get("patch"):
+        pf = Path(tempfile.mkdtemp(prefix="mk-patch-")) / "inline.patch"
+        pf.write_text("".join(content for _, content in b.files["patch"]))
+        b.meta["patch"] = pf.as_uri()
     enforce_hardened(b.meta)  # always build from Linus's tree; ignore bundle url
 
     # Bundle builds are in-tree in the (cached) worktree, so a kernel module can

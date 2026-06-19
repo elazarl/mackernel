@@ -51,8 +51,9 @@ Either key turns one bundle into **two runs, executed in parallel** — a **base
 and a **patched** variant — so you can see what a patch (or a mailing-list series)
 changes. They build on separate worktrees and boot separate guests.
 
-- `patch-compare: true` (requires `patch:`) — baseline is `commit:` with the patch
-  *stripped*; patched is `commit:` with the patch applied (`git apply`).
+- `patch-compare: true` (requires a patch — either a `patch:` URL or an inline
+  `patch` fence) — baseline is `commit:` with the patch *stripped*; patched is
+  `commit:` with the patch applied (`git apply`).
 - `thread-compare: <lore-thread-url>` — baseline is plain `commit:`; patched is
   `commit:` with the thread's whole patch series applied. The series is fetched as
   the thread mbox (`<url>/t.mbox.gz`) and applied with `git am` (cover letter and
@@ -78,6 +79,35 @@ thread-compare: https://lore.kernel.org/lkml/cover.123@example/
 ---
 ```
 
+A self-contained `patch-compare` with an **inline patch** (no external URL) — the
+patch sets `EXTRAVERSION`, so `uname -r` differs between the two runs:
+
+`````
+---
+commit: v6.19
+patch-compare: true
+---
+
+# Does this Makefile patch change `uname -r`?
+
+```patch:extraversion.patch
+--- a/Makefile
++++ b/Makefile
+@@ -2,5 +2,5 @@
+ VERSION = 6
+ PATCHLEVEL = 19
+ SUBLEVEL = 0
+-EXTRAVERSION =
++EXTRAVERSION = -patchcompare
+ NAME = Baby Opossum Posse
+```
+
+```init:init.sh
+#!/bin/bash
+echo "RELEASE=$(uname -r)"   # baseline: 6.19.0 · patched: 6.19.0-patchcompare
+```
+`````
+
 ### 2. Role-tagged code fences
 
 Fenced blocks whose info string is `role:filename` contribute files to the build.
@@ -88,6 +118,7 @@ Multiple blocks per role are allowed.
 | `user`    | userspace source/headers, compiled to a guest binary           |
 | `module`  | out-of-tree kernel module source, built against the kernel     |
 | `kconf`   | extra Kconfig fragment, merged into the kernel config          |
+| `patch`   | a unified diff applied to the kernel tree (`git apply`) — an inline alternative to the `patch:` URL |
 | `init`    | start script run in the guest; its exit status is the result   |
 
 ````

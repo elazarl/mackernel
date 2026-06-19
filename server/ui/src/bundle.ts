@@ -9,7 +9,7 @@ export interface ParsedBundle { meta: BundleMeta[]; files: BundleFile[]; }
 // Recognized metadata keys and the canonical tab order (per the spec). Roles not in
 // this list still get a tab, ordered after the known ones.
 const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch", "patch-compare", "thread-compare"];
-export const ROLE_ORDER = ["user", "module", "kconf", "init"];
+export const ROLE_ORDER = ["user", "module", "kconf", "patch", "init"];
 
 const FENCE_OPEN = /^(`{3,})(.*)$/;     // ```role:filename  (or any info string)
 const ROLE_INFO = /^(\w+):(.+)$/;       // role:filename
@@ -94,7 +94,9 @@ const TRUTHY = ["1", "true", "yes", "on"];
 export function compareMode(parsed: ParsedBundle): "patch" | "thread" | null {
   const get = (k: string) => parsed.meta.find((m) => m.key === k)?.value;
   const pc = get("patch-compare");
-  if (pc && TRUTHY.includes(pc.trim().toLowerCase()) && get("patch")) return "patch";
+  // A patch can come from the patch: key or an inline ```patch:… fence.
+  const hasPatch = !!get("patch") || parsed.files.some((f) => f.role === "patch");
+  if (pc && TRUTHY.includes(pc.trim().toLowerCase()) && hasPatch) return "patch";
   if (get("thread-compare")) return "thread";
   return null;
 }
