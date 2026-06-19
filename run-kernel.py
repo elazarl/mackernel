@@ -684,6 +684,11 @@ def run_bundle(src, args) -> int:
         wt_base = Path(os.environ.get("MK_WT_ROOT") or f"{base_src}-wt")
         bdir = (log_dir / "baseline") if log_dir else None
         pdir = (log_dir / "patched") if log_dir else None
+        # Create the per-variant log dirs up front: prepare_kernel_tree writes
+        # <variant>/fetch.log below, before build_boot_run would create them.
+        for d in (bdir, pdir):
+            if d:
+                d.mkdir(parents=True, exist_ok=True)
         # Tree prep touches the shared .git, so do both sequentially (never concurrent);
         # the build/boot/run that follows is per-worktree and safely parallel.
         tb = prepare_kernel_tree(baseline_meta, base_src,
