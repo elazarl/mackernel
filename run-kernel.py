@@ -470,7 +470,7 @@ def run_bundle(src, args) -> int:
     port = g.free_port(args.ssh_port)
     if port != args.ssh_port:
         log(f"port {args.ssh_port} busy, using {port} instead")
-    boot_log = (log_dir / "dmesg.log") if log_dir else (HERE / "run-kernel-boot.log")
+    boot_log = (log_dir / "console.log") if log_dir else (HERE / "run-kernel-boot.log")
     progress("boot")
     proc = g.boot_qemu(arch, tree, img, seed, port, boot_log)
     rc = 1
@@ -518,6 +518,11 @@ def run_bundle(src, args) -> int:
             rc = g.ssh_run(port, key, user, cmd)
             print("\033[1;32m----------------------------------------------\033[0m", flush=True)
         log(f"guest command exited with status {rc}")
+        # Capture the guest kernel ring buffer for the dmesg tab (best effort:
+        # the guest may be wedged after a crash, in which case console.log has it).
+        if log_dir:
+            with open(log_dir / "dmesg.log", "w") as dlog:
+                g.ssh_run(port, key, user, "sudo dmesg", stdout=dlog, stderr=subprocess.STDOUT)
         progress("done", exit=rc)
     finally:
         if args.keep_running:

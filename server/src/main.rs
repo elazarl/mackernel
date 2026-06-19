@@ -144,16 +144,58 @@ async fn get_job(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json
 }
 
 async fn get_log(State(st): State<AppState>, Path((id, kind)): Path<(i64, String)>) -> Result<String, StatusCode> {
+    let jobdir = st.work.join(id.to_string());
+    let logs = jobdir.join("logs");
+    if kind == "bundle" {
+        return tokio::fs::read_to_string(jobdir.join("bundle.md")).await
+            .map_err(|_| StatusCode::NOT_FOUND);
+    }
+    if kind == "issues" {
+        return Ok(collect_issues(&logs));
+    }
     let file = match kind.as_str() {
         "fetch" => "fetch.log",
         "compile" => "compile.log",
+        "console" => "console.log",
         "dmesg" => "dmesg.log",
         "exec" => "exec.log",
         "run" => "run.log",
         _ => return Err(StatusCode::BAD_REQUEST),
     };
-    let path = st.work.join(id.to_string()).join("logs").join(file);
-    tokio::fs::read_to_string(&path).await.map_err(|_| StatusCode::NOT_FOUND)
+    tokio::fs::read_to_string(logs.join(file)).await.map_err(|_| StatusCode::NOT_FOUND)
+}
+
+/// Grep every log file for lines that look like a real problem — crashes, fatal
+/// errors, and sanitizer splats (KASAN/UBSAN/KCSAN/KFENCE) — and return them
+/// grouped by source file. This replaces the old KASAN-only special case with a
+/// generic "anything interesting went wrong" view.
+fn collect_issues(logs: &std::path::Path) -> String {
+    const MARKERS: &[&str] = &[
+        "KASAN", "UBSAN", "KCSAN", "KFENCE", "KMSAN", "sanitizer",
+        "BUG:", "Oops", "panic", "general protection", "use-after-free",
+        "WARNING:", "FATAL", "fatal", "Call Trace", "segfault", "error:", "Error",
+    ];
+    let mut out = String::new();
+    for file in ["console.log", "dmesg.log", "exec.log", "compile.log", "fetch.log", "run.log"] {
+        let Ok(content) = std::fs::read_to_string(logs.join(file)) else { continue };
+        let hits: Vec<&str> = content
+            .lines()
+            .filter(|l| MARKERS.iter().any(|m| l.contains(m)))
+            .collect();
+        if !hits.is_empty() {
+            out.push_str(&format!("===== {file} ({} line(s)) =====\n", hits.len()));
+            for l in hits {
+                out.push_str(l);
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+    }
+    if out.is_empty() {
+        "no error / fatal / panic / sanitizer markers found in any log".to_string()
+    } else {
+        out
+    }
 }
 
 async fn events(
@@ -369,6 +411,7 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
         Some(e) => ("done", Some(e)),
         None => ("failed", status.code().map(|c| c as i64)),
     };
+
     st.db.finish(id, now_ms(), outcome, exit, ram, disk)?;
     st.bus.publish(id, json!({ "kind": "done", "status": outcome, "exit": exit,
                                "ram_peak": ram, "disk_peak": disk }).to_string());

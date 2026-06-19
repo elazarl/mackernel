@@ -19,7 +19,9 @@ const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
 // `run` is the run-kernel.py orchestrator log: it always carries the failure reason
 // (a die() message or an uncaught traceback), even for early crashes that never reach
 // the phase-specific logs — so it's the reliable place to look when a job fails.
-const LOG_KINDS = ["fetch", "compile", "dmesg", "exec", "run"] as const;
+// `issues` is server-side: a grep of every log for error/fatal/panic/sanitizer markers.
+// `dmesg` is the guest kernel ring buffer; `console` is the raw QEMU serial capture.
+const LOG_KINDS = ["fetch", "compile", "console", "dmesg", "exec", "run", "issues"] as const;
 type LogKind = (typeof LOG_KINDS)[number];
 
 const statusColor = (s: string) =>
@@ -178,6 +180,8 @@ function JobDetail({ id }: { id: number }) {
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
   const [logText, setLogText] = useState("");
+  const [bundleText, setBundleText] = useState("");
+  const bundle = useMemo(() => parseBundle(bundleText), [bundleText]);
   const t0 = useRef<number>(0);
   const userPicked = useRef(false);
 
@@ -199,6 +203,7 @@ function JobDetail({ id }: { id: number }) {
         if (v.kind === "phase" || v.kind === "done") getJob(id).then(setJob);
       } catch {}
     };
+    getLog(id, "bundle").then(setBundleText).catch(() => setBundleText(""));
     return () => { live = false; es.close(); };
   }, [id]);
 
@@ -231,6 +236,14 @@ function JobDetail({ id }: { id: number }) {
           </p>
         )}
       </section>
+      {bundleText.trim() && (
+        <section className="card">
+          <h2>Reproducer</h2>
+          {bundle.files.length || bundle.meta.length
+            ? <BundlePreview parsed={bundle} />
+            : <pre className="log">{bundleText}</pre>}
+        </section>
+      )}
       <section className="card">
         <h2>Resource usage</h2>
         <ResponsiveContainer width="100%" height={220}>
