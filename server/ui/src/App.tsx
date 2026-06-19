@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import MDEditor from "@uiw/react-md-editor";
 import {
   Bar, BarChart, CartesianGrid, Legend, Line, LineChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -78,7 +79,6 @@ function Dashboard() {
   const [sel, setSel] = useState<number | null>(null);
   const [bundle, setBundle] = useState("");
   const [showSpec, setShowSpec] = useState(false);
-  const [preview, setPreview] = useState(false);
 
   useEffect(() => {
     const tick = async () => {
@@ -108,34 +108,22 @@ function Dashboard() {
       <div className="cols">
         <div className="left">
           <section className="card">
-            <div className="cardhead">
-              <h2>Submit a bundle</h2>
-              {bundle.trim() && (
-                <button className="linkbtn" onClick={() => setPreview((p) => !p)}>
-                  {preview ? "Edit" : "Preview"}
-                </button>
-              )}
-            </div>
+            <h2>Submit a bundle</h2>
             <div className="examples">
               <span className="exlabel">Examples:</span>
               {EXAMPLES.map((ex) => (
                 <button key={ex.label} className="chip" title={ex.blurb}
-                  onClick={() => { setBundle(ex.bundle); setPreview(false); }}>
+                  onClick={() => setBundle(ex.bundle)}>
                   {ex.label}
                 </button>
               ))}
             </div>
-            {preview && bundle.trim() ? (
-              <div className="md log">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{bundle}</ReactMarkdown>
-              </div>
-            ) : (
-              <>
-                <RawTools text={bundle} onChange={setBundle} />
-                <textarea value={bundle} onChange={(e) => setBundle(e.target.value)}
-                  placeholder="paste a SKILL.md-style bundle (---metadata---, user:/module:/kconf:/init: blocks)" />
-              </>
-            )}
+            <RawTools text={bundle} onChange={setBundle} />
+            {/* Editable markdown: source + live rendered preview (toolbar toggles edit/live/preview). */}
+            <div data-color-mode="dark">
+              <MDEditor value={bundle} onChange={(v) => setBundle(v ?? "")} height={300}
+                textareaProps={{ placeholder: "paste a SKILL.md-style bundle (---metadata---, user:/module:/kconf:/init: blocks)" }} />
+            </div>
             <button onClick={onSubmit} disabled={!bundle.trim()}>Run reproducer</button>
           </section>
           <section className="card">
@@ -167,7 +155,7 @@ function Dashboard() {
         <div className="right">
           {sel == null ? <p className="muted">Select a job to see live progress, metrics, and logs.</p>
             : <JobDetail id={sel} onEdit={(text) => {
-                setBundle(text); setPreview(false);
+                setBundle(text);
                 window.scrollTo({ top: 0, behavior: "smooth" });
               }} />}
         </div>
@@ -318,7 +306,7 @@ function BundlePreview({ parsed }: { parsed: ParsedBundle }) {
         <dl className="meta">
           {/* A bundle that requests a kernel always builds Linus's tree,
               so its commit tree-ish links to GitHub. */}
-          {requestsKernel && <div><dt>kernel</dt>
+          {requestsKernel && <div><dt>repo</dt>
             <dd>torvalds/linux</dd></div>}
           {commit && <div><dt>commit</dt><dd>
             <a href={githubTree(commit)} target="_blank" rel="noreferrer">{commit}</a>
