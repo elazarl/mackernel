@@ -172,8 +172,8 @@ function Dashboard() {
             <h2>Peak resource usage (per job)</h2>
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={peaks.map((p) => ({ id: `#${p.id}`, RAM: +gib(p.ram_peak), Disk: +gib(p.disk_peak) }))}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-                <XAxis dataKey="id" stroke="var(--muted)" /><YAxis stroke="var(--muted)" unit="G" />
+                <CartesianGrid strokeDasharray="3 3" stroke="#8b949e" strokeOpacity={0.3} />
+                <XAxis dataKey="id" stroke="#8b949e" /><YAxis stroke="#8b949e" unit="G" />
                 <Tooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)" }} />
                 <Legend /><Bar dataKey="RAM" fill="#58a6ff" /><Bar dataKey="Disk" fill="#bc8cff" />
               </BarChart>
@@ -318,14 +318,14 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
         <h2>Resource usage</h2>
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-            <XAxis dataKey="t" type="number" domain={[0, "dataMax"]} stroke="var(--muted)" unit="s" />
-            <YAxis stroke="var(--muted)" unit="M" />
+            <CartesianGrid strokeDasharray="3 3" stroke="#8b949e" strokeOpacity={0.3} />
+            <XAxis dataKey="t" type="number" domain={[0, "dataMax"]} stroke="#8b949e" unit="s" />
+            <YAxis stroke="#8b949e" unit="M" />
             <Tooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)" }} />
             <Legend />
             {marks.map((m) => (
-              <ReferenceLine key={m.phase} x={m.t} stroke="var(--muted)" strokeDasharray="4 3"
-                label={{ value: m.phase, position: "insideTopRight", fill: "var(--muted)", fontSize: 10 }} />
+              <ReferenceLine key={m.phase} x={m.t} stroke="#8b949e" strokeDasharray="4 3"
+                label={{ value: m.phase, position: "insideTopRight", fill: "#8b949e", fontSize: 10 }} />
             ))}
             <Line type="monotone" dataKey="RAM" stroke="#58a6ff" dot={false} isAnimationActive={false} />
             <Line type="monotone" dataKey="Disk" stroke="#bc8cff" dot={false} isAnimationActive={false} />
