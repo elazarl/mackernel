@@ -62,6 +62,17 @@ export async function getLog(id: number, kind: string): Promise<string> {
   const r = await authed(`/api/jobs/${id}/logs/${kind}`);
   return r.ok ? r.text() : `(no ${kind} log yet)`;
 }
+// Server-side syntax highlighting via arborium (tree-sitter, Rust-only).
+// Returns highlighted HTML, or null for unsupported languages / parse errors.
+export async function highlight(lang: string, code: string): Promise<string | null> {
+  const r = await authed(`/api/highlight/${lang}`, { method: "POST", body: code });
+  return r.ok ? r.text() : null;
+}
+export async function highlightCss(): Promise<string> {
+  const r = await authed("/api/highlight.css");
+  return r.ok ? r.text() : "";
+}
+
 // EventSource can't set headers; the token rides as a query param (Phase 5).
 export function eventsUrl(id: number): string {
   const t = token();

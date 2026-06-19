@@ -23,3 +23,4 @@ futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
 rust-embed = "8"
 mime_guess = "2"
+arborium = { version = "2.18.0", features = ["lang-c", "lang-bash"] }

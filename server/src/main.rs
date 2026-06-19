@@ -18,10 +18,10 @@ use sysinfo::System;
 
 use axum::{
     extract::{Path, Request, State},
-    http::{header::AUTHORIZATION, StatusCode},
+    http::{header::{AUTHORIZATION, CONTENT_TYPE}, StatusCode},
     middleware::Next,
     response::sse::{Event, KeepAlive, Sse},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -111,6 +111,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/jobs/:id/metrics", get(get_metrics))
         .route("/api/jobs/:id/logs/:kind", get(get_log))
         .route("/api/metrics/peaks", get(get_peaks))
+        .route("/api/highlight.css", get(highlight_css))
+        .route("/api/highlight/:lang", post(highlight_code))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), require_auth));
     let app = api.fallback(embed::static_handler).with_state(state);
 
@@ -232,6 +234,27 @@ async fn get_metrics(State(st): State<AppState>, Path(id): Path<i64>) -> Result<
 
 async fn get_peaks(State(st): State<AppState>) -> Result<Json<Vec<db::Peak>>, StatusCode> {
     Ok(Json(st.db.peaks().map_err(ise)?))
+}
+
+// --- arborium syntax highlighting (server-side; tree-sitter is Rust-only) -----
+
+/// Theme stylesheet for the highlighted HTML. arborium emits custom-element spans
+/// (`<a-k>`, `<a-f>`, …); this maps them to colours under the `.arb` wrapper.
+async fn highlight_css() -> Response {
+    // Sub-category tags inherit `color` from their parent element by default, so
+    // to_css alone is enough — no separate inheritance ruleset needed.
+    let css = arborium::theme::builtin::github_dark().to_css(".arb");
+    ([(CONTENT_TYPE, "text/css; charset=utf-8")], css).into_response()
+}
+
+/// Highlight a code snippet to HTML for `lang` (e.g. `c`, `bash`). Unsupported
+/// languages / parse errors -> 422 so the UI falls back to plain text.
+async fn highlight_code(Path(lang): Path<String>, body: String) -> Result<Response, StatusCode> {
+    let mut hl = arborium::Highlighter::new();
+    match hl.highlight(&lang, &body) {
+        Ok(html) => Ok(([(CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response()),
+        Err(_) => Err(StatusCode::UNPROCESSABLE_ENTITY),
+    }
 }
 
 // --- auth: bearer token (Authorization header, or ?token= for EventSource) ---
