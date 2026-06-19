@@ -74,6 +74,9 @@ export async function runCandidate(msgid: string): Promise<{ id: number }> {
 export async function getMetrics(id: number): Promise<Sample[]> {
   return (await authed(`/api/jobs/${id}/metrics`)).json();
 }
+export async function getPhases(id: number): Promise<{ phase: string; ts_ms: number }[]> {
+  return (await authed(`/api/jobs/${id}/phases`)).json();
+}
 export async function getPeaks(): Promise<Peak[]> {
   return (await authed("/api/metrics/peaks")).json();
 }

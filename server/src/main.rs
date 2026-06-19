@@ -158,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/jobs/:id/events", get(events))
         .route("/api/events", get(global_events))
         .route("/api/jobs/:id/metrics", get(get_metrics))
+        .route("/api/jobs/:id/phases", get(get_phases))
         .route("/api/jobs/:id/logs/:kind", get(get_log))
         .route("/api/candidates", get(list_candidates))
         .route("/api/candidates/:msgid/run", post(run_candidate))
@@ -330,22 +331,11 @@ async fn events(
     State(st): State<AppState>,
     Path(id): Path<i64>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    // Subscribe first so live events during replay aren't lost, then replay the
-    // recorded phase events, then stream live phase/metric/done messages.
-    let live = BroadcastStream::new(st.bus.subscribe(id))
+    // Live phase/metric/done messages only. Recorded phases are fetched up front
+    // via GET /api/jobs/:id/phases, so this stream doesn't replay history.
+    let stream = BroadcastStream::new(st.bus.subscribe(id))
         .filter_map(|r| async move { r.ok() })
         .map(|s| Ok(Event::default().data(s)));
-    let past: Vec<Result<Event, Infallible>> = st
-        .db
-        .get_events(id)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(ts, phase)| {
-            Ok(Event::default()
-                .data(json!({ "kind": "phase", "phase": phase, "ts_ms": ts }).to_string()))
-        })
-        .collect();
-    let stream = futures::stream::iter(past).chain(live);
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -357,6 +347,16 @@ async fn global_events(State(st): State<AppState>) -> Sse<impl Stream<Item = Res
         .filter_map(|r| async move { r.ok() })
         .map(|s| Ok(Event::default().data(s)));
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Recorded phase timestamps for a job — the same events the SSE stream replays,
+/// served as plain JSON so the chart can mark phases on a terminal job (no SSE).
+async fn get_phases(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
+    Ok(Json(
+        st.db.get_events(id).map_err(ise)?.into_iter()
+            .map(|(ts, phase)| json!({ "phase": phase, "ts_ms": ts }))
+            .collect(),
+    ))
 }
 
 async fn get_metrics(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json<Vec<db::Sample>>, StatusCode> {

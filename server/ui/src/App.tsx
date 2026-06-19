@@ -7,7 +7,7 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  Candidate, eventsUrl, getJob, getLog, getMetrics, getPeaks, gib, globalEventsUrl, hasToken,
+  Candidate, eventsUrl, getJob, getLog, getMetrics, getPeaks, getPhases, gib, globalEventsUrl, hasToken,
   highlight, highlightCss, Job, listCandidates, listJobs, mib, Peak, runCandidate, Sample,
   setToken, submit,
 } from "./api";
@@ -257,6 +257,8 @@ function JobDetail({ id, summary, onEdit }: { id: number; summary: string | null
       const m = await getMetrics(id); if (!live) return;
       t0.current = m[0]?.ts_ms ?? Date.now();
       setSamples(m);
+      // Stored phase timestamps — so marks show on terminal jobs that never open the SSE.
+      getPhases(id).then((evs) => { if (live) setPhaseTs(Object.fromEntries(evs.map((e) => [e.phase, e.ts_ms]))); }).catch(() => {});
       // Only stream for a still-running job. The server closes the stream when a
       // job finishes, so opening it on a terminal job just spins reconnects.
       if (j.status === "done" || j.status === "failed") return;
