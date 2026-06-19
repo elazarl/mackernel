@@ -77,10 +77,8 @@ function Dashboard() {
   const [peaks, setPeaks] = useState<Peak[]>([]);
   const [sel, setSel] = useState<number | null>(null);
   const [bundle, setBundle] = useState("");
-  const [editing, setEditing] = useState(true);
   const [showSpec, setShowSpec] = useState(false);
-  const parsed = useMemo(() => parseBundle(bundle), [bundle]);
-  const showRaw = editing || !bundle.trim();
+  const [preview, setPreview] = useState(false);
 
   useEffect(() => {
     const tick = async () => {
@@ -95,7 +93,6 @@ function Dashboard() {
     if (!bundle.trim()) return;
     const { id } = await submit(bundle);
     setBundle("");
-    setEditing(true);
     setSel(id);
     setJobs(await listJobs());
   };
@@ -114,8 +111,8 @@ function Dashboard() {
             <div className="cardhead">
               <h2>Submit a bundle</h2>
               {bundle.trim() && (
-                <button className="linkbtn" onClick={() => setEditing((e) => !e)}>
-                  {showRaw ? "Show structured" : "Edit raw"}
+                <button className="linkbtn" onClick={() => setPreview((p) => !p)}>
+                  {preview ? "Edit" : "Preview"}
                 </button>
               )}
             </div>
@@ -123,20 +120,21 @@ function Dashboard() {
               <span className="exlabel">Examples:</span>
               {EXAMPLES.map((ex) => (
                 <button key={ex.label} className="chip" title={ex.blurb}
-                  onClick={() => { setBundle(ex.bundle); setEditing(false); }}>
+                  onClick={() => { setBundle(ex.bundle); setPreview(false); }}>
                   {ex.label}
                 </button>
               ))}
             </div>
-            {showRaw ? (
+            {preview && bundle.trim() ? (
+              <div className="md log">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{bundle}</ReactMarkdown>
+              </div>
+            ) : (
               <>
                 <RawTools text={bundle} onChange={setBundle} />
                 <textarea value={bundle} onChange={(e) => setBundle(e.target.value)}
-                  onBlur={() => { if (parsed.files.length) setEditing(false); }}
                   placeholder="paste a SKILL.md-style bundle (---metadata---, user:/module:/kconf:/init: blocks)" />
               </>
-            ) : (
-              <BundlePreview parsed={parsed} />
             )}
             <button onClick={onSubmit} disabled={!bundle.trim()}>Run reproducer</button>
           </section>
@@ -169,7 +167,7 @@ function Dashboard() {
         <div className="right">
           {sel == null ? <p className="muted">Select a job to see live progress, metrics, and logs.</p>
             : <JobDetail id={sel} onEdit={(text) => {
-                setBundle(text); setEditing(true);
+                setBundle(text); setPreview(false);
                 window.scrollTo({ top: 0, behavior: "smooth" });
               }} />}
         </div>
