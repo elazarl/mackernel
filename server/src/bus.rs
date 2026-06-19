@@ -4,12 +4,32 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::broadcast;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Bus {
     inner: Arc<Mutex<HashMap<i64, broadcast::Sender<String>>>>,
+    // Process-wide channel for "the job list changed" pings, so clients can live-
+    // update the dashboard without polling.
+    global: broadcast::Sender<String>,
+}
+
+impl Default for Bus {
+    fn default() -> Self {
+        Bus {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            global: broadcast::channel(256).0,
+        }
+    }
 }
 
 impl Bus {
+    pub fn subscribe_global(&self) -> broadcast::Receiver<String> {
+        self.global.subscribe()
+    }
+
+    pub fn publish_global(&self, msg: String) {
+        let _ = self.global.send(msg);
+    }
+
     fn sender(&self, id: i64) -> broadcast::Sender<String> {
         self.inner
             .lock()

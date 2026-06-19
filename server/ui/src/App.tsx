@@ -7,12 +7,11 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  eventsUrl, getJob, getLog, getMetrics, getPeaks, gib, hasToken, highlight,
-  highlightCss, Job, listJobs, mib, Peak, Sample, setToken, submit,
+  eventsUrl, getJob, getLog, getMetrics, getPeaks, gib, globalEventsUrl, hasToken,
+  highlight, highlightCss, Job, listJobs, mib, Peak, Sample, setToken, submit,
 } from "./api";
 import {
-  appendFile, BOILERPLATE, EXAMPLES, githubTree, KERNEL_URL, parseBundle,
-  ParsedBundle, rolesOf, upsertMeta,
+  EXAMPLES, githubTree, KERNEL_URL, parseBundle, ParsedBundle, rolesOf,
 } from "./bundle";
 import specMd from "../../../docs/reproducer-spec.md?raw";
 
@@ -79,25 +78,29 @@ function Dashboard() {
   const [peaks, setPeaks] = useState<Peak[]>([]);
   const [sel, setSel] = useState<number | null>(null);
   const [bundle, setBundle] = useState("");
+  const [modalOpen, setModalOpen] = useState(false);
   const [showSpec, setShowSpec] = useState(false);
   const [hlCss, setHlCss] = useState("");
   useEffect(() => { highlightCss().then(setHlCss).catch(() => {}); }, []);
 
+  // Push, not poll: load once, then refetch only when the server pings that the
+  // job list changed. Idle = no requests.
   useEffect(() => {
     const tick = async () => {
       try { setJobs(await listJobs()); setPeaks(await getPeaks()); } catch {}
     };
     tick();
-    const h = setInterval(tick, 3000);
-    return () => clearInterval(h);
+    const es = new EventSource(globalEventsUrl());
+    es.onmessage = () => { tick(); };
+    return () => es.close();
   }, []);
 
-  const onSubmit = async () => {
+  const onRun = async () => {
     if (!bundle.trim()) return;
     const { id } = await submit(bundle);
     setBundle("");
+    setModalOpen(false);
     setSel(id);
-    setJobs(await listJobs());
   };
 
   return (
@@ -109,26 +112,31 @@ function Dashboard() {
         <button className="linkbtn" onClick={() => setShowSpec(true)}>Spec</button>
       </div>
       {showSpec && <SpecModal onClose={() => setShowSpec(false)} />}
+      {modalOpen && (
+        <BundleModal bundle={bundle} onChange={setBundle}
+          onRun={onRun} onClose={() => setModalOpen(false)} />
+      )}
       <div className="cols">
         <div className="left">
           <section className="card">
             <h2>Submit a bundle</h2>
+            {/* Pasting a bundle opens the modal — the one place you edit / preview / run. */}
+            <input className="paste" placeholder="paste here"
+              onPaste={(e) => {
+                const text = e.clipboardData.getData("text");
+                if (text.trim()) { e.preventDefault(); setBundle(text); setModalOpen(true); }
+              }}
+              onChange={() => { /* controlled-but-ephemeral: real text lives in the modal */ }}
+              value="" />
             <div className="examples">
               <span className="exlabel">Examples:</span>
               {EXAMPLES.map((ex) => (
                 <button key={ex.label} className="chip" title={ex.blurb}
-                  onClick={() => setBundle(ex.bundle)}>
+                  onClick={() => { setBundle(ex.bundle); setModalOpen(true); }}>
                   {ex.label}
                 </button>
               ))}
             </div>
-            <RawTools text={bundle} onChange={setBundle} />
-            {/* Editable markdown: source + live rendered preview (toolbar toggles edit/live/preview). */}
-            <div data-color-mode="dark">
-              <MDEditor value={bundle} onChange={(v) => setBundle(v ?? "")} height={300}
-                textareaProps={{ placeholder: "paste a SKILL.md-style bundle (---metadata---, user:/module:/kconf:/init: blocks)" }} />
-            </div>
-            <button onClick={onSubmit} disabled={!bundle.trim()}>Run reproducer</button>
           </section>
           <section className="card">
             <h2>Jobs</h2>
@@ -158,10 +166,7 @@ function Dashboard() {
         </div>
         <div className="right">
           {sel == null ? <p className="muted">Select a job to see live progress, metrics, and logs.</p>
-            : <JobDetail id={sel} onEdit={(text) => {
-                setBundle(text);
-                window.scrollTo({ top: 0, behavior: "smooth" });
-              }} />}
+            : <JobDetail id={sel} onEdit={(text) => { setBundle(text); setModalOpen(true); }} />}
         </div>
       </div>
     </div>
@@ -186,24 +191,29 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
     setSamples([]); setJob(null); setPhaseTs({});
     userPicked.current = false;
     let live = true;
+    let es: EventSource | null = null;
     (async () => {
       const j = await getJob(id); if (!live) return; setJob(j);
       const m = await getMetrics(id); if (!live) return;
       t0.current = m[0]?.ts_ms ?? Date.now();
       setSamples(m);
+      // Only stream for a still-running job. The server closes the stream when a
+      // job finishes, so opening it on a terminal job just spins reconnects.
+      if (j.status === "done" || j.status === "failed") return;
+      es = new EventSource(eventsUrl(id));
+      es.onmessage = (e) => {
+        try {
+          const v = JSON.parse(e.data);
+          if (v.kind === "metric") setSamples((s) => [...s, v as any].map(toSample));
+          if (v.kind === "phase" && v.phase && v.ts_ms)
+            setPhaseTs((p) => (p[v.phase] ? p : { ...p, [v.phase]: v.ts_ms }));
+          if (v.kind === "phase" || v.kind === "done") getJob(id).then(setJob);
+          if (v.kind === "done") es?.close();
+        } catch {}
+      };
     })();
-    const es = new EventSource(eventsUrl(id));
-    es.onmessage = (e) => {
-      try {
-        const v = JSON.parse(e.data);
-        if (v.kind === "metric") setSamples((s) => [...s, v as any].map(toSample));
-        if (v.kind === "phase" && v.phase && v.ts_ms)
-          setPhaseTs((p) => (p[v.phase] ? p : { ...p, [v.phase]: v.ts_ms }));
-        if (v.kind === "phase" || v.kind === "done") getJob(id).then(setJob);
-      } catch {}
-    };
     getLog(id, "bundle").then(setBundleText).catch(() => setBundleText(""));
-    return () => { live = false; es.close(); };
+    return () => { live = false; es?.close(); };
   }, [id]);
 
   // Issues: server-side grep of all logs. Refetch as the job advances.
@@ -306,28 +316,34 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
   );
 }
 
-// Raw-mode toolbar: edit commit/arch frontmatter and insert file boilerplate.
-function RawTools({ text, onChange }: { text: string; onChange: (s: string) => void }) {
-  const meta = useMemo(() => parseBundle(text), [text]);
-  const valueOf = (k: string) => meta.meta.find((m) => m.key === k)?.value;
-  const editMeta = (k: string) => {
-    const v = window.prompt(`Set ${k}:`, valueOf(k) ?? "");
-    if (v != null && v.trim() !== "") onChange(upsertMeta(text, k, v.trim()));
-  };
-  const addFile = (role: string) => {
-    const b = BOILERPLATE[role];
-    onChange(appendFile(text, role, b.name, b.body));
-  };
-  const label = (k: string) => (valueOf(k) ? `${k}: ${valueOf(k)}` : `+ ${k}`);
+// The one place to review a bundle before running it: toggle between editing the
+// raw markdown and the structured reproducer view (highlighted C/kconf/bash), then
+// run. Opened automatically on paste or when an example is picked.
+function BundleModal(
+  { bundle, onChange, onRun, onClose }:
+  { bundle: string; onChange: (s: string) => void; onRun: () => void; onClose: () => void },
+) {
+  const [view, setView] = useState<"edit" | "repro">("edit");
+  const parsed = useMemo(() => parseBundle(bundle), [bundle]);
   return (
-    <div className="bartools">
-      <button className="chip" onClick={() => editMeta("commit")}>{label("commit")}</button>
-      <button className="chip" onClick={() => editMeta("arch")}>{label("arch")}</button>
-      <span className="barsep" />
-      <button className="chip" onClick={() => addFile("user")}>+ C</button>
-      <button className="chip" onClick={() => addFile("module")}>+ module</button>
-      <button className="chip" onClick={() => addFile("kconf")}>+ kconf</button>
-      <button className="chip" onClick={() => addFile("init")}>+ init</button>
+    <div className="modal" onClick={onClose}>
+      <div className="modal-body" onClick={(e) => e.stopPropagation()}>
+        <button className="modal-close" onClick={onClose} aria-label="close">×</button>
+        <div className="cardhead">
+          <div className="tabs">
+            <button className={view === "edit" ? "tab active" : "tab"} onClick={() => setView("edit")}>Edit</button>
+            <button className={view === "repro" ? "tab active" : "tab"} onClick={() => setView("repro")}>Reproducer</button>
+          </div>
+          <button onClick={onRun} disabled={!bundle.trim()}>Run reproducer</button>
+        </div>
+        {view === "edit" ? (
+          <div data-color-mode="dark">
+            <MDEditor value={bundle} onChange={(v) => onChange(v ?? "")} height={460} />
+          </div>
+        ) : (
+          <BundlePreview parsed={parsed} />
+        )}
+      </div>
     </div>
   );
 }
@@ -439,6 +455,8 @@ const CSS = `
   .cols { display: grid; grid-template-columns: 380px 1fr; gap: 16px; align-items: start; }
   .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
   textarea { width: 100%; height: 140px; box-sizing: border-box; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; font-family: ui-monospace, monospace; padding: 8px; }
+  .paste { width: 100%; box-sizing: border-box; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; font-family: ui-monospace, monospace; padding: 9px; margin-bottom: 10px; }
+  .paste:focus { outline: none; border-color: #58a6ff; }
   .unlock { max-width: 460px; } .unlock code { color: #c9d1d9; }
   .unlock input { width: 100%; box-sizing: border-box; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; font-family: ui-monospace, monospace; padding: 8px; }
   button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer; margin-top: 8px; }

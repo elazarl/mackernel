@@ -78,6 +78,11 @@ export function eventsUrl(id: number): string {
   const t = token();
   return `/api/jobs/${id}/events${t ? `?token=${encodeURIComponent(t)}` : ""}`;
 }
+// Process-wide stream that pings whenever the job list changes (push, not poll).
+export function globalEventsUrl(): string {
+  const t = token();
+  return `/api/events${t ? `?token=${encodeURIComponent(t)}` : ""}`;
+}
 
 export const mib = (b: number) => (b / 1048576).toFixed(0);
 export const gib = (b: number) => (b / 1073741824).toFixed(2);

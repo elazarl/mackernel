@@ -108,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/jobs", post(submit).get(list_jobs))
         .route("/api/jobs/:id", get(get_job))
         .route("/api/jobs/:id/events", get(events))
+        .route("/api/events", get(global_events))
         .route("/api/jobs/:id/metrics", get(get_metrics))
         .route("/api/jobs/:id/logs/:kind", get(get_log))
         .route("/api/metrics/peaks", get(get_peaks))
@@ -134,6 +135,7 @@ async fn submit(State(st): State<AppState>, body: String) -> Result<Json<serde_j
     std::fs::write(dir.join("bundle.md"), body.as_bytes()).map_err(ise)?;
     st.tx.send(SchedMsg::New(id)).map_err(ise)?;
     info!("queued job {id}");
+    st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     Ok(Json(json!({ "id": id })))
 }
 
@@ -225,6 +227,16 @@ async fn events(
         })
         .collect();
     let stream = futures::stream::iter(past).chain(live);
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Process-wide SSE stream of "the job list changed" pings. The client holds one
+/// connection and refetches /api/jobs on each ping — so when nothing changes, no
+/// requests flow (vs. polling every few seconds).
+async fn global_events(State(st): State<AppState>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let stream = BroadcastStream::new(st.bus.subscribe_global())
+        .filter_map(|r| async move { r.ok() })
+        .map(|s| Ok(Event::default().data(s)));
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -336,6 +348,7 @@ async fn scheduler_loop(st: AppState, mut rx: mpsc::UnboundedReceiver<SchedMsg>)
                     error!("job {id} failed: {e}");
                     let _ = st2.db.finish(id, now_ms(), "failed", None, 0, 0);
                     st2.bus.publish(id, serde_json::json!({ "kind": "done", "status": "failed" }).to_string());
+                    st2.bus.publish_global(serde_json::json!({ "kind": "jobs" }).to_string());
                     st2.bus.close(id);
                 }
                 let _ = tx2.send(SchedMsg::Finished(id));
@@ -349,6 +362,7 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
     let logs = dir.join("logs");
     let bundle = dir.join("bundle.md");
     st.db.set_running(id, now_ms())?;
+    st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     info!("job {id}: starting");
 
     let mut child = tokio::process::Command::new("python3")
@@ -418,6 +432,7 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
                         let _ = st.db.set_phase(id, phase);
                         let _ = st.db.add_event(id, now_ms(), phase, "");
                         st.bus.publish(id, json!({ "kind": "phase", "phase": phase, "ts_ms": now_ms() }).to_string());
+                        st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
                     }
                     if let Some(e) = v.get("exit").and_then(|e| e.as_i64()) {
                         exit_from_progress = Some(e);
@@ -443,6 +458,7 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
     st.db.finish(id, now_ms(), outcome, exit, ram, disk)?;
     st.bus.publish(id, json!({ "kind": "done", "status": outcome, "exit": exit,
                                "ram_peak": ram, "disk_peak": disk }).to_string());
+    st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     // Reclaim the per-job kernel worktree (the ~3 GB build tree) now that the job is
     // done; logs + metrics + the DuckDB row stay. Each job owns its MK_WT_ROOT, so
     // this never races another job. Absent for no-metadata jobs (built in LINUX_SRC).
@@ -509,5 +525,6 @@ async fn sweep(st: &AppState) {
             .arg("-C").arg(&st.cfg.linux_src).arg("worktree").arg("prune")
             .output().await;
         info!("cleanup: reaped {reaped} job dir(s) finished >{} days ago", st.cfg.retention_days);
+        st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     }
 }

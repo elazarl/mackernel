@@ -159,8 +159,12 @@ export interface Example { label: string; blurb: string; bundle: string; }
 export const EXAMPLES: Example[] = [
   {
     label: "greeter",
-    blurb: "userspace + module + init; no kernel pinned (builds LINUX_SRC)",
-    bundle: `# greeter — minimal bundle
+    blurb: "userspace + module + init; pinned to v6.19",
+    bundle: `---
+commit: v6.19
+---
+
+# greeter — minimal bundle
 
 Builds a tiny userspace program and a kernel module, boots, loads the module,
 and runs the start script. The program exits 1, which becomes the run's status.
@@ -255,10 +259,14 @@ sudo dmesg | grep -i -A20 'BUG\\|oops\\|null pointer' || true
   },
   {
     label: "userspace syscall",
-    blurb: "userspace-only repro exercising a syscall; no module",
-    bundle: `# uname — userspace-only bundle
+    blurb: "userspace-only repro exercising a syscall; pinned to v6.19",
+    bundle: `---
+commit: v6.19
+---
 
-No kernel pinned and no module — just a C program run in the guest. Reports the
+# uname — userspace-only bundle
+
+Pinned to v6.19, no module — just a C program run in the guest. Reports the
 running kernel release via the \`uname(2)\` syscall.
 
 \`\`\`user:repro.c
