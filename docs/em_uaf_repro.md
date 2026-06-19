@@ -1,8 +1,9 @@
 ---
 url: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
 commit: v6.19
-arch: x86_64
+arch: arm64
 ---
+
 
 # EM perf-domain UAF race reproducer
 
@@ -131,6 +132,7 @@ static int reader_fn(void *data)
 			udelay(5);
 			WRITE_ONCE(pd->nr_perf_states, pd->nr_perf_states);
 		}
+		cond_resched();
 	}
 
 	pr_info("reader stopped\n");
@@ -244,6 +246,11 @@ err_del_dev:
 
 module_init(repro_init);
 
+static void __exit repro_exit(void)
+{
+}
+module_exit(repro_exit);
+
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Reproducer for EM perf-domain UAF race");
 MODULE_AUTHOR("Elazar Leibovich <elazarl@gmail.com>");
@@ -274,20 +281,40 @@ CONFIG_KASAN_VMALLOC=y
 
 ```init:run-repro.sh
 #!/bin/bash
-set -e
+# The runner insmods em_uaf_repro.ko before this script runs.  The module's
+# repro_init() races reader/writer for 60 s and insmod blocks until it returns,
+# so by the time we get here any KASAN splat is already in the ring buffer.
+#
+# We probe two sources:
+#   1. dmesg (kernel ring buffer, available in the guest)
+#   2. /dev/kmsg  (same ring buffer; raw; used as a fallback when dmesg is empty)
+#
+# Either "KASAN:" or "use-after-free" in the output counts as REPRODUCED.
 
-# The runner insmods em_uaf_repro.ko before this script runs; the module's init
-# runs the race for ~60s and insmod blocks until it returns, so by now any KASAN
-# use-after-free is already in dmesg. Surface it and turn it into the exit status.
+echo "=== em_uaf_repro module messages ==="
+sudo dmesg | grep -i 'em_uaf_repro\|racing\|reader\|writer' || true
 
-echo "checking dmesg for the EM perf-domain use-after-free ..."
-if sudo dmesg | grep -qi "use-after-free"; then
+echo ""
+echo "=== checking for KASAN use-after-free ==="
+
+# Capture with all log levels (-r keeps the raw priority prefix).
+DMESG=$(sudo dmesg -r 2>/dev/null || sudo dmesg)
+
+if echo "$DMESG" | grep -qiE 'KASAN:|use-after-free|slab-use-after-free'; then
     echo "REPRODUCED: KASAN use-after-free detected"
-    sudo dmesg | grep -iA 20 "use-after-free" | head -n 40
+    echo "$DMESG" | grep -iEA 25 'KASAN:|use-after-free' | head -n 60
     exit 1
 fi
 
-echo "no KASAN use-after-free report (race window not hit)"
+# Fallback: read /dev/kmsg directly (newer kernels; may need root)
+if sudo cat /dev/kmsg 2>/dev/null | grep -qiE 'KASAN:|use-after-free'; then
+    echo "REPRODUCED: KASAN use-after-free detected (via /dev/kmsg)"
+    sudo cat /dev/kmsg | grep -iEA 25 'KASAN:|use-after-free' | head -n 60
+    exit 1
+fi
+
+echo "no KASAN use-after-free report (race window not hit in 60 s)"
+echo "note: the serial console log on the host may contain more detail."
 exit 0
 ```
 
