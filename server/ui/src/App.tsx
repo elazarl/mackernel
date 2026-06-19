@@ -316,10 +316,10 @@ function BundlePreview({ parsed }: { parsed: ParsedBundle }) {
     <div className="preview">
       {parsed.meta.length ? (
         <dl className="meta">
-          {/* Hardened: a bundle that requests a kernel always builds Linus's tree,
+          {/* A bundle that requests a kernel always builds Linus's tree,
               so its commit tree-ish links to GitHub. */}
           {requestsKernel && <div><dt>kernel</dt>
-            <dd>torvalds/linux <span className="muted">· hardened</span></dd></div>}
+            <dd>torvalds/linux</dd></div>}
           {commit && <div><dt>commit</dt><dd>
             <a href={githubTree(commit)} target="_blank" rel="noreferrer">{commit}</a>
           </dd></div>}
