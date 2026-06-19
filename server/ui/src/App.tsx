@@ -31,6 +31,14 @@ const statusColor = (s: string) =>
   s === "done" ? "#3fb950" : s === "failed" ? "#f85149"
     : s === "running" ? "#d29922" : "#8b949e";
 
+// Theme lives in localStorage and is reflected as data-theme on <html>; the CSS
+// palette is driven by variables that a :root[data-theme="light"] block overrides.
+type Theme = "dark" | "light";
+const THEME_KEY = "mk-theme";
+const getTheme = (): Theme => (localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark");
+const applyTheme = (t: Theme) => { document.documentElement.dataset.theme = t; };
+applyTheme(getTheme()); // run at module load so the Unlock gate is themed too
+
 export function App() {
   const [authed, setAuthed] = useState(hasToken());
 
@@ -82,6 +90,11 @@ function Dashboard() {
   const [bundle, setBundle] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [showSpec, setShowSpec] = useState(false);
+  const [theme, setTheme] = useState<Theme>(getTheme());
+  const toggleTheme = () => {
+    const t = theme === "dark" ? "light" : "dark";
+    setTheme(t); applyTheme(t); localStorage.setItem(THEME_KEY, t);
+  };
   const [hlCss, setHlCss] = useState("");
   useEffect(() => { highlightCss().then(setHlCss).catch(() => {}); }, []);
 
@@ -112,10 +125,11 @@ function Dashboard() {
       <div className="topbar">
         <h1>mackernel — reproducer runner</h1>
         <button className="linkbtn" onClick={() => setShowSpec(true)}>Spec</button>
+        <button className="linkbtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light" : "🌙 Dark"}</button>
       </div>
       {showSpec && <SpecModal onClose={() => setShowSpec(false)} />}
       {modalOpen && (
-        <BundleModal bundle={bundle} onChange={setBundle}
+        <BundleModal bundle={bundle} theme={theme} onChange={setBundle}
           onRun={onRun} onClose={() => setModalOpen(false)} />
       )}
       <div className="cols">
@@ -158,9 +172,9 @@ function Dashboard() {
             <h2>Peak resource usage (per job)</h2>
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={peaks.map((p) => ({ id: `#${p.id}`, RAM: +gib(p.ram_peak), Disk: +gib(p.disk_peak) }))}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#30363d" />
-                <XAxis dataKey="id" stroke="#8b949e" /><YAxis stroke="#8b949e" unit="G" />
-                <Tooltip contentStyle={{ background: "#161b22", border: "1px solid #30363d" }} />
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+                <XAxis dataKey="id" stroke="var(--muted)" /><YAxis stroke="var(--muted)" unit="G" />
+                <Tooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)" }} />
                 <Legend /><Bar dataKey="RAM" fill="#58a6ff" /><Bar dataKey="Disk" fill="#bc8cff" />
               </BarChart>
             </ResponsiveContainer>
@@ -304,14 +318,14 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
         <h2>Resource usage</h2>
         <ResponsiveContainer width="100%" height={220}>
           <LineChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#30363d" />
-            <XAxis dataKey="t" type="number" domain={[0, "dataMax"]} stroke="#8b949e" unit="s" />
-            <YAxis stroke="#8b949e" unit="M" />
-            <Tooltip contentStyle={{ background: "#161b22", border: "1px solid #30363d" }} />
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+            <XAxis dataKey="t" type="number" domain={[0, "dataMax"]} stroke="var(--muted)" unit="s" />
+            <YAxis stroke="var(--muted)" unit="M" />
+            <Tooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)" }} />
             <Legend />
             {marks.map((m) => (
-              <ReferenceLine key={m.phase} x={m.t} stroke="#8b949e" strokeDasharray="4 3"
-                label={{ value: m.phase, position: "insideTopRight", fill: "#8b949e", fontSize: 10 }} />
+              <ReferenceLine key={m.phase} x={m.t} stroke="var(--muted)" strokeDasharray="4 3"
+                label={{ value: m.phase, position: "insideTopRight", fill: "var(--muted)", fontSize: 10 }} />
             ))}
             <Line type="monotone" dataKey="RAM" stroke="#58a6ff" dot={false} isAnimationActive={false} />
             <Line type="monotone" dataKey="Disk" stroke="#bc8cff" dot={false} isAnimationActive={false} />
@@ -336,8 +350,8 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
 // raw markdown and the structured reproducer view (highlighted C/kconf/bash), then
 // run. Opened automatically on paste or when an example is picked.
 function BundleModal(
-  { bundle, onChange, onRun, onClose }:
-  { bundle: string; onChange: (s: string) => void; onRun: () => void; onClose: () => void },
+  { bundle, theme, onChange, onRun, onClose }:
+  { bundle: string; theme: Theme; onChange: (s: string) => void; onRun: () => void; onClose: () => void },
 ) {
   const [view, setView] = useState<"edit" | "repro">("edit");
   const parsed = useMemo(() => parseBundle(bundle), [bundle]);
@@ -353,7 +367,7 @@ function BundleModal(
           <button onClick={onRun} disabled={!bundle.trim()}>Run reproducer</button>
         </div>
         {view === "edit" ? (
-          <div data-color-mode="dark">
+          <div data-color-mode={theme}>
             <MDEditor value={bundle} onChange={(v) => onChange(v ?? "")} height={460} />
           </div>
         ) : (
@@ -484,56 +498,67 @@ function stepClass(job: Job | null, phase: string): string {
 }
 
 const CSS = `
-  :root { color-scheme: dark; }
-  body { margin: 0; background: #0d1117; color: #c9d1d9; font: 14px/1.5 system-ui, sans-serif; }
+  :root {
+    color-scheme: dark;
+    --bg: #0d1117; --card: #161b22; --subtle: #21262d; --border: #30363d;
+    --fg: #c9d1d9; --muted: #8b949e; --accent: #58a6ff; --tab-active: #1f6feb;
+    --overlay: rgba(1, 4, 9, .7);
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #ffffff; --card: #f6f8fa; --subtle: #eaeef2; --border: #d0d7de;
+    --fg: #1f2328; --muted: #656d76; --accent: #0969da; --tab-active: #0969da;
+    --overlay: rgba(140, 149, 159, .4);
+  }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
   .wrap { max-width: 1200px; margin: 0 auto; padding: 16px 24px; }
-  h1 { font-size: 20px; } h2 { font-size: 14px; text-transform: uppercase; color: #8b949e; letter-spacing: .04em; margin: 0 0 10px; }
+  h1 { font-size: 20px; } h2 { font-size: 14px; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; margin: 0 0 10px; }
   .cols { display: grid; grid-template-columns: 380px 1fr; gap: 16px; align-items: start; }
-  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; margin-bottom: 16px; }
-  textarea { width: 100%; height: 140px; box-sizing: border-box; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; font-family: ui-monospace, monospace; padding: 8px; }
-  .paste { width: 100%; box-sizing: border-box; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; font-family: ui-monospace, monospace; padding: 9px; margin-bottom: 10px; }
-  .paste:focus { outline: none; border-color: #58a6ff; }
-  .unlock { max-width: 460px; } .unlock code { color: #c9d1d9; }
-  .unlock input { width: 100%; box-sizing: border-box; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; font-family: ui-monospace, monospace; padding: 8px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+  textarea { width: 100%; height: 140px; box-sizing: border-box; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; font-family: ui-monospace, monospace; padding: 8px; }
+  .paste { width: 100%; box-sizing: border-box; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; font-family: ui-monospace, monospace; padding: 9px; margin-bottom: 10px; }
+  .paste:focus { outline: none; border-color: var(--accent); }
+  .unlock { max-width: 460px; } .unlock code { color: var(--fg); }
+  .unlock input { width: 100%; box-sizing: border-box; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; font-family: ui-monospace, monospace; padding: 8px; }
   button { background: #238636; color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; cursor: pointer; margin-top: 8px; }
   .jobs { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow: auto; }
   .jobs li { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
-  .jobs li.active { background: #21262d; }
-  .jobs em { color: #8b949e; font-style: normal; } .ph { color: #8b949e; }
+  .jobs li.active { background: var(--subtle); }
+  .jobs em { color: var(--muted); font-style: normal; } .ph { color: var(--muted); }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-  .muted { color: #8b949e; }
+  .muted { color: var(--muted); }
   .issues-card { border-color: #f85149; } .issues-card h2 { color: #f85149; }
   .issue-block { margin-bottom: 10px; } .issue-block .linkbtn { margin: 4px 0; }
   .stepper { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-  .step { padding: 3px 9px; border-radius: 999px; border: 1px solid #30363d; color: #8b949e; font-size: 12px; }
+  .step { padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); font-size: 12px; }
   .step.cur { border-color: #d29922; color: #d29922; } .step.done { border-color: #3fb950; color: #3fb950; } .step.fail { border-color: #f85149; color: #f85149; }
   .tabs { display: flex; gap: 4px; margin-bottom: 8px; }
-  .tab { background: #21262d; color: #c9d1d9; margin: 0; } .tab.active { background: #1f6feb; }
-  .log { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; max-height: 360px; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; }
+  .tab { background: var(--subtle); color: var(--fg); margin: 0; } .tab.active { background: var(--tab-active); color: #fff; }
+  .log { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; max-height: 360px; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; }
   .topbar { display: flex; align-items: baseline; gap: 12px; }
   .cardhead { display: flex; align-items: center; justify-content: space-between; }
-  .linkbtn { background: none; border: 0; color: #58a6ff; cursor: pointer; padding: 0; margin: 0; font-size: 13px; text-decoration: underline; }
+  .linkbtn { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; margin: 0; font-size: 13px; text-decoration: underline; }
   .preview { margin-bottom: 8px; }
   .meta { margin: 0 0 8px; } .meta > div { display: flex; gap: 8px; padding: 2px 0; }
-  .meta dt { color: #8b949e; min-width: 64px; } .meta dd { margin: 0; font-family: ui-monospace, monospace; word-break: break-all; }
-  .fname { color: #8b949e; font-family: ui-monospace, monospace; font-size: 12px; margin: 8px 0 2px; }
+  .meta dt { color: var(--muted); min-width: 64px; } .meta dd { margin: 0; font-family: ui-monospace, monospace; word-break: break-all; }
+  .fname { color: var(--muted); font-family: ui-monospace, monospace; font-size: 12px; margin: 8px 0 2px; }
   .examples { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; }
-  .exlabel { color: #8b949e; font-size: 12px; }
+  .exlabel { color: var(--muted); font-size: 12px; }
   .bartools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
-  .chip { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 3px 9px; font-size: 12px; margin: 0; font-family: ui-monospace, monospace; cursor: pointer; }
-  .chip:hover { border-color: #58a6ff; }
-  .barsep { width: 1px; align-self: stretch; background: #30363d; margin: 0 2px; }
-  .ignored { color: #8b949e; }
-  .modal { position: fixed; inset: 0; background: rgba(1, 4, 9, .7); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; z-index: 10; }
-  .modal-body { background: #161b22; border: 1px solid #30363d; border-radius: 8px; max-width: 820px; width: 100%; padding: 20px 28px 28px; position: relative; }
-  .modal-close { position: absolute; top: 6px; right: 12px; background: none; border: 0; color: #8b949e; font-size: 24px; line-height: 1; cursor: pointer; margin: 0; padding: 4px; }
-  .md { color: #c9d1d9; } .md a { color: #58a6ff; }
-  .md h1, .md h2, .md h3 { color: #c9d1d9; text-transform: none; letter-spacing: 0; }
+  .chip { background: var(--subtle); color: var(--fg); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; font-size: 12px; margin: 0; font-family: ui-monospace, monospace; cursor: pointer; }
+  .chip:hover { border-color: var(--accent); }
+  .barsep { width: 1px; align-self: stretch; background: var(--border); margin: 0 2px; }
+  .ignored { color: var(--muted); }
+  .modal { position: fixed; inset: 0; background: var(--overlay); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; overflow: auto; z-index: 10; }
+  .modal-body { background: var(--card); border: 1px solid var(--border); border-radius: 8px; max-width: 820px; width: 100%; padding: 20px 28px 28px; position: relative; }
+  .modal-close { position: absolute; top: 6px; right: 12px; background: none; border: 0; color: var(--muted); font-size: 24px; line-height: 1; cursor: pointer; margin: 0; padding: 4px; }
+  .md { color: var(--fg); } .md a { color: var(--accent); }
+  .md h1, .md h2, .md h3 { color: var(--fg); text-transform: none; letter-spacing: 0; }
   .md h1 { font-size: 20px; } .md h2 { font-size: 16px; } .md h3 { font-size: 14px; }
   .md table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
-  .md th, .md td { border: 1px solid #30363d; padding: 4px 9px; text-align: left; }
-  .md th { background: #21262d; }
-  .md code { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 1px 4px; font-family: ui-monospace, monospace; font-size: 12px; }
-  .md pre { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px; overflow: auto; }
+  .md th, .md td { border: 1px solid var(--border); padding: 4px 9px; text-align: left; }
+  .md th { background: var(--subtle); }
+  .md code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; font-family: ui-monospace, monospace; font-size: 12px; }
+  .md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow: auto; }
   .md pre code { border: 0; padding: 0; background: none; }
 `;
