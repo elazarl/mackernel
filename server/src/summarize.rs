@@ -26,7 +26,8 @@ use candle_transformers::utils::apply_repeat_penalty;
 use tokenizers::Tokenizer;
 
 const SYS_START: &str = "You summarize Linux kernel bug reproducers. The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
-const SYS_END: &str = "You summarize Linux kernel bug reproducer runs. Reply with exactly one short sentence and no preamble describing what happened on this run — whether it reproduced and the outcome.";
+const SYS_END: &str = "You summarize Linux kernel bug reproducer runs.
+Reply with exactly one short sentence and no preamble describing what the reproducer tests, and what acutally happened on this run — whether it reproduced and the outcome.";
 
 const REPEAT_PENALTY: f32 = 1.1;
 const REPEAT_LAST_N: usize = 64;
@@ -39,7 +40,11 @@ pub enum ModelKind {
 
 impl ModelKind {
     fn from_env() -> Self {
-        match std::env::var("MK_SUMMARY_MODEL").unwrap_or_default().to_lowercase().as_str() {
+        match std::env::var("MK_SUMMARY_MODEL")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
             "qwen" | "qwen2.5" | "qwen2.5-1.5b" | "qwen25" => ModelKind::Qwen25_1_5B,
             _ => ModelKind::Phi35Mini,
         }
@@ -125,9 +130,7 @@ impl Summarizer {
         let mut fd = std::fs::File::open(&gguf_path)?;
         let content = gguf_file::Content::read(&mut fd).map_err(|e| e.with_path(&gguf_path))?;
         let model = match kind {
-            ModelKind::Phi35Mini => {
-                Model::Phi3(Phi3::from_gguf(false, content, &mut fd, &device)?)
-            }
+            ModelKind::Phi35Mini => Model::Phi3(Phi3::from_gguf(false, content, &mut fd, &device)?),
             ModelKind::Qwen25_1_5B => Model::Qwen2(Qwen2::from_gguf(content, &mut fd, &device)?),
         };
 
@@ -138,7 +141,13 @@ impl Summarizer {
             .filter_map(|n| vocab.get(*n).copied())
             .collect();
 
-        Ok(Self { kind, model: Mutex::new(model), tokenizer, device, eos })
+        Ok(Self {
+            kind,
+            model: Mutex::new(model),
+            tokenizer,
+            device,
+            eos,
+        })
     }
 
     pub fn kind(&self) -> ModelKind {
@@ -159,7 +168,9 @@ impl Summarizer {
         exit_code: Option<i64>,
         outcome: &str,
     ) -> Result<String> {
-        let exit = exit_code.map(|e| e.to_string()).unwrap_or_else(|| "unknown".into());
+        let exit = exit_code
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "unknown".into());
         let user = format!(
             "{}\n\nRun result: outcome={outcome}, exit_code={exit}.\n{}",
             curate_bundle(bundle_md),
@@ -182,7 +193,10 @@ impl Summarizer {
     /// Greedy generation (deterministic) with a light repeat penalty. Holds the model
     /// lock for the whole call — summaries are serialized, which is fine at this volume.
     fn generate(&self, prompt: &str, max_new: usize) -> Result<String> {
-        let encoding = self.tokenizer.encode(prompt, true).map_err(anyhow::Error::msg)?;
+        let encoding = self
+            .tokenizer
+            .encode(prompt, true)
+            .map_err(anyhow::Error::msg)?;
         let prompt_tokens = encoding.get_ids().to_vec();
         if prompt_tokens.is_empty() {
             anyhow::bail!("empty prompt");
@@ -219,7 +233,10 @@ impl Summarizer {
         }
         drop(model);
 
-        let text = self.tokenizer.decode(&generated, true).map_err(anyhow::Error::msg)?;
+        let text = self
+            .tokenizer
+            .decode(&generated, true)
+            .map_err(anyhow::Error::msg)?;
         Ok(text.trim().to_string())
     }
 }
@@ -267,7 +284,8 @@ fn curate_bundle(md: &str) -> String {
 /// `collect_issues` returns a JSON array `[{"file","lines":[...]}]`. Flatten to a short
 /// plaintext block (capped) for the prompt, or a clear "no issues" note when empty.
 fn curate_issues(issues_json: &str) -> String {
-    let parsed: serde_json::Value = serde_json::from_str(issues_json).unwrap_or(serde_json::Value::Null);
+    let parsed: serde_json::Value =
+        serde_json::from_str(issues_json).unwrap_or(serde_json::Value::Null);
     let mut lines: Vec<&str> = Vec::new();
     if let Some(arr) = parsed.as_array() {
         for section in arr {
