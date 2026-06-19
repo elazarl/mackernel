@@ -169,13 +169,55 @@ async fn get_log(State(st): State<AppState>, Path((id, kind)): Path<(i64, String
     tokio::fs::read_to_string(logs.join(file)).await.map_err(|_| StatusCode::NOT_FOUND)
 }
 
-/// Grep every log file for lines that look like a real problem — crashes, fatal
-/// errors, and sanitizer splats (KASAN/UBSAN/KCSAN/KFENCE) — and return them as a
-/// JSON array `[{"file": "...", "lines": [...]}]` (one entry per log with hits) so
-/// the UI can show each source in its own tab.
+/// Extract kernel BUG/oops/KASAN reports from a dmesg capture. We anchor on
+/// `BUG:` only: a KASAN splat is `BUG: KASAN: …`, a NULL-deref oops is
+/// `BUG: kernel NULL pointer …`, etc., so `BUG:` catches them without separately
+/// grepping `KASAN` (which would just scatter the report's inner lines). Each
+/// report is split into a `head` (the description, shown) and a `trace` (the call
+/// stack onward, folded in the UI).
+fn dmesg_reports(content: &str) -> Vec<serde_json::Value> {
+    let lines: Vec<&str> = content.lines().collect();
+    let is_delim = |l: &str| l.len() >= 10 && l.trim().chars().all(|c| c == '=');
+    let mut blocks = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].contains("BUG:") {
+            i += 1;
+            continue;
+        }
+        // Capture from the BUG line to the report's end: a KASAN `====` delimiter,
+        // an oops `---[ end trace … ]---`, or a hard cap.
+        let start = i;
+        let mut end = lines.len().min(start + 80);
+        let mut j = start + 1;
+        while j < end {
+            if lines[j].contains("---[ end trace") || is_delim(lines[j]) {
+                end = j + 1;
+                break;
+            }
+            j += 1;
+        }
+        let block = &lines[start..end];
+        // Fold from the call stack onward (x86 "Call Trace:", arm64 "Call trace:").
+        let split = block.iter().position(|l| l.contains("Call Trace") || l.contains("Call trace"));
+        let (head, trace): (&[&str], &[&str]) = match split {
+            Some(p) => (&block[..p], &block[p..]),
+            None => (block, &[]),
+        };
+        blocks.push(json!({ "head": head, "trace": trace }));
+        i = end;
+    }
+    blocks
+}
+
+/// Scan log files for lines that look like a real problem and return them as a JSON
+/// array `[{"file": "...", "blocks": [{"head": [...], "trace": [...]}]}]` so the UI
+/// can show each source in its own tab and fold call traces. The dmesg log is
+/// parsed into BUG reports (head + foldable call trace); other logs become a single
+/// block of matching lines.
 fn collect_issues(logs: &std::path::Path) -> String {
-    // General markers apply to every log. Sanitizer markers only apply to the
-    // runtime logs: the build/fetch logs mention KASAN/sanitizer as compile
+    // General markers apply to most logs. Sanitizer markers only apply to the
+    // runtime console logs: the build/fetch logs mention KASAN/sanitizer as compile
     // flags (e.g. -fsanitize=kernel-address), which are not problems. "panic" is
     // likewise dropped from the compile log — the kernel source is full of
     // panic()/BUG() calls that are not build problems.
@@ -187,17 +229,22 @@ fn collect_issues(logs: &std::path::Path) -> String {
     let mut sections = Vec::new();
     for file in ["console.log", "dmesg.log", "exec.log", "compile.log", "fetch.log", "run.log"] {
         let Ok(content) = std::fs::read_to_string(logs.join(file)) else { continue };
-        let runtime = matches!(file, "console.log" | "dmesg.log" | "exec.log");
-        let is_compile = file == "compile.log";
-        let hits: Vec<&str> = content
-            .lines()
-            .filter(|l| {
-                GENERAL.iter().any(|m| !(is_compile && *m == "panic") && l.contains(m))
-                    || (runtime && SANITIZER.iter().any(|m| l.contains(m)))
-            })
-            .collect();
-        if !hits.is_empty() {
-            sections.push(json!({ "file": file, "lines": hits }));
+        let blocks = if file == "dmesg.log" {
+            dmesg_reports(&content)
+        } else {
+            let runtime = matches!(file, "console.log" | "exec.log");
+            let is_compile = file == "compile.log";
+            let hits: Vec<&str> = content
+                .lines()
+                .filter(|l| {
+                    GENERAL.iter().any(|m| !(is_compile && *m == "panic") && l.contains(m))
+                        || (runtime && SANITIZER.iter().any(|m| l.contains(m)))
+                })
+                .collect();
+            if hits.is_empty() { Vec::new() } else { vec![json!({ "head": hits, "trace": [] })] }
+        };
+        if !blocks.is_empty() {
+            sections.push(json!({ "file": file, "blocks": blocks }));
         }
     }
     json!(sections).to_string()

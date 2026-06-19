@@ -181,7 +181,7 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
   const [logKind, setLogKind] = useState<LogKind>("exec");
   const [logText, setLogText] = useState("");
   const [bundleText, setBundleText] = useState("");
-  const [issues, setIssues] = useState<{ file: string; lines: string[] }[]>([]);
+  const [issues, setIssues] = useState<{ file: string; blocks: { head: string[]; trace: string[] }[] }[]>([]);
   const [issueTab, setIssueTab] = useState("");
   const [maxRepro, setMaxRepro] = useState(false);
   // Phase start times (ms) keyed by phase name — used to mark the timeline.
@@ -253,10 +253,12 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
           <div className="tabs">
             {issues.map((s) => (
               <button key={s.file} className={activeIssue?.file === s.file ? "tab active" : "tab"}
-                onClick={() => setIssueTab(s.file)}>{s.file.replace(/\.log$/, "")} ({s.lines.length})</button>
+                onClick={() => setIssueTab(s.file)}>
+                {s.file.replace(/\.log$/, "")} ({s.blocks.reduce((n, b) => n + b.head.length, 0)})
+              </button>
             ))}
           </div>
-          <pre className="log">{activeIssue?.lines.join("\n")}</pre>
+          {activeIssue?.blocks.map((b, i) => <IssueBlock key={i} head={b.head} trace={b.trace} />)}
         </section>
       )}
       <section className="card">
@@ -358,6 +360,25 @@ function BundleModal(
           <BundlePreview parsed={parsed} />
         )}
       </div>
+    </div>
+  );
+}
+
+// One issue report: the description is always shown; the call trace (kernel stack)
+// is folded by default and revealed with a button.
+function IssueBlock({ head, trace }: { head: string[]; trace: string[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="issue-block">
+      <pre className="log">{head.join("\n")}</pre>
+      {trace.length > 0 && (
+        <>
+          <button className="linkbtn" onClick={() => setOpen((o) => !o)}>
+            {open ? "▾ hide call trace" : `▸ show call trace (${trace.length} lines)`}
+          </button>
+          {open && <pre className="log">{trace.join("\n")}</pre>}
+        </>
+      )}
     </div>
   );
 }
@@ -482,6 +503,7 @@ const CSS = `
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .muted { color: #8b949e; }
   .issues-card { border-color: #f85149; } .issues-card h2 { color: #f85149; }
+  .issue-block { margin-bottom: 10px; } .issue-block .linkbtn { margin: 4px 0; }
   .stepper { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
   .step { padding: 3px 9px; border-radius: 999px; border: 1px solid #30363d; color: #8b949e; font-size: 12px; }
   .step.cur { border-color: #d29922; color: #d29922; } .step.done { border-color: #3fb950; color: #3fb950; } .step.fail { border-color: #f85149; color: #f85149; }
