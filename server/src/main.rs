@@ -170,41 +170,37 @@ async fn get_log(State(st): State<AppState>, Path((id, kind)): Path<(i64, String
 }
 
 /// Grep every log file for lines that look like a real problem — crashes, fatal
-/// errors, and sanitizer splats (KASAN/UBSAN/KCSAN/KFENCE) — and return them
-/// grouped by source file. This replaces the old KASAN-only special case with a
-/// generic "anything interesting went wrong" view.
+/// errors, and sanitizer splats (KASAN/UBSAN/KCSAN/KFENCE) — and return them as a
+/// JSON array `[{"file": "...", "lines": [...]}]` (one entry per log with hits) so
+/// the UI can show each source in its own tab.
 fn collect_issues(logs: &std::path::Path) -> String {
     // General markers apply to every log. Sanitizer markers only apply to the
     // runtime logs: the build/fetch logs mention KASAN/sanitizer as compile
-    // flags (e.g. -fsanitize=kernel-address), which are not problems.
+    // flags (e.g. -fsanitize=kernel-address), which are not problems. "panic" is
+    // likewise dropped from the compile log — the kernel source is full of
+    // panic()/BUG() calls that are not build problems.
     const GENERAL: &[&str] = &[
         "BUG:", "Oops", "panic", "general protection", "use-after-free",
         "WARNING:", "FATAL", "fatal", "Call Trace", "segfault", "error:", "Error",
     ];
     const SANITIZER: &[&str] = &["KASAN", "UBSAN", "KCSAN", "KFENCE", "KMSAN", "sanitizer"];
-    let mut out = String::new();
+    let mut sections = Vec::new();
     for file in ["console.log", "dmesg.log", "exec.log", "compile.log", "fetch.log", "run.log"] {
         let Ok(content) = std::fs::read_to_string(logs.join(file)) else { continue };
         let runtime = matches!(file, "console.log" | "dmesg.log" | "exec.log");
+        let is_compile = file == "compile.log";
         let hits: Vec<&str> = content
             .lines()
-            .filter(|l| GENERAL.iter().any(|m| l.contains(m))
-                || (runtime && SANITIZER.iter().any(|m| l.contains(m))))
+            .filter(|l| {
+                GENERAL.iter().any(|m| !(is_compile && *m == "panic") && l.contains(m))
+                    || (runtime && SANITIZER.iter().any(|m| l.contains(m)))
+            })
             .collect();
         if !hits.is_empty() {
-            out.push_str(&format!("===== {file} ({} line(s)) =====\n", hits.len()));
-            for l in hits {
-                out.push_str(l);
-                out.push('\n');
-            }
-            out.push('\n');
+            sections.push(json!({ "file": file, "lines": hits }));
         }
     }
-    if out.is_empty() {
-        "no error / fatal / panic / sanitizer markers found in any log".to_string()
-    } else {
-        out
-    }
+    json!(sections).to_string()
 }
 
 async fn events(

@@ -23,6 +23,8 @@ const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
 // (`issues` — a server-side grep of all logs for error/panic/sanitizer markers — is
 // surfaced separately as a card at the top, not as a log tab.)
 const LOG_KINDS = ["fetch", "compile", "console", "dmesg", "exec", "run"] as const;
+// Only the newest N jobs are listed, so the panel doesn't grow unbounded.
+const JOB_LIMIT = 20;
 type LogKind = (typeof LOG_KINDS)[number];
 
 const statusColor = (s: string) =>
@@ -139,9 +141,9 @@ function Dashboard() {
             </div>
           </section>
           <section className="card">
-            <h2>Jobs</h2>
+            <h2>Jobs{jobs.length > JOB_LIMIT && <span className="muted"> · newest {JOB_LIMIT} of {jobs.length}</span>}</h2>
             <ul className="jobs">
-              {jobs.map((j) => (
+              {[...jobs].sort((a, b) => b.id - a.id).slice(0, JOB_LIMIT).map((j) => (
                 <li key={j.id} className={sel === j.id ? "active" : ""} onClick={() => setSel(j.id)}>
                   <span className="dot" style={{ background: statusColor(j.status) }} />
                   #{j.id} <em>{j.status}</em>
@@ -179,7 +181,8 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
   const [logKind, setLogKind] = useState<LogKind>("exec");
   const [logText, setLogText] = useState("");
   const [bundleText, setBundleText] = useState("");
-  const [issues, setIssues] = useState("");
+  const [issues, setIssues] = useState<{ file: string; lines: string[] }[]>([]);
+  const [issueTab, setIssueTab] = useState("");
   const [maxRepro, setMaxRepro] = useState(false);
   // Phase start times (ms) keyed by phase name — used to mark the timeline.
   const [phaseTs, setPhaseTs] = useState<Record<string, number>>({});
@@ -216,9 +219,14 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
     return () => { live = false; es?.close(); };
   }, [id]);
 
-  // Issues: server-side grep of all logs. Refetch as the job advances.
-  useEffect(() => { getLog(id, "issues").then(setIssues).catch(() => setIssues("")); }, [id, job?.status]);
-  const hasIssues = issues.trim() !== "" && !issues.startsWith("no error");
+  // Issues: server-side grep of all logs, one entry per source. Refetch as the job advances.
+  useEffect(() => {
+    getLog(id, "issues")
+      .then((t) => { try { setIssues(JSON.parse(t)); } catch { setIssues([]); } })
+      .catch(() => setIssues([]));
+  }, [id, job?.status]);
+  const hasIssues = issues.length > 0;
+  const activeIssue = issues.find((s) => s.file === issueTab) ?? issues[0];
 
   // On failure, jump to the orchestrator log (the reliable failure reason) unless the
   // user has already chosen a tab themselves.
@@ -242,7 +250,13 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
       {hasIssues && (
         <section className="card issues-card">
           <h2>⚠ Issues</h2>
-          <pre className="log">{issues}</pre>
+          <div className="tabs">
+            {issues.map((s) => (
+              <button key={s.file} className={activeIssue?.file === s.file ? "tab active" : "tab"}
+                onClick={() => setIssueTab(s.file)}>{s.file.replace(/\.log$/, "")} ({s.lines.length})</button>
+            ))}
+          </div>
+          <pre className="log">{activeIssue?.lines.join("\n")}</pre>
         </section>
       )}
       <section className="card">
