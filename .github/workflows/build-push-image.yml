@@ -1,7 +1,9 @@
 name: build-push-image
 
-# Build the kernel-build container and publish it to GHCR as a multi-arch
-# (amd64 + arm64) image, tagged with the version from the VERSION file.
+# Build the kernel-build container and publish it to GHCR as multi-arch
+# (amd64 + arm64) images, one per gcc version, tagged :<version>-gcc<N>.
+# gcc-15 (the default) is also published as :<version> and :latest, so existing
+# references keep working. A bundle picks its compiler with a `compiler:` key.
 
 on:
   push:
@@ -21,12 +23,28 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        gcc: ["13", "14", "15"]
     steps:
       - uses: actions/checkout@v4
 
       - name: Read version
         id: ver
         run: echo "version=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      # gcc-15 is the default: also tag it as :<version> and :latest so existing
+      # references (which carry no -gcc suffix) keep resolving.
+      - name: Compute tags
+        id: tags
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          TAGS="${IMAGE}:${V}-gcc${{ matrix.gcc }}"
+          if [ "${{ matrix.gcc }}" = "15" ]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:${V}"$'\n'"${IMAGE}:latest"
+          fi
+          { echo "tags<<EOF"; echo "$TAGS"; echo "EOF"; } >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@v3      # enables arm64 emulation on the amd64 runner
       - uses: docker/setup-buildx-action@v3
@@ -45,15 +63,15 @@ jobs:
           file: ./Containerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:${{ steps.ver.outputs.version }}
+          build-args: |
+            GCC_VERSION=${{ matrix.gcc }}
+          tags: ${{ steps.tags.outputs.tags }}
 
       - name: Smoke-test the pushed image (both arches)
         run: |
           set -euo pipefail
           for plat in linux/amd64 linux/arm64; do
-            echo "== $plat =="
-            docker run --rm --platform "$plat" "${IMAGE}:${{ steps.ver.outputs.version }}" \
-              bash -c 'gcc-15 --version | head -1 && make --version | head -1'
+            echo "== $plat gcc-${{ matrix.gcc }} =="
+            docker run --rm --platform "$plat" "${IMAGE}:${{ steps.ver.outputs.version }}-gcc${{ matrix.gcc }}" \
+              bash -c 'gcc-${{ matrix.gcc }} --version | head -1 && make --version | head -1'
           done

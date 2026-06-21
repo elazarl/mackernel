@@ -25,23 +25,28 @@ HERE = Path(__file__).resolve().parent
 
 # --- build image -----------------------------------------------------------
 
-def resolve_image(want_arch: str | None = None) -> tuple[str, bool]:
+def resolve_image(want_arch: str | None = None, gcc: str = "15") -> tuple[str, bool]:
     """Return (image_ref, is_local): prefer the locally-built image, otherwise
     fall back to the multi-arch GHCR image (podman pulls it automatically on
     first use). When want_arch is given and the local image is built for a
     different architecture, use the GHCR image instead -- the local single-arch
-    image cannot satisfy a cross-arch `--platform` request."""
+    image cannot satisfy a cross-arch `--platform` request.
+
+    `gcc` selects the compiler image (from a bundle's `compiler:` key). gcc-15 is
+    the default and uses the unsuffixed tag (back-compatible); other versions use
+    the `-gcc<N>` image published per gcc version by CI / build-container.sh."""
     try:
         version = (HERE / "VERSION").read_text().strip()
     except OSError:
         version = "latest"
 
+    suffix = "" if str(gcc) == "15" else f"-gcc{gcc}"
     # Locally-built image tag (produced by build-container.sh).
-    local_image = os.environ.get("IMAGE", "mackernel-build")
+    local_image = os.environ.get("IMAGE", "mackernel-build") + suffix
     # Prebuilt multi-arch image published to GHCR by CI. Override REMOTE_IMAGE
     # to point elsewhere (e.g. a fork).
     remote_image = os.environ.get(
-        "REMOTE_IMAGE", f"ghcr.io/elazarl/mackernel:{version}"
+        "REMOTE_IMAGE", f"ghcr.io/elazarl/mackernel:{version}{suffix}"
     )
 
     exists = subprocess.run(

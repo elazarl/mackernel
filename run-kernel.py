@@ -54,7 +54,11 @@ def progress(phase: str, **extra) -> None:
         with _PRINT_LOCK:
             print(f"{PROGRESS_SENTINEL} {json.dumps({'phase': phase, **extra})}", flush=True)
 
-META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare"}
+META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare", "compiler"}
+# gcc versions for which a build image is published (see Containerfile / CI). A
+# bundle's `compiler:` key selects one; an unsupported value falls back to the default.
+SUPPORTED_GCC = {"13", "14", "15"}
+DEFAULT_GCC = "15"
 ROLES = ("user", "module", "kconf", "patch", "init")
 
 # Hardened mode (always on): a bundle never chooses its own kernel remote. Any
@@ -669,9 +673,20 @@ def run_bundle(src, args) -> int:
     arch = mklib.target_arch()
     base_src = Path(os.environ.get("LINUX_SRC", os.path.expanduser("~/linux")))
 
+    # Compiler: frontmatter `compiler:` picks the gcc build image (default 15).
+    # gcc-15 defaults to C23 and fails on pre-~6.7 kernels' realmode/boot units;
+    # gcc-13/14 (gnu17) build them. MK_GCC is read by build-kernel.py.
+    gcc = str(b.meta.get("compiler", DEFAULT_GCC)).strip()
+    if gcc not in SUPPORTED_GCC:
+        log(f"compiler {gcc!r} unsupported; using gcc-{DEFAULT_GCC} "
+            f"(have: {', '.join(sorted(SUPPORTED_GCC))})")
+        gcc = DEFAULT_GCC
+    os.environ["MK_GCC"] = gcc
+    log(f"building with gcc-{gcc}")
+
     # Shared resources, resolved+materialized once (compare mode's two threads must
     # not race on the cloud-image download or the podman pull).
-    image, is_local = mklib.resolve_image(arch)
+    image, is_local = mklib.resolve_image(arch, gcc)
     mklib.ensure_pulled(image, is_local, mklib.platform_args(arch))
     img = Path(os.environ.get("IMG", mklib.arch_profile(arch)["cloud_img"]))
     img_url = os.environ.get(

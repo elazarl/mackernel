@@ -17,7 +17,12 @@ This bundle has no metadata block, so it builds the kernel at `LINUX_SRC`
     url: git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
     commit: v6.12
     patch: https://example.com/some.patch
+    compiler: 14
     ---
+
+`compiler:` picks the gcc version of the build container (13, 14, or 15;
+default 15). Use 13/14 for older kernels — gcc-15 defaults to C23 and fails to
+compile pre-~6.7 trees' realmode/boot code ("cannot use keyword 'false'").
 
 Extra Kconfig can be supplied with a `kconf:` block (merged into the build).
 

@@ -18,8 +18,10 @@ def main() -> int:
     arch = mklib.target_arch()
     prof = mklib.arch_profile(arch)
 
-    image, is_local = mklib.resolve_image(arch)
-    print(f"using build image: {image}", flush=True)
+    # gcc version from the bundle's `compiler:` key (run-kernel.py sets MK_GCC).
+    gcc = os.environ.get("MK_GCC", "15")
+    image, is_local = mklib.resolve_image(arch, gcc)
+    print(f"using build image: {image} (gcc-{gcc})", flush=True)
     print(f"target arch: {arch}", flush=True)
 
     # For a local image, --pull=never keeps podman from consulting a (possibly
@@ -53,9 +55,10 @@ def main() -> int:
             "-e", f"ARCH={prof['kernel_arch']}",
             "-e", f"TARGET={prof['image_name']}",
             "-e", f"OPT={opt}",
+            "-e", f"GCC={gcc}",
             image,
             "bash", "-c",
-            'make ARCH="$ARCH" $OPT CC=gcc-15 HOSTCC=gcc-15 -j"$(nproc)" "$TARGET"',
+            'make ARCH="$ARCH" $OPT CC="gcc-$GCC" HOSTCC="gcc-$GCC" -j"$(nproc)" "$TARGET"',
         ],
         check=True,
     )
