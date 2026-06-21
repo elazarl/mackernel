@@ -50,6 +50,19 @@ sudo dnf install qemu-kvm podman xorriso           # Fedora/RHEL
 
 (macOS builds the seed with the bundled `hdiutil`, so no extra package there.)
 
+**Cross-arch on Linux needs qemu-user registered in `binfmt_misc`** (so a foreign-arch
+build container can run). On Debian/Ubuntu/Fedora: `sudo apt install qemu-user-static` /
+`sudo dnf install qemu-user-static`. On **RHEL/CentOS Stream 9** there is *no*
+`qemu-user-static` package — register the handlers from a container instead, and run it
+at boot so it survives reboots (binfmt registration is not persistent):
+
+```bash
+sudo podman run --rm --privileged docker.io/tonistiigi/binfmt --install all
+```
+
+Native builds (host arch == target arch) need none of this. See the cross-arch SELinux
+note under *Notes* below for why CentOS hosts need one extra flag (handled automatically).
+
 You also need a Linux kernel source tree. By default the scripts use `~/linux`:
 
 ```bash
@@ -357,6 +370,14 @@ To bump the version, edit `VERSION` and push — the workflow publishes the new 
   non-host arch in a tree already built for another fails (e.g. `Error 127`). Either set
   `BUILD_DIR` to a per-arch output dir (recommended — keeps the source clean), point `LINUX_SRC`
   at a second clean clone, or `make mrproper` in between.
+- **Cross-arch builds on SELinux hosts (RHEL/CentOS/Fedora):** an emulated build container
+  execs the qemu-user interpreter from the host's `binfmt_misc`, but that interpreter binary
+  carries a *different* container's SELinux MCS categories, so the cross-category read is denied
+  and the emulated process dies with **SIGSEGV (exit 139)**. `mklib.hardening_args()` adds
+  `--security-opt label=disable` automatically — but only for emulated runs on an enforcing host
+  — so just those build containers drop MCS confinement while SELinux stays enforcing
+  system-wide and native builds keep full confinement. No action needed; this note explains the
+  otherwise-baffling SIGSEGV if you ever see it without the flag.
 - **`kconf/x86_64.config` is validated under QEMU TCG emulation,** not on real x86 hardware.
 - `run-kernel.py` uses `-snapshot`, so writes are discarded on exit and the cloud image stays
   pristine and reusable.
