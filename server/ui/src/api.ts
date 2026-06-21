@@ -10,10 +10,16 @@ export interface Job {
   disk_peak: number;
   reaped_ms: number | null;
   summary: string | null;
+  // Per-model summaries (see src/summarize.rs): reproducer one-liner (start), result
+  // one-liner (end), two-paragraph "why it failed" detail (end).
+  repro_summary: string | null;
+  result_summary: string | null;
+  detail: string | null;
   // Provenance for jobs created from an external source (LKML candidate); null otherwise.
   source_url: string | null;
   title: string | null;
 }
+export interface SummarizerInfo { loaded: boolean; label: string; models: number; mem_bytes: number; }
 export interface Sample { ts_ms: number; rss_bytes: number; disk_bytes: number; }
 export interface Peak { id: number; ram_peak: number; disk_peak: number; status: string; }
 // A reproducer cover letter found on LKML, runnable with one click.
@@ -79,6 +85,9 @@ export async function getPhases(id: number): Promise<{ phase: string; ts_ms: num
 }
 export async function getPeaks(): Promise<Peak[]> {
   return (await authed("/api/metrics/peaks")).json();
+}
+export async function getSummarizer(): Promise<SummarizerInfo> {
+  return (await authed("/api/summarizer")).json();
 }
 // `variant` ("baseline" | "patched") reads a compare job's per-variant log subdir.
 export async function getLog(id: number, kind: string, variant?: string): Promise<string> {

@@ -7,9 +7,9 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  Candidate, eventsUrl, getJob, getLog, getMetrics, getPeaks, getPhases, gib, globalEventsUrl, hasToken,
+  Candidate, eventsUrl, getJob, getLog, getMetrics, getPeaks, getPhases, getSummarizer, gib, globalEventsUrl, hasToken,
   highlight, highlightCss, Job, listCandidates, listJobs, mib, Peak, runCandidate, Sample,
-  setToken, submit,
+  setToken, submit, SummarizerInfo,
 } from "./api";
 import {
   compareMode, EXAMPLES, githubTree, KERNEL_URL, parseBundle, ParsedBundle, rolesOf, upsertMeta,
@@ -88,6 +88,7 @@ function Dashboard() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [peaks, setPeaks] = useState<Peak[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [summarizer, setSummarizer] = useState<SummarizerInfo | null>(null);
   const [sel, setSel] = useState<number | null>(null);
   const [bundle, setBundle] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
@@ -108,6 +109,7 @@ function Dashboard() {
         setJobs(await listJobs());
         setPeaks(await getPeaks());
         setCandidates(await listCandidates());
+        setSummarizer(await getSummarizer());
       } catch {}
     };
     tick();
@@ -139,6 +141,11 @@ function Dashboard() {
         <h1>mackernel — reproducer runner</h1>
         <button className="linkbtn" onClick={() => setShowSpec(true)}>Spec</button>
         <button className="linkbtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light" : "🌙 Dark"}</button>
+        {summarizer && (
+          <span className="muted summarizer" title={`${summarizer.models} ${summarizer.label} models (shared weights), incl. KV caches`}>
+            🧠 {summarizer.loaded ? `${summarizer.label} · ${gib(summarizer.mem_bytes)} GB` : "loading model…"}
+          </span>
+        )}
       </div>
       {showSpec && <SpecModal onClose={() => setShowSpec(false)} />}
       {modalOpen && (
@@ -205,7 +212,7 @@ function Dashboard() {
                     )}
                   </div>
                   {j.title && <div className="jobsum" title={j.title}>{j.title}</div>}
-                  {j.summary && <div className="jobsum" title={j.summary}>{j.summary}</div>}
+                  {j.repro_summary && <div className="jobsum" title={j.repro_summary}>{j.repro_summary}</div>}
                 </li>
               ))}
             </ul>
@@ -224,7 +231,7 @@ function Dashboard() {
         </div>
         <div className="right">
           {sel == null ? <p className="muted">Select a job to see live progress, metrics, and logs.</p>
-            : <JobDetail id={sel} summary={jobs.find((j) => j.id === sel)?.summary ?? null}
+            : <JobDetail id={sel}
                 onEdit={(text) => { setBundle(text); setModalOpen(true); }} />}
         </div>
       </div>
@@ -234,7 +241,7 @@ function Dashboard() {
 
 type IssueSection = { file: string; blocks: { head: string[]; trace: string[] }[] };
 
-function JobDetail({ id, summary, onEdit }: { id: number; summary: string | null; onEdit: (text: string) => void }) {
+function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void }) {
   const [job, setJob] = useState<Job | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
@@ -270,7 +277,7 @@ function JobDetail({ id, summary, onEdit }: { id: number; summary: string | null
           if (v.kind === "metric") setSamples((s) => [...s, v as any].map(toSample));
           if (v.kind === "phase" && v.phase && v.ts_ms)
             setPhaseTs((p) => (p[v.phase] ? p : { ...p, [v.phase]: v.ts_ms }));
-          if (v.kind === "phase" || v.kind === "done") getJob(id).then(setJob);
+          if (v.kind === "phase" || v.kind === "done" || v.kind === "summary") getJob(id).then(setJob);
           if (v.kind === "done") es?.close();
         } catch {}
       };
@@ -312,13 +319,20 @@ function JobDetail({ id, summary, onEdit }: { id: number; summary: string | null
             <span key={p} className={"step " + stepClass(job, p)}>{p}</span>
           ))}
         </div>
-        {summary && <p className="summary">📝 {summary}</p>}
+        {job?.repro_summary && <p className="summary">📝 {job.repro_summary}</p>}
+        {job?.result_summary && <p className="summary">✅ {job.result_summary}</p>}
         {job && (
           <p className="muted">
             exit {job.exit_code ?? "—"} · peak RAM {gib(job.ram_peak)} GB · peak disk {gib(job.disk_peak)} GB
           </p>
         )}
       </section>
+      {job?.detail && (
+        <section className="card">
+          <h2>Why it failed</h2>
+          <p className="detail">{job.detail}</p>
+        </section>
+      )}
       {bundleText.trim() && (
         <section className="card">
           <div className="cardhead">
@@ -626,6 +640,8 @@ const CSS = `
   .candactions { padding-left: 14px; } .candactions .chip { margin-top: 4px; }
   .summary { background: var(--subtle); border-left: 3px solid var(--accent, #58a6ff);
              padding: 8px 10px; border-radius: 6px; margin: 8px 0; line-height: 1.4; }
+  .detail { white-space: pre-wrap; line-height: 1.5; margin: 0; }
+  .summarizer { margin-left: auto; font-size: .85em; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .muted { color: var(--muted); }
   .issues-card { border-color: #f85149; } .issues-card h2 { color: #f85149; }

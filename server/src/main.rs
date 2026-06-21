@@ -82,15 +82,15 @@ async fn main() -> anyhow::Result<()> {
         let bundle_path = argv.get(2).cloned().unwrap_or_default();
         let md = std::fs::read_to_string(&bundle_path)?;
         let s = summarize::Summarizer::load()?;
-        info!("loaded summary model: {}", s.kind().label());
-        let out = match argv.get(3) {
-            Some(logs) => {
-                let issues = collect_issues(std::path::Path::new(logs));
-                s.summarize_end(&md, &issues, Some(1), "done")?
-            }
-            None => s.summarize_start(&md)?,
-        };
-        println!("SUMMARY: {out}");
+        info!("loaded summary model: {} ({} MB incl. KV)", summarize::LABEL, s.memory_bytes() / 1_048_576);
+        println!("TITLE:  {}", s.title(&md)?);
+        println!("REPRO:  {}", s.summarize_repro(&md)?);
+        if let Some(logs) = argv.get(3) {
+            let logs = std::path::Path::new(logs);
+            let issues = collect_issues(logs);
+            println!("RESULT: {}", s.summarize_result(&md, &issues, Some(1), "done")?);
+            println!("DETAIL: {}", s.detail(&md, logs)?);
+        }
         return Ok(());
     }
 
@@ -126,7 +126,8 @@ async fn main() -> anyhow::Result<()> {
         let slot = summarizer.clone();
         tokio::task::spawn_blocking(move || match summarize::Summarizer::load() {
             Ok(s) => {
-                info!("summary model ready ({})", s.kind().label());
+                info!("summary model ready ({}, 4 models, {} MB incl. KV)",
+                    summarize::LABEL, s.memory_bytes() / 1_048_576);
                 let _ = slot.set(Arc::new(s));
             }
             Err(e) => warn!("summary model unavailable, summaries disabled: {e:#}"),
@@ -163,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/candidates", get(list_candidates))
         .route("/api/candidates/:msgid/run", post(run_candidate))
         .route("/api/metrics/peaks", get(get_peaks))
+        .route("/api/summarizer", get(get_summarizer))
         .route("/api/highlight.css", get(highlight_css))
         .route("/api/highlight/:lang", post(highlight_code))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), require_auth));
@@ -396,6 +398,20 @@ async fn get_peaks(State(st): State<AppState>) -> Result<Json<Vec<db::Peak>>, St
     Ok(Json(st.db.peaks().map_err(ise)?))
 }
 
+/// Summarizer status: label, model count, and measured RAM (weights + KV caches).
+/// `loaded` is false until the background model load finishes.
+async fn get_summarizer(State(st): State<AppState>) -> Json<serde_json::Value> {
+    match st.summarizer.get() {
+        Some(s) => Json(json!({
+            "loaded": true,
+            "label": summarize::LABEL,
+            "models": 4,
+            "mem_bytes": s.memory_bytes(),
+        })),
+        None => Json(json!({ "loaded": false, "label": summarize::LABEL, "models": 4, "mem_bytes": 0 })),
+    }
+}
+
 // --- arborium syntax highlighting (server-side; tree-sitter is Rust-only) -----
 
 /// Theme stylesheet for the highlighted HTML. arborium emits custom-element spans
@@ -513,37 +529,59 @@ async fn scheduler_loop(st: AppState, mut rx: mpsc::UnboundedReceiver<SchedMsg>)
 fn spawn_summary(st: &AppState, id: i64, stage: &'static str) {
     let Some(sumz) = st.summarizer.get().cloned() else { return };
     let dir = st.work.join(id.to_string());
+    if stage == "start" {
+        // Bundle only: title + reproducer one-liner, generated concurrently.
+        let s = sumz.clone();
+        spawn_one(st, id, "title", dir.clone(), move |bundle, _logs| s.title(&bundle));
+        let s = sumz;
+        spawn_one(st, id, "repro", dir, move |bundle, _logs| s.summarize_repro(&bundle));
+    } else {
+        // Bundle + run output: result one-liner + two-paragraph detail, concurrently.
+        let (exit, outcome) = st.db.get_job(id).ok().flatten()
+            .map(|j| (j.exit_code, j.status))
+            .unwrap_or((None, "done".to_string()));
+        let s = sumz.clone();
+        spawn_one(st, id, "result", dir.clone(), move |bundle, logs| {
+            let issues = collect_issues(&logs);
+            s.summarize_result(&bundle, &issues, exit, &outcome)
+        });
+        let s = sumz;
+        spawn_one(st, id, "detail", dir, move |bundle, logs| s.detail(&bundle, &logs));
+    }
+}
+
+/// Run one summary generation (its own model, its own blocking thread, so a stage's
+/// two outputs run concurrently), store it in the matching column, and broadcast.
+/// `gen` receives the bundle text and the logs dir. Failures are logged and leave the
+/// field as-is; never blocks the job pipeline.
+fn spawn_one<F>(st: &AppState, id: i64, field: &'static str, dir: std::path::PathBuf, gen: F)
+where
+    F: FnOnce(String, std::path::PathBuf) -> anyhow::Result<String> + Send + 'static,
+{
     let (db, bus) = (st.db.clone(), st.bus.clone());
-    // For the end summary, snapshot the just-finished row (status/exit) now.
-    let job = if stage == "end" { st.db.get_job(id).ok().flatten() } else { None };
     tokio::spawn(async move {
         let Ok(bundle) = tokio::fs::read_to_string(dir.join("bundle.md")).await else { return };
         let logs = dir.join("logs");
-        let result = tokio::task::spawn_blocking(move || {
-            if stage == "start" {
-                sumz.summarize_start(&bundle)
-            } else {
-                let issues = collect_issues(&logs);
-                let (exit, outcome) = job
-                    .map(|j| (j.exit_code, j.status))
-                    .unwrap_or((None, "done".to_string()));
-                sumz.summarize_end(&bundle, &issues, exit, &outcome)
-            }
-        })
-        .await;
-        match result {
+        match tokio::task::spawn_blocking(move || gen(bundle, logs)).await {
             Ok(Ok(text)) if !text.is_empty() => {
-                if let Err(e) = db.set_summary(id, &text) {
-                    warn!("job {id}: storing {stage} summary failed: {e:#}");
+                let stored = match field {
+                    "title" => db.set_title(id, &text),
+                    "repro" => db.set_repro(id, &text),
+                    "result" => db.set_result(id, &text),
+                    "detail" => db.set_detail(id, &text),
+                    _ => Ok(()),
+                };
+                if let Err(e) = stored {
+                    warn!("job {id}: storing {field} summary failed: {e:#}");
                     return;
                 }
-                bus.publish(id, json!({ "kind": "summary", "stage": stage, "summary": text }).to_string());
+                bus.publish(id, json!({ "kind": "summary", "field": field, "text": text }).to_string());
                 bus.publish_global(json!({ "kind": "jobs" }).to_string());
-                info!("job {id}: {stage} summary ready");
+                info!("job {id}: {field} summary ready");
             }
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => warn!("job {id}: {stage} summary failed: {e:#}"),
-            Err(e) => warn!("job {id}: {stage} summary task panicked: {e}"),
+            Ok(Err(e)) => warn!("job {id}: {field} summary failed: {e:#}"),
+            Err(e) => warn!("job {id}: {field} summary task panicked: {e}"),
         }
     });
 }

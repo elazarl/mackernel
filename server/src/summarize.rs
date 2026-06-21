@@ -1,103 +1,61 @@
 //! In-process, CPU-only LLM summarizer for reproducer jobs.
 //!
-//! Produces a short natural-language summary of a reproducer bundle — once when a
-//! job starts (bundle only) and again when it finishes (bundle + run output). Runs
-//! entirely in-process via `candle` against a quantized GGUF model; the model is
-//! downloaded once (cached under `~/.cache/huggingface`) and loaded at boot.
-//!
-//! Two models are supported and selected with `MK_SUMMARY_MODEL`:
-//!   - `phi3.5` (default) — Phi-3.5-mini-instruct, crisper summaries, ~50 s/summary on the
-//!     home box (AMD Ryzen 7 5700U, CPU).
-//!   - `qwen2.5` — Qwen2.5-1.5B-Instruct, ~3x faster (~15 s) and more verbose.
+//! Produces four outputs per job via `candle` against the quantized Phi-3.5-mini GGUF
+//! (downloaded once, cached under `~/.cache/huggingface`, loaded at boot):
+//!   - a short **title**,
+//!   - a one-sentence **reproducer** summary (at job start, bundle only),
+//!   - a one-sentence **result** summary (at job end, + run output),
+//!   - a two-paragraph **detail** ("why it failed", reading the bundle + all logs).
 //! Set `MK_SUMMARY_DISABLE=1` to turn the feature off entirely.
 //!
+//! Each output has its OWN model instance (`title_model`/`repro_model`/`result_model`/
+//! `detail_model`), so the two generations of a stage run concurrently instead of
+//! contending on one lock. The instances share weight tensors by Arc (cold-cloned at
+//! load, before any KV cache is allocated) — ~1x weights, but each carries its own
+//! full-context KV cache, which is why `mem_bytes` is tracked (see `load`).
+//!
 //! candle's quantized CPU prefill does NOT parallelize across cores, so latency scales
-//! with prompt length — hence the aggressive curation in `curate_bundle`/`curate_issues`.
+//! with prompt length — hence the aggressive curation in `curate_*`.
 
+use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use candle_core::quantized::gguf_file;
 use candle_core::{Device, Tensor};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
-use candle_transformers::models::quantized_phi3::ModelWeights as Phi3;
-use candle_transformers::models::quantized_qwen2::ModelWeights as Qwen2;
+use candle_transformers::models::quantized_phi3::ModelWeights as Model;
 use candle_transformers::utils::apply_repeat_penalty;
 use tokenizers::Tokenizer;
 
-const SYS_START: &str = "You summarize Linux kernel bug reproducers. The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
-const SYS_END: &str = "You summarize Linux kernel bug reproducer runs.
-Reply with exactly one short sentence and no preamble describing what the reproducer tests, and what acutally happened on this run — whether it reproduced and the outcome.";
+const SYS_TITLE: &str = "You write a short title for a Linux kernel bug reproducer. Reply with a title of at most 8 words. No preamble, no quotes, no trailing period.";
+const SYS_REPRO: &str = "You summarize Linux kernel bug reproducers. The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
+const SYS_RESULT: &str = "You summarize Linux kernel bug reproducer runs. Reply with exactly one short sentence and no preamble describing what actually happened on this run — whether it reproduced and the outcome.";
+const SYS_DETAIL: &str = "Read the reproducer text and the result. Explain in two paragraphs what the failure is, why it happened, and quote excerpts from the logs. No preamble.";
 
 const REPEAT_PENALTY: f32 = 1.1;
 const REPEAT_LAST_N: usize = 64;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ModelKind {
-    Phi35Mini,
-    Qwen25_1_5B,
-}
+const GGUF_REPO: &str = "bartowski/Phi-3.5-mini-instruct-GGUF";
+const GGUF_FILE: &str = "Phi-3.5-mini-instruct-Q4_K_M.gguf";
+const TOKENIZER_REPO: &str = "microsoft/Phi-3.5-mini-instruct";
+/// Turn-ending special tokens, in priority order.
+const EOS_NAMES: &[&str] = &["<|endoftext|>", "<|end|>"];
+/// Human-readable model label, surfaced in logs and `/api/summarizer`.
+pub const LABEL: &str = "phi3.5-mini";
 
-impl ModelKind {
-    fn from_env() -> Self {
-        match std::env::var("MK_SUMMARY_MODEL")
-            .unwrap_or_default()
-            .to_lowercase()
-            .as_str()
-        {
-            "qwen" | "qwen2.5" | "qwen2.5-1.5b" | "qwen25" => ModelKind::Qwen25_1_5B,
-            _ => ModelKind::Phi35Mini,
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            ModelKind::Phi35Mini => "phi3.5-mini",
-            ModelKind::Qwen25_1_5B => "qwen2.5-1.5b",
-        }
-    }
-
-    /// (gguf repo, gguf filename).
-    fn gguf(&self) -> (&'static str, &'static str) {
-        match self {
-            ModelKind::Phi35Mini => (
-                "bartowski/Phi-3.5-mini-instruct-GGUF",
-                "Phi-3.5-mini-instruct-Q4_K_M.gguf",
-            ),
-            ModelKind::Qwen25_1_5B => (
-                "bartowski/Qwen2.5-1.5B-Instruct-GGUF",
-                "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
-            ),
-        }
-    }
-
-    fn tokenizer_repo(&self) -> &'static str {
-        match self {
-            ModelKind::Phi35Mini => "microsoft/Phi-3.5-mini-instruct",
-            ModelKind::Qwen25_1_5B => "Qwen/Qwen2.5-1.5B-Instruct",
-        }
-    }
-
-    /// Special tokens that end a turn, in priority order.
-    fn eos_names(&self) -> &'static [&'static str] {
-        match self {
-            ModelKind::Phi35Mini => &["<|endoftext|>", "<|end|>"],
-            ModelKind::Qwen25_1_5B => &["<|im_end|>", "<|endoftext|>"],
-        }
-    }
-}
-
-enum Model {
-    Phi3(Phi3),
-    Qwen2(Qwen2),
-}
-
+/// One candle model per output. They share weight tensors by Arc (cold-cloned in
+/// `load`) but each owns a full-context KV cache, so a stage's two generations run
+/// concurrently. `mem_bytes` is the measured RSS of weights + the four KV caches.
 pub struct Summarizer {
-    kind: ModelKind,
-    model: Mutex<Model>,
+    title_model: Mutex<Model>,
+    repro_model: Mutex<Model>,
+    result_model: Mutex<Model>,
+    detail_model: Mutex<Model>,
     tokenizer: Tokenizer,
     device: Device,
     eos: Vec<u32>,
+    mem_bytes: u64,
 }
 
 impl Summarizer {
@@ -109,59 +67,75 @@ impl Summarizer {
         )
     }
 
-    /// Download (if needed) and load the configured model. Blocking — call from a
-    /// blocking thread. First call may download ~1-2.5 GB; later calls hit the
-    /// `~/.cache/huggingface` cache and are fast.
+    /// Download (if needed) and load the model, then cold-clone it into four
+    /// instances. Blocking — call from a blocking thread. First call may download
+    /// ~2.5 GB; later calls hit the `~/.cache/huggingface` cache and are fast.
     pub fn load() -> Result<Self> {
-        let kind = ModelKind::from_env();
-        let (repo, file) = kind.gguf();
         let api = hf_hub::api::sync::Api::new().context("init hf-hub api")?;
         let gguf_path = api
-            .model(repo.to_string())
-            .get(file)
-            .with_context(|| format!("download {repo}/{file}"))?;
+            .model(GGUF_REPO.to_string())
+            .get(GGUF_FILE)
+            .with_context(|| format!("download {GGUF_REPO}/{GGUF_FILE}"))?;
         let tok_path = api
-            .model(kind.tokenizer_repo().to_string())
+            .model(TOKENIZER_REPO.to_string())
             .get("tokenizer.json")
             .context("download tokenizer.json")?;
 
         let tokenizer = Tokenizer::from_file(&tok_path).map_err(anyhow::Error::msg)?;
         let device = Device::Cpu;
+
+        let rss0 = self_rss();
         let mut fd = std::fs::File::open(&gguf_path)?;
         let content = gguf_file::Content::read(&mut fd).map_err(|e| e.with_path(&gguf_path))?;
-        let model = match kind {
-            ModelKind::Phi35Mini => Model::Phi3(Phi3::from_gguf(false, content, &mut fd, &device)?),
-            ModelKind::Qwen25_1_5B => Model::Qwen2(Qwen2::from_gguf(content, &mut fd, &device)?),
-        };
-
+        let model = Model::from_gguf(false, content, &mut fd, &device)?;
+        // Cold-clone: the KV cache is empty here, so each clone is independent and
+        // shares weight tensors by Arc (~1x weights + N KV caches). NEVER clone a
+        // warmed model — its KV buffer is Arc-shared and writes would corrupt across
+        // clones (see candle_nn::kv_cache).
         let vocab = tokenizer.get_vocab(true);
-        let eos: Vec<u32> = kind
-            .eos_names()
-            .iter()
-            .filter_map(|n| vocab.get(*n).copied())
-            .collect();
+        let eos: Vec<u32> = EOS_NAMES.iter().filter_map(|n| vocab.get(*n).copied()).collect();
 
-        Ok(Self {
-            kind,
-            model: Mutex::new(model),
+        let mut s = Self {
+            title_model: Mutex::new(model.clone()),
+            repro_model: Mutex::new(model.clone()),
+            result_model: Mutex::new(model.clone()),
+            detail_model: Mutex::new(model),
             tokenizer,
             device,
             eos,
-        })
+            mem_bytes: 0,
+        };
+        // Warm each model once so its KV cache allocates its full context-length
+        // buffer (candle pre-allocates on the first token); the RSS delta then
+        // captures weights + all four caches.
+        // ponytail: RSS delta also catches incidental startup allocs; model+caches dominate.
+        for m in [&s.title_model, &s.repro_model, &s.result_model, &s.detail_model] {
+            let _ = s.generate(m, &s.format_prompt("Reply with OK.", "ping"), 1);
+        }
+        s.mem_bytes = self_rss().saturating_sub(rss0);
+        Ok(s)
     }
 
-    pub fn kind(&self) -> ModelKind {
-        self.kind
+    /// Measured RAM of the four model instances (weights + KV caches), in bytes.
+    pub fn memory_bytes(&self) -> u64 {
+        self.mem_bytes
     }
 
-    /// Summary at job start: bundle only, no results yet (one sentence).
-    pub fn summarize_start(&self, bundle_md: &str) -> Result<String> {
+    /// Short title for the job, from the bundle alone (job start).
+    pub fn title(&self, bundle_md: &str) -> Result<String> {
         let user = curate_bundle(bundle_md);
-        self.generate(&self.format_prompt(SYS_START, &user), 64)
+        self.generate(&self.title_model, &self.format_prompt(SYS_TITLE, &user), 24)
     }
 
-    /// Summary at job end: bundle + curated run output (two sentences).
-    pub fn summarize_end(
+    /// One sentence on what the reproducer tests, from the bundle alone (job start).
+    pub fn summarize_repro(&self, bundle_md: &str) -> Result<String> {
+        let user = curate_bundle(bundle_md);
+        self.generate(&self.repro_model, &self.format_prompt(SYS_REPRO, &user), 64)
+    }
+
+    /// One sentence on what happened on this run: bundle + curated issues + outcome
+    /// (job end).
+    pub fn summarize_result(
         &self,
         bundle_md: &str,
         issues_json: &str,
@@ -176,23 +150,22 @@ impl Summarizer {
             curate_bundle(bundle_md),
             curate_issues(issues_json),
         );
-        self.generate(&self.format_prompt(SYS_END, &user), 96)
+        self.generate(&self.result_model, &self.format_prompt(SYS_RESULT, &user), 96)
+    }
+
+    /// Two-paragraph "why it failed", reading the bundle plus all labeled logs (job end).
+    pub fn detail(&self, bundle_md: &str, logs_dir: &Path) -> Result<String> {
+        let user = format!("{}\n\n{}", curate_bundle(bundle_md), curate_logs(logs_dir));
+        self.generate(&self.detail_model, &self.format_prompt(SYS_DETAIL, &user), 400)
     }
 
     fn format_prompt(&self, sys: &str, user: &str) -> String {
-        match self.kind {
-            ModelKind::Phi35Mini => {
-                format!("<|system|>\n{sys}<|end|>\n<|user|>\n{user}<|end|>\n<|assistant|>\n")
-            }
-            ModelKind::Qwen25_1_5B => format!(
-                "<|im_start|>system\n{sys}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n"
-            ),
-        }
+        format!("<|system|>\n{sys}<|end|>\n<|user|>\n{user}<|end|>\n<|assistant|>\n")
     }
 
-    /// Greedy generation (deterministic) with a light repeat penalty. Holds the model
-    /// lock for the whole call — summaries are serialized, which is fine at this volume.
-    fn generate(&self, prompt: &str, max_new: usize) -> Result<String> {
+    /// Greedy generation (deterministic) with a light repeat penalty. Holds the given
+    /// model's lock for the whole call; distinct models generate concurrently.
+    fn generate(&self, model: &Mutex<Model>, prompt: &str, max_new: usize) -> Result<String> {
         let encoding = self
             .tokenizer
             .encode(prompt, true)
@@ -202,14 +175,10 @@ impl Summarizer {
             anyhow::bail!("empty prompt");
         }
 
-        let mut model = self.model.lock().unwrap();
+        let mut model = model.lock().unwrap();
         let mut logits_processor = LogitsProcessor::from_sampling(42, Sampling::ArgMax);
 
-        // Prefill. Phi3 resets its KV cache when index_pos == 0; Qwen2 needs an
-        // explicit clear before reusing the loaded model for a fresh generation.
-        if let Model::Qwen2(m) = &mut *model {
-            m.clear_kv_cache();
-        }
+        // Prefill. Phi3 resets its KV cache when index_pos == 0, so each call starts fresh.
         let input = Tensor::new(prompt_tokens.as_slice(), &self.device)?.unsqueeze(0)?;
         let logits = forward(&mut model, &input, 0)?.squeeze(0)?;
         let mut next = logits_processor.sample(&logits)?;
@@ -242,10 +211,54 @@ impl Summarizer {
 }
 
 fn forward(model: &mut Model, input: &Tensor, pos: usize) -> candle_core::Result<Tensor> {
-    match model {
-        Model::Phi3(m) => m.forward(input, pos),
-        Model::Qwen2(m) => m.forward(input, pos),
+    model.forward(input, pos)
+}
+
+/// Resident set size (bytes) of the current process. Linux reads `/proc/self/statm`;
+/// elsewhere it shells out to `ps`. Best-effort: returns 0 on failure.
+/// ponytail: assumes 4 KiB pages on Linux — fine for the x86_64 home box.
+fn self_rss() -> u64 {
+    #[cfg(target_os = "linux")]
+    if let Ok(s) = std::fs::read_to_string("/proc/self/statm") {
+        if let Some(pages) = s.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok()) {
+            return pages * 4096;
+        }
     }
+    std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|kb| kb * 1024)
+        .unwrap_or(0)
+}
+
+/// Read each known log file, label it with context, and cap per-file + overall so the
+/// detail prompt stays bounded (candle CPU prefill cost scales with prompt length).
+/// ponytail: per-file ~2.5k chars, total ~10k; raise if two-paragraph quality suffers.
+fn curate_logs(logs_dir: &Path) -> String {
+    const LOGS: &[(&str, &str)] = &[
+        ("compile.log", "This is the kernel compilation through podman:"),
+        ("dmesg.log", "This is the dmesg from the VM serial:"),
+        ("console.log", "This is the raw VM serial console:"),
+        ("exec.log", "This is the in-VM reproducer execution log:"),
+        ("run.log", "This is the orchestrator (run-kernel.py) log:"),
+        ("fetch.log", "This is the kernel source fetch log:"),
+    ];
+    let mut out = String::new();
+    for (file, label) in LOGS {
+        let Ok(content) = std::fs::read_to_string(logs_dir.join(file)) else { continue };
+        let content = content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        out.push_str(label);
+        out.push('\n');
+        out.push_str(&cap_chars(content, 2500));
+        out.push_str("\n\n");
+    }
+    cap_chars(out.trim(), 10000)
 }
 
 /// Reproducer bundles are mostly C source inside code fences; for a short summary we
@@ -351,5 +364,21 @@ mod tests {
         assert_eq!(cap_chars("abc", 10), "abc");
         let capped = cap_chars("ααααα", 3); // multibyte; must not panic
         assert!(capped.chars().count() <= 4);
+    }
+
+    #[test]
+    fn curate_logs_labels_and_caps() {
+        let dir = std::env::temp_dir().join(format!("mk_curate_logs_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("compile.log"), "gcc: fatal error xyz").unwrap();
+        std::fs::write(dir.join("dmesg.log"), "d".repeat(9000)).unwrap();
+        std::fs::write(dir.join("console.log"), "   ").unwrap(); // blank → skipped
+        let c = curate_logs(&dir);
+        assert!(c.contains("kernel compilation through podman"), "{c}");
+        assert!(c.contains("dmesg from the VM serial"));
+        assert!(c.contains("fatal error xyz"));
+        assert!(!c.contains("raw VM serial console"), "blank log should be skipped");
+        assert!(c.chars().count() <= 10_001, "overall cap");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
