@@ -420,10 +420,10 @@ async fn get_summarizer(State(st): State<AppState>) -> Json<serde_json::Value> {
         Some(s) => Json(json!({
             "loaded": true,
             "label": summarize::LABEL,
-            "models": 4,
+            "models": 2,
             "mem_bytes": s.memory_bytes(),
         })),
-        None => Json(json!({ "loaded": false, "label": summarize::LABEL, "models": 4, "mem_bytes": 0 })),
+        None => Json(json!({ "loaded": false, "label": summarize::LABEL, "models": 2, "mem_bytes": 0 })),
     }
 }
 
