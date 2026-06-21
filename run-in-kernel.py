@@ -80,8 +80,9 @@ def main() -> int:
     key = Path(os.environ.get("SSH_KEY", "id_mackernel"))
     user = os.environ.get("GUEST_USER", "mac")
 
-    image, is_local = mklib.resolve_image(arch)
-    log(f"using build image: {image} (target arch: {arch})")
+    gcc = os.environ.get("MK_GCC", "15")
+    image, is_local = mklib.resolve_image(arch, gcc)
+    log(f"using build image: {image} (gcc-{gcc}, target arch: {arch})")
 
     ensure_kernel(linux_src, arch)
     g.ensure_cloud_image(img, img_url)
