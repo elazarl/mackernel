@@ -44,14 +44,15 @@ const EOS_NAMES: &[&str] = &["<|endoftext|>", "<|end|>"];
 /// Human-readable model label, surfaced in logs and `/api/summarizer`.
 pub const LABEL: &str = "phi3.5-mini";
 
-/// One candle model per output. They share weight tensors by Arc (cold-cloned in
-/// `load`) but each owns a full-context KV cache, so a stage's two generations run
-/// concurrently. `mem_bytes` is the measured RSS of weights + the four KV caches.
+/// Two model instances sharing weight tensors by Arc (cold-cloned in `load`) but each
+/// with its own KV cache, so a stage's two outputs generate concurrently. `model_a`
+/// serves title (start) + result (end); `model_b` serves repro (start) + detail (end).
+/// Profiling showed the per-model KV cache (~3.9GB), not the shared ~2.8GB weights,
+/// dominates RAM — so two caches instead of four roughly halves resident memory.
+/// `mem_bytes` is the measured RSS of weights + the two KV caches.
 pub struct Summarizer {
-    title_model: Mutex<Model>,
-    repro_model: Mutex<Model>,
-    result_model: Mutex<Model>,
-    detail_model: Mutex<Model>,
+    model_a: Mutex<Model>,
+    model_b: Mutex<Model>,
     tokenizer: Tokenizer,
     device: Device,
     eos: Vec<u32>,
@@ -84,45 +85,30 @@ impl Summarizer {
         let tokenizer = Tokenizer::from_file(&tok_path).map_err(anyhow::Error::msg)?;
         let device = Device::Cpu;
 
-        let mb = |b: u64| b / 1_048_576;
         let rss0 = self_rss();
         let mut fd = std::fs::File::open(&gguf_path)?;
         let content = gguf_file::Content::read(&mut fd).map_err(|e| e.with_path(&gguf_path))?;
         let model = Model::from_gguf(false, content, &mut fd, &device)?;
-        let r_gguf = self_rss();
-        // Cold-clone: the KV cache is empty here, so each clone is independent and
-        // shares weight tensors by Arc (~1x weights + N KV caches). NEVER clone a
-        // warmed model — its KV buffer is Arc-shared and writes would corrupt across
-        // clones (see candle_nn::kv_cache).
-        let m1 = model.clone(); let rc1 = self_rss();
-        let m2 = model.clone(); let rc2 = self_rss();
-        let m3 = model.clone(); let rc3 = self_rss();
-        eprintln!("[mem] rss0={}MB  after_gguf={}MB (+{})  clone1=+{}  clone2=+{}  clone3=+{}",
-            mb(rss0), mb(r_gguf), mb(r_gguf - rss0), mb(rc1 - r_gguf), mb(rc2 - rc1), mb(rc3 - rc2));
+        // Cold-clone once: the clone shares weight tensors by Arc (the ~2.8GB weights
+        // cost ~1x) and gets its own empty KV cache. NEVER clone a warmed model — its
+        // KV buffer is Arc-shared and writes would corrupt across clones (candle_nn::kv_cache).
         let vocab = tokenizer.get_vocab(true);
         let eos: Vec<u32> = EOS_NAMES.iter().filter_map(|n| vocab.get(*n).copied()).collect();
 
         let mut s = Self {
-            title_model: Mutex::new(m1),
-            repro_model: Mutex::new(m2),
-            result_model: Mutex::new(m3),
-            detail_model: Mutex::new(model),
+            model_a: Mutex::new(model.clone()),
+            model_b: Mutex::new(model),
             tokenizer,
             device,
             eos,
             mem_bytes: 0,
         };
-        // Warm each model once so its KV cache allocates its full context-length
-        // buffer (candle pre-allocates on the first token); the RSS delta then
-        // captures weights + all four caches.
-        // ponytail: RSS delta also catches incidental startup allocs; model+caches dominate.
-        let r_prewarm = self_rss();
-        for m in [&s.title_model, &s.repro_model, &s.result_model, &s.detail_model] {
+        // Warm both so their KV caches allocate up front; the RSS delta then captures
+        // weights + the two caches. The caches dominate RAM, so two instead of four
+        // halves it (see the Summarizer doc comment).
+        for m in [&s.model_a, &s.model_b] {
             let _ = s.generate(m, &s.format_prompt("Reply with OK.", "ping"), 1);
         }
-        let r_postwarm = self_rss();
-        eprintln!("[mem] pre_warm={}MB  post_warm={}MB  warm_delta=+{}MB  TOTAL=+{}MB",
-            mb(r_prewarm), mb(r_postwarm), mb(r_postwarm - r_prewarm), mb(r_postwarm - rss0));
         s.mem_bytes = self_rss().saturating_sub(rss0);
         Ok(s)
     }
@@ -135,14 +121,14 @@ impl Summarizer {
     /// Terse two-word title for the job, from the bundle alone (job start).
     pub fn title(&self, bundle_md: &str) -> Result<String> {
         let user = curate_bundle(bundle_md);
-        let raw = self.generate(&self.title_model, &self.format_prompt(SYS_TITLE, &user), 8)?;
+        let raw = self.generate(&self.model_a, &self.format_prompt(SYS_TITLE, &user), 8)?;
         Ok(two_words(&raw))
     }
 
     /// One sentence on what the reproducer tests, from the bundle alone (job start).
     pub fn summarize_repro(&self, bundle_md: &str) -> Result<String> {
         let user = curate_bundle(bundle_md);
-        self.generate(&self.repro_model, &self.format_prompt(SYS_REPRO, &user), 64)
+        self.generate(&self.model_b, &self.format_prompt(SYS_REPRO, &user), 64)
     }
 
     /// One sentence on what happened on this run: bundle + curated issues + outcome
@@ -162,13 +148,13 @@ impl Summarizer {
             curate_bundle(bundle_md),
             curate_issues(issues_json),
         );
-        self.generate(&self.result_model, &self.format_prompt(SYS_RESULT, &user), 96)
+        self.generate(&self.model_a, &self.format_prompt(SYS_RESULT, &user), 96)
     }
 
     /// Two-paragraph "why it failed", reading the bundle plus all labeled logs (job end).
     pub fn detail(&self, bundle_md: &str, logs_dir: &Path) -> Result<String> {
         let user = format!("{}\n\n{}", curate_bundle(bundle_md), curate_logs(logs_dir));
-        self.generate(&self.detail_model, &self.format_prompt(SYS_DETAIL, &user), 400)
+        self.generate(&self.model_b, &self.format_prompt(SYS_DETAIL, &user), 400)
     }
 
     fn format_prompt(&self, sys: &str, user: &str) -> String {
