@@ -195,7 +195,7 @@ function Dashboard() {
                 <li key={j.id} className={sel === j.id ? "active" : ""} onClick={() => setSel(j.id)}>
                   <div className="jobrow">
                     <span className="dot" style={{ background: statusColor(j.status) }} />
-                    #{j.id} <em>{j.status}</em>
+                    #{j.id}{j.short_title && <strong className="jtitle"> {j.short_title}</strong>} <em>{j.status}</em>
                     {j.phase && j.status === "running" && <span className="ph"> · {j.phase}</span>}
                     {j.exit_code != null && <span className="ph"> · exit {j.exit_code}</span>}
                     {j.reaped_ms != null && <span className="ph"> · logs expired</span>}
@@ -622,6 +622,7 @@ const CSS = `
   .jobrow { display: flex; align-items: center; gap: 6px; }
   .jobsum { font-size: .82em; color: var(--muted); line-height: 1.3; padding-left: 14px; }
   .jobs em { color: var(--muted); font-style: normal; } .ph { color: var(--muted); }
+  .jtitle { color: var(--fg); font-weight: 600; }
   .srclink { margin-left: auto; font-size: .82em; color: var(--accent, #58a6ff); text-decoration: none; }
   .candactions { padding-left: 14px; } .candactions .chip { margin-top: 4px; }
   .summary { background: var(--subtle); border-left: 3px solid var(--accent, #58a6ff);

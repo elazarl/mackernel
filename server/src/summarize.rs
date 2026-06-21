@@ -27,7 +27,8 @@ use tokenizers::Tokenizer;
 
 const SYS_START: &str = "You summarize Linux kernel bug reproducers. The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
 const SYS_END: &str = "You summarize Linux kernel bug reproducer runs.
-Reply with exactly one short sentence and no preamble describing what the reproducer tests, and what acutally happened on this run — whether it reproduced and the outcome.";
+Reply with exactly two short sentences and no preamble: the first says what the reproducer tests; the second says what actually happened on this run — whether it reproduced and the outcome.";
+const SYS_TITLE: &str = "You name Linux kernel bug reproducers. Reply with exactly two words — a terse title — and nothing else. No punctuation, no preamble.";
 
 const REPEAT_PENALTY: f32 = 1.1;
 const REPEAT_LAST_N: usize = 64;
@@ -158,6 +159,13 @@ impl Summarizer {
     pub fn summarize_start(&self, bundle_md: &str) -> Result<String> {
         let user = curate_bundle(bundle_md);
         self.generate(&self.format_prompt(SYS_START, &user), 64)
+    }
+
+    /// A terse two-word title for the job, from the bundle alone.
+    pub fn summarize_title(&self, bundle_md: &str) -> Result<String> {
+        let user = curate_bundle(bundle_md);
+        let raw = self.generate(&self.format_prompt(SYS_TITLE, &user), 8)?;
+        Ok(two_words(&raw))
     }
 
     /// Summary at job end: bundle + curated run output (two sentences).
@@ -309,6 +317,17 @@ fn curate_issues(issues_json: &str) -> String {
     cap_chars(s.trim(), 1200)
 }
 
+/// Keep the first two whitespace-separated tokens, stripped of surrounding punctuation —
+/// small models often add a stray period, quotes, or a third word.
+fn two_words(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn cap_chars(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -344,6 +363,15 @@ mod tests {
         let c = curate_issues(j);
         assert!(c.contains("Issues found in logs"));
         assert!(c.contains("KASAN"));
+    }
+
+    #[test]
+    fn two_words_trims_and_caps() {
+        assert_eq!(two_words("Memory Leak"), "Memory Leak");
+        assert_eq!(two_words("  \"Use After\" Free  "), "Use After");
+        assert_eq!(two_words("net/sched: qdisc"), "net/sched qdisc");
+        assert_eq!(two_words("OneWord"), "OneWord");
+        assert_eq!(two_words("..."), "");
     }
 
     #[test]

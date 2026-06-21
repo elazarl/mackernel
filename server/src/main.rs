@@ -519,6 +519,24 @@ fn spawn_summary(st: &AppState, id: i64, stage: &'static str) {
     tokio::spawn(async move {
         let Ok(bundle) = tokio::fs::read_to_string(dir.join("bundle.md")).await else { return };
         let logs = dir.join("logs");
+        // On start, also derive a terse two-word title (bundle is enough). Non-fatal.
+        if stage == "start" {
+            let (sumz, bundle, db, bus) = (sumz.clone(), bundle.clone(), db.clone(), bus.clone());
+            let t0 = std::time::Instant::now();
+            tokio::task::spawn_blocking(move || sumz.summarize_title(&bundle))
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .filter(|t| !t.is_empty())
+                .map(|t| {
+                    if let Err(e) = db.set_short_title(id, &t) {
+                        warn!("job {id}: storing title failed: {e:#}");
+                    } else {
+                        info!("job {id}: title ready in {:.1}s: {t:?}", t0.elapsed().as_secs_f64());
+                        bus.publish_global(json!({ "kind": "jobs" }).to_string());
+                    }
+                });
+        }
         let result = tokio::task::spawn_blocking(move || {
             if stage == "start" {
                 sumz.summarize_start(&bundle)
