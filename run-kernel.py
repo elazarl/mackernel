@@ -435,7 +435,7 @@ def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool,
     # build the out-of-tree module.
     cmd = [
         "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
-        *mklib.hardening_args(),
+        *mklib.hardening_args(arch),
         "-v", mklib.volume(tree, "/linux"), "-v", mklib.volume(moddir, "/mod"),
         "-w", "/mod", image,
         "bash", "-c",
@@ -536,7 +536,7 @@ def build_boot_run(b, tree: Path, arch: str, args, log_dir: Path | None,
         cs = [p for p in user_files if p.suffix == ".c"]
         binname = cs[0].stem if len(cs) == 1 else bundle_stem
         binary = g.compile_c(user_files, binname, image, is_local,
-                             mklib.platform_args(arch), [], log_file=clog)
+                             arch, [], log_file=clog)
 
     # 3. Build kernel module(s).
     kos = build_modules(b.files["module"], tree, arch, image, is_local,

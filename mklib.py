@@ -198,7 +198,7 @@ def volume(host, container: str, *, ro: bool = False) -> str:
     return f"{host}:{container}" + ((":" + ",".join(opts)) if opts else "")
 
 
-def hardening_args() -> list[str]:
+def hardening_args(arch: str) -> list[str]:
     """podman flags for least-privilege build/compile containers. Compilation
     needs no network and no privilege escalation, and can run on a read-only root
     filesystem -- the work dirs (kernel tree, build/seed scratch) are bind-mounted
@@ -209,8 +209,17 @@ def hardening_args() -> list[str]:
     on macOS the bind-mounted tree is presented with a uid the container doesn't
     match, so the build needs DAC_OVERRIDE to read/write it (without it even
     `stat Makefile` is denied). That one cap is benign -- it only bypasses file
-    permission bits inside our own mounts."""
-    return [
+    permission bits inside our own mounts.
+
+    Cross-arch (emulated) runs additionally get `label=disable` on SELinux hosts:
+    a foreign-arch container execs the qemu-user interpreter (registered in the
+    host's binfmt_misc, e.g. /usr/bin/qemu-aarch64), but that interpreter binary
+    carries a *different* container's MCS categories, so SELinux blocks the
+    cross-category read and the emulated process dies with SIGSEGV. Disabling the
+    label drops MCS confinement for just these emulated build containers (SELinux
+    stays enforcing system-wide); native builds never touch qemu-user and keep
+    full confinement. No-op off SELinux (macOS/plain Linux)."""
+    args = [
         "--network=none",
         "--cap-drop=all",
         "--cap-add=dac_override",
@@ -219,6 +228,9 @@ def hardening_args() -> list[str]:
         "--tmpfs", "/tmp:rw,exec",
         "--tmpfs", "/run:rw",
     ]
+    if selinux_enforcing() and normalize_arch(arch) != host_arch():
+        args += ["--security-opt", "label=disable"]
+    return args
 
 
 def qemu_hardening_args() -> list[str]:

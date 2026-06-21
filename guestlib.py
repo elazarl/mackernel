@@ -175,16 +175,17 @@ def ensure_seed(seed: Path) -> None:
 
 
 def compile_c(srcs, out_name: str, image: str, is_local: bool,
-              plat_args: list[str], cflags: list[str], log_file=None) -> Path:
+              arch: str, cflags: list[str], log_file=None) -> Path:
     """Compile all .c files in `srcs` together into one static binary named
     `out_name`, inside the build container; non-.c files (headers, data) are
     copied alongside so includes resolve. Returns the host path of the binary.
 
-    Builds for the guest's architecture (plat_args is empty for native, or
-    --platform for an emulated foreign arch), so the binary matches the kernel.
+    Builds for the guest's `arch` (native, or an emulated foreign arch via
+    --platform), so the binary matches the kernel.
 
     When `log_file` is given, the container's output is captured there (the job's
     compile.log) instead of inheriting stdio."""
+    plat_args = mklib.platform_args(arch)
     builddir = Path(tempfile.mkdtemp(prefix=".mk-build-", dir=HERE))
     cfiles = []
     for s in srcs:
@@ -200,7 +201,7 @@ def compile_c(srcs, out_name: str, image: str, is_local: bool,
     if is_local:
         podman += ["--pull=never"]
     podman += [
-        *mklib.hardening_args(),
+        *mklib.hardening_args(arch),
         "-v", mklib.volume(builddir, "/build"), "-w", "/build", image,
         "gcc-15", "-static", "-O2", "-pthread", *cflags,
         "-o", out_name, *cfiles,

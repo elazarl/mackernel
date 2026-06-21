@@ -188,7 +188,7 @@ def main() -> int:
     subprocess.run(
         [
             "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
-            *mklib.hardening_args(),
+            *mklib.hardening_args(arch),
             "-v", mklib.volume(linux_src, "/linux"),
             "-v", mklib.volume(HERE / 'kconf', "/kconf", ro=True),
             *out_mount,

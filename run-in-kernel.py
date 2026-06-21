@@ -88,7 +88,7 @@ def main() -> int:
     g.ensure_seed(seed)
 
     binary = g.compile_c([args.cfile], args.cfile.stem, image, is_local,
-                         mklib.platform_args(arch),
+                         arch,
                          args.cflags.split() if args.cflags else [])
     builddir = binary.parent
     if args.output:
