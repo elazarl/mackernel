@@ -38,6 +38,13 @@ use bus::Bus;
 use db::Db;
 use sched::{Cfg, SchedMsg};
 
+// Heap profiling (feature `dhat-heap`): route every allocation through dhat so it can
+// attribute the heap to allocation sites. Writes dhat-heap.json when the Profiler drops
+// (clean exit / SIGINT via the graceful shutdown below).
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 /// Default bearer token: the commit hash that the `v7.1` tag points to. Acts as a
 /// shared secret — the UI asks the user for "the v7.1 commit" and sends it as the
 /// bearer token, so only someone who knows that SHA can drive the service. Override
@@ -69,6 +76,10 @@ fn env_path(key: &str, default: &str) -> PathBuf {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Held for the whole run; on drop (clean exit / SIGINT) it writes dhat-heap.json.
+    #[cfg(feature = "dhat-heap")]
+    let _dhat = dhat::Profiler::new_heap();
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "info".into()))
@@ -172,7 +183,11 @@ async fn main() -> anyhow::Result<()> {
 
     info!("mackernel-server listening on {bind} (work={}, repo={})", work.display(), repo.display());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    axum::serve(listener, app).await?;
+    // Graceful shutdown on Ctrl-C so the dhat Profiler drops and flushes dhat-heap.json
+    // (no-op for behavior without the feature, just a clean exit).
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; })
+        .await?;
     Ok(())
 }
 

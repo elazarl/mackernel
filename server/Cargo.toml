@@ -8,7 +8,19 @@ description = "REST + SSE service that queues and runs mackernel reproducer bund
 name = "mackernel-server"
 path = "src/main.rs"
 
+[features]
+# Heap profiling via dhat-rs. Build with `--profile profiling --features dhat-heap`,
+# run, and on clean exit it writes dhat-heap.json (view at https://nnethercote.github.io/dh_view/dh_view.html).
+dhat-heap = ["dep:dhat"]
+
+# Profiling build: release optimizations + line tables so dhat backtraces symbolize.
+# Separate from `release` so the prod binary stays debug-info-free.
+[profile.profiling]
+inherits = "release"
+debug = 1
+
 [dependencies]
+dhat = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["full"] }
 axum = "0.7"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
