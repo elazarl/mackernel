@@ -551,6 +551,13 @@ fn spawn_summary(st: &AppState, id: i64, stage: &'static str) {
         .await;
         match result {
             Ok(Ok(text)) if !text.is_empty() => {
+                // The start (preliminary) and end summaries both serialize on the single
+                // model lock, so a backlogged start summary can finish *after* the end one.
+                // The end summary is authoritative — never let a late start summary clobber it.
+                if stage == "start" && matches!(db.get_job(id), Ok(Some(j)) if j.finished_ms.is_some()) {
+                    info!("job {id}: start summary skipped (job already finished)");
+                    return;
+                }
                 if let Err(e) = db.set_summary(id, &text) {
                     warn!("job {id}: storing {stage} summary failed: {e:#}");
                     return;
