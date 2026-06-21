@@ -202,7 +202,7 @@ function Dashboard() {
                 <li key={j.id} className={sel === j.id ? "active" : ""} onClick={() => setSel(j.id)}>
                   <div className="jobrow">
                     <span className="dot" style={{ background: statusColor(j.status) }} />
-                    #{j.id} <em>{j.status}</em>
+                    #{j.id}{j.short_title && <span className="shorttitle"> {j.short_title}</span>} <em>{j.status}</em>
                     {j.phase && j.status === "running" && <span className="ph"> · {j.phase}</span>}
                     {j.exit_code != null && <span className="ph"> · exit {j.exit_code}</span>}
                     {j.reaped_ms != null && <span className="ph"> · logs expired</span>}
@@ -642,6 +642,7 @@ const CSS = `
              padding: 8px 10px; border-radius: 6px; margin: 8px 0; line-height: 1.4; }
   .detail { white-space: pre-wrap; line-height: 1.5; margin: 0; }
   .summarizer { margin-left: auto; font-size: .85em; }
+  .shorttitle { color: var(--accent, #58a6ff); font-weight: 600; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .muted { color: var(--muted); }
   .issues-card { border-color: #f85149; } .issues-card h2 { color: #f85149; }

@@ -28,7 +28,7 @@ use candle_transformers::models::quantized_phi3::ModelWeights as Model;
 use candle_transformers::utils::apply_repeat_penalty;
 use tokenizers::Tokenizer;
 
-const SYS_TITLE: &str = "You write a short title for a Linux kernel bug reproducer. Reply with a title of at most 8 words. No preamble, no quotes, no trailing period.";
+const SYS_TITLE: &str = "You name Linux kernel bug reproducers. Reply with exactly two words — a terse title — and nothing else. No punctuation, no preamble.";
 const SYS_REPRO: &str = "You summarize Linux kernel bug reproducers. The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
 const SYS_RESULT: &str = "You summarize Linux kernel bug reproducer runs. Reply with exactly one short sentence and no preamble describing what actually happened on this run — whether it reproduced and the outcome.";
 const SYS_DETAIL: &str = "Read the reproducer text and the result. Explain in two paragraphs what the failure is, why it happened, and quote excerpts from the logs. No preamble.";
@@ -121,10 +121,11 @@ impl Summarizer {
         self.mem_bytes
     }
 
-    /// Short title for the job, from the bundle alone (job start).
+    /// Terse two-word title for the job, from the bundle alone (job start).
     pub fn title(&self, bundle_md: &str) -> Result<String> {
         let user = curate_bundle(bundle_md);
-        self.generate(&self.title_model, &self.format_prompt(SYS_TITLE, &user), 24)
+        let raw = self.generate(&self.title_model, &self.format_prompt(SYS_TITLE, &user), 8)?;
+        Ok(two_words(&raw))
     }
 
     /// One sentence on what the reproducer tests, from the bundle alone (job start).
@@ -322,6 +323,17 @@ fn curate_issues(issues_json: &str) -> String {
     cap_chars(s.trim(), 1200)
 }
 
+/// Keep the first two whitespace-separated tokens, stripped of surrounding punctuation —
+/// small models often add a stray period, quotes, or a third word.
+fn two_words(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn cap_chars(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         s.to_string()
@@ -357,6 +369,15 @@ mod tests {
         let c = curate_issues(j);
         assert!(c.contains("Issues found in logs"));
         assert!(c.contains("KASAN"));
+    }
+
+    #[test]
+    fn two_words_trims_and_caps() {
+        assert_eq!(two_words("Memory Leak"), "Memory Leak");
+        assert_eq!(two_words("  \"Use After\" Free  "), "Use After");
+        assert_eq!(two_words("net/sched: qdisc"), "net/sched qdisc");
+        assert_eq!(two_words("OneWord"), "OneWord");
+        assert_eq!(two_words("..."), "");
     }
 
     #[test]

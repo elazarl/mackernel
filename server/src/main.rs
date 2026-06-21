@@ -565,7 +565,7 @@ where
         match tokio::task::spawn_blocking(move || gen(bundle, logs)).await {
             Ok(Ok(text)) if !text.is_empty() => {
                 let stored = match field {
-                    "title" => db.set_title(id, &text),
+                    "title" => db.set_short_title(id, &text),
                     "repro" => db.set_repro(id, &text),
                     "result" => db.set_result(id, &text),
                     "detail" => db.set_detail(id, &text),
