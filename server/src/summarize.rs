@@ -84,21 +84,28 @@ impl Summarizer {
         let tokenizer = Tokenizer::from_file(&tok_path).map_err(anyhow::Error::msg)?;
         let device = Device::Cpu;
 
+        let mb = |b: u64| b / 1_048_576;
         let rss0 = self_rss();
         let mut fd = std::fs::File::open(&gguf_path)?;
         let content = gguf_file::Content::read(&mut fd).map_err(|e| e.with_path(&gguf_path))?;
         let model = Model::from_gguf(false, content, &mut fd, &device)?;
+        let r_gguf = self_rss();
         // Cold-clone: the KV cache is empty here, so each clone is independent and
         // shares weight tensors by Arc (~1x weights + N KV caches). NEVER clone a
         // warmed model — its KV buffer is Arc-shared and writes would corrupt across
         // clones (see candle_nn::kv_cache).
+        let m1 = model.clone(); let rc1 = self_rss();
+        let m2 = model.clone(); let rc2 = self_rss();
+        let m3 = model.clone(); let rc3 = self_rss();
+        eprintln!("[mem] rss0={}MB  after_gguf={}MB (+{})  clone1=+{}  clone2=+{}  clone3=+{}",
+            mb(rss0), mb(r_gguf), mb(r_gguf - rss0), mb(rc1 - r_gguf), mb(rc2 - rc1), mb(rc3 - rc2));
         let vocab = tokenizer.get_vocab(true);
         let eos: Vec<u32> = EOS_NAMES.iter().filter_map(|n| vocab.get(*n).copied()).collect();
 
         let mut s = Self {
-            title_model: Mutex::new(model.clone()),
-            repro_model: Mutex::new(model.clone()),
-            result_model: Mutex::new(model.clone()),
+            title_model: Mutex::new(m1),
+            repro_model: Mutex::new(m2),
+            result_model: Mutex::new(m3),
             detail_model: Mutex::new(model),
             tokenizer,
             device,
@@ -109,9 +116,13 @@ impl Summarizer {
         // buffer (candle pre-allocates on the first token); the RSS delta then
         // captures weights + all four caches.
         // ponytail: RSS delta also catches incidental startup allocs; model+caches dominate.
+        let r_prewarm = self_rss();
         for m in [&s.title_model, &s.repro_model, &s.result_model, &s.detail_model] {
             let _ = s.generate(m, &s.format_prompt("Reply with OK.", "ping"), 1);
         }
+        let r_postwarm = self_rss();
+        eprintln!("[mem] pre_warm={}MB  post_warm={}MB  warm_delta=+{}MB  TOTAL=+{}MB",
+            mb(r_prewarm), mb(r_postwarm), mb(r_postwarm - r_prewarm), mb(r_postwarm - rss0));
         s.mem_bytes = self_rss().saturating_sub(rss0);
         Ok(s)
     }
