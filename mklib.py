@@ -266,12 +266,15 @@ def ensure_pulled(ref: str, is_local: bool, plat_args: list[str]) -> None:
 
 
 def qemu_binary(arch: str) -> str:
-    """The qemu-system binary to launch. The QEMU env var overrides everything;
-    otherwise use the per-arch default name if it's on PATH; otherwise fall back
+    """The qemu-system binary to launch. An arch-specific QEMU_<ARCH> env var
+    (QEMU_ARM64 / QEMU_X86_64) wins, then the generic QEMU env -- arch-specific so
+    a profile can pin one arch's emulator (e.g. a hand-built qemu-system-aarch64 on
+    a host that has no package for it) without hijacking the other arch's boots.
+    Otherwise use the per-arch default name if it's on PATH; otherwise fall back
     to RHEL/Fedora's qemu-kvm (shipped at /usr/libexec/qemu-kvm, not as
     qemu-system-x86_64) for x86_64. Returns the default name as a last resort so
     the failure (and the fix: install qemu or set QEMU=) is clear at exec time."""
-    env = os.environ.get("QEMU")
+    env = os.environ.get(f"QEMU_{normalize_arch(arch).upper()}") or os.environ.get("QEMU")
     if env:
         return env
     name = arch_profile(arch)["qemu_binary"]
