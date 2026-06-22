@@ -483,6 +483,41 @@ def fetch_bundle(src: str) -> Path:
     return dest
 
 
+# ----------------------------------------------------------------------------
+# Output-tree cache key: invalidate the cached .config + kernel image when the
+# reproducer, the build logic / kconf fragments, or the target arch change.
+# ----------------------------------------------------------------------------
+# need_config (below) skips reconfigure for a bundle with no kconf block, and the
+# build is skipped when the image already exists -- so edits to kconf/base.config,
+# to these scripts, or a switch of arch would otherwise silently reuse a stale
+# build. We stamp a key file in the output tree; on a mismatch we delete .config +
+# the image, which flips both gates back on for one fresh reconfigure + build.
+
+def _repo_hash() -> str:
+    """Hash the build logic + kconf fragments (the "run-kernel.py repo")."""
+    h = hashlib.sha256()
+    for f in sorted(HERE.glob("*.py")) + sorted((HERE / "kconf").glob("*")):
+        h.update(f.read_bytes())
+    return h.hexdigest()
+
+
+def _bundle_hash(b) -> str:
+    """Hash the reproducer. Bundles can come from a URL, so there is no stable
+    on-disk path -- hash the parsed meta + files instead."""
+    blob = json.dumps({"meta": b.meta, "files": b.files}, sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def invalidate_stale_outputs(b, tree: Path, arch: str) -> None:
+    key = f"{_bundle_hash(b)} {_repo_hash()} {arch}\n"
+    keyfile = Path(mklib.output_root(tree)) / ".mk-cache-key"
+    if keyfile.is_file() and keyfile.read_text() == key:
+        return
+    for stale in (mklib.config_path(tree), mklib.kernel_image(tree, arch)):
+        stale.unlink(missing_ok=True)
+    keyfile.write_text(key)
+
+
 def build_boot_run(b, tree: Path, arch: str, args, log_dir: Path | None,
                    img: Path, seed: Path, image: str, is_local: bool,
                    bundle_stem: str, ssh_port: int | None = None,
@@ -509,6 +544,9 @@ def build_boot_run(b, tree: Path, arch: str, args, log_dir: Path | None,
         # becomes frag0-Kconfig rather than a nested path.
         fp = _stage(scratch / f"frag{idx}-{Path(name).name}", content)
         fragments.append(fp)
+    # Drop a stale .config / image when the reproducer, these scripts, or arch
+    # changed, so the gates below trigger a fresh reconfigure + build.
+    invalidate_stale_outputs(b, tree, arch)
     # configure + build output -> compile.log (append) when a log dir is set.
     clog = open(log_dir / "compile.log", "w") if log_dir else None
     cap = {"stdout": clog, "stderr": subprocess.STDOUT} if clog else {}
