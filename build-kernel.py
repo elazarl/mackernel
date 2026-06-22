@@ -42,9 +42,11 @@ def main() -> int:
     out_mount, mk_o = mklib.build_dir_mount()
     opt = f"O={mk_o}" if mk_o else ""
 
-    # arm64 builds 'Image', x86_64 builds 'bzImage'. The container runs the
-    # target platform (native, or emulated for a foreign arch), so plain
-    # CC=gcc-15 builds natively inside it -- no cross-compiler needed.
+    # arm64 builds 'Image', x86_64 builds 'bzImage'. CROSS is empty for a native
+    # build (the container is the target arch, CC=gcc-N), or the cross prefix
+    # (CC=aarch64-linux-gnu-gcc-N) when cross-compiling arm64 on an x86_64 host --
+    # then the container is the host arch and the toolchain runs natively.
+    cross = mklib.cross_compile(arch)
     subprocess.run(
         [
             "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
@@ -56,9 +58,11 @@ def main() -> int:
             "-e", f"TARGET={prof['image_name']}",
             "-e", f"OPT={opt}",
             "-e", f"GCC={gcc}",
+            "-e", f"CROSS={cross}",
             image,
             "bash", "-c",
-            'make ARCH="$ARCH" $OPT CC="gcc-$GCC" HOSTCC="gcc-$GCC" -j"$(nproc)" "$TARGET"',
+            'make ARCH="$ARCH" $OPT CROSS_COMPILE="$CROSS" CC="${CROSS}gcc-$GCC" '
+            'HOSTCC="gcc-$GCC" -j"$(nproc)" "$TARGET"',
         ],
         check=True,
     )

@@ -128,13 +128,17 @@ def parse_args(argv: list[str]) -> tuple[list[str], bool, list[str]]:
 CONTAINER_SCRIPT = r'''
 set -e
 if [ -n "$MK_O" ]; then OPT="O=$MK_O"; CFG="$MK_O/.config"; else OPT=""; CFG=".config"; fi
-make ARCH="$ARCH" $OPT tinyconfig
+# CROSS set -> cross-compiling: olddefconfig's cc-option probes must run the
+# target compiler, so pass CC/CROSS_COMPILE on the make command line (env vars
+# don't stick -- the kernel Makefile reassigns CC = $(CROSS_COMPILE)gcc).
+if [ -n "$CROSS" ]; then CCARG="CROSS_COMPILE=$CROSS CC=${CROSS}gcc-$GCC HOSTCC=gcc-$GCC"; else CCARG=""; fi
+make ARCH="$ARCH" $OPT $CCARG tinyconfig
 scripts/kconfig/merge_config.sh -m -O "$(dirname "$CFG")" "$CFG" /kconf/base.config "/kconf/${MK_ARCH}.config" $MK_FRAGMENTS
 if [ -n "${EXTRA_CONFIG// /}" ]; then
   echo "applying EXTRA_CONFIG: $EXTRA_CONFIG"
   ./scripts/config --file "$CFG" $EXTRA_CONFIG
 fi
-make ARCH="$ARCH" $OPT olddefconfig
+make ARCH="$ARCH" $OPT $CCARG olddefconfig
 '''
 
 
@@ -200,6 +204,8 @@ def main() -> int:
             "-e", f"MK_O={mk_o}",
             "-e", f"MK_FRAGMENTS={' '.join(frag_paths)}",
             "-e", f"EXTRA_CONFIG={extra_config}",
+            "-e", f"CROSS={mklib.cross_compile(arch)}",
+            "-e", f"GCC={gcc}",
             image,
             "bash", "-c", CONTAINER_SCRIPT,
         ],

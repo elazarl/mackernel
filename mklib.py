@@ -49,6 +49,11 @@ def resolve_image(want_arch: str | None = None, gcc: str = "15") -> tuple[str, b
         "REMOTE_IMAGE", f"ghcr.io/elazarl/mackernel:{version}{suffix}"
     )
 
+    # Cross-compiling runs the host-arch image (the cross toolchain is in it), so
+    # the local image must match the host, not the target arch.
+    if want_arch is not None and cross_compile(want_arch):
+        want_arch = host_arch()
+
     exists = subprocess.run(
         ["podman", "image", "exists", local_image],
         stderr=subprocess.DEVNULL,
@@ -169,11 +174,23 @@ def kernel_image(linux_src, arch: str) -> Path:
     return Path(output_root(linux_src)) / arch_profile(arch)["image_path"]
 
 
+def cross_compile(arch: str) -> str:
+    """The kernel `CROSS_COMPILE` prefix for building `arch`, or "" for a native
+    build. An x86_64 host cross-compiles an arm64 kernel: the toolchain runs
+    natively (CC=aarch64-linux-gnu-gcc-N) instead of emulating the whole arm64
+    container under qemu-user (5-15x slower per process). Only x86_64 hosts
+    cross-compile; an arm64 host keeps the matching-arch-container path."""
+    if host_arch() == "x86_64" and normalize_arch(arch) == "arm64":
+        return "aarch64-linux-gnu-"
+    return ""
+
+
 def platform_args(arch: str) -> list[str]:
-    """podman `--platform` args. Only needed when building for a foreign arch
-    (emulated); for a native build the local image is already the right platform
-    and passing --platform would force podman to re-resolve it via the registry."""
-    if normalize_arch(arch) == host_arch():
+    """podman `--platform` args. Empty for a native build, AND for a cross-compile
+    (the cross toolchain lives in the host-arch image, so it runs natively -- no
+    foreign --platform/emulation). Only a genuinely emulated foreign-arch build
+    gets `--platform`."""
+    if cross_compile(arch) or normalize_arch(arch) == host_arch():
         return []
     return ["--platform", arch_profile(arch)["container_platform"]]
 
@@ -233,7 +250,9 @@ def hardening_args(arch: str) -> list[str]:
         "--tmpfs", "/tmp:rw,exec",
         "--tmpfs", "/run:rw",
     ]
-    if selinux_enforcing() and normalize_arch(arch) != host_arch():
+    # Only genuinely emulated (qemu-user) foreign-arch runs need the MCS label
+    # dropped; a native cross-compile container keeps full SELinux confinement.
+    if selinux_enforcing() and normalize_arch(arch) != host_arch() and not cross_compile(arch):
         args += ["--security-opt", "label=disable"]
     return args
 

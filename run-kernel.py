@@ -437,14 +437,18 @@ def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool,
     # modules link against), so build the in-tree `modules` target first to
     # generate it (cheap: vmlinux is already built, this is just modpost), then
     # build the out-of-tree module.
+    # Cross prefix (empty for a native build) so the .ko is built by the same
+    # toolchain path as the kernel -- natively cross-compiled on an x86_64 host
+    # rather than emulated. CC stays gcc-15 (the cross binary is aarch64-linux-gnu-gcc-15).
+    cross = mklib.cross_compile(arch)
     cmd = [
         "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
         *mklib.hardening_args(arch),
         "-v", mklib.volume(tree, "/linux"), "-v", mklib.volume(moddir, "/mod"),
         "-w", "/mod", image,
         "bash", "-c",
-        f'set -e; make -C /linux ARCH={ka} CC=gcc-15 modules; '
-        f'make -C /linux M=/mod ARCH={ka} CC=gcc-15 modules',
+        f'set -e; make -C /linux ARCH={ka} CROSS_COMPILE={cross} CC={cross}gcc-15 HOSTCC=gcc-15 modules; '
+        f'make -C /linux M=/mod ARCH={ka} CROSS_COMPILE={cross} CC={cross}gcc-15 HOSTCC=gcc-15 modules',
     ]
     log(f"building module(s) {', '.join(s + '.ko' for s in stems)} ...")
     cap = {"stdout": log_file, "stderr": subprocess.STDOUT} if log_file else {}

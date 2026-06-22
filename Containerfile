@@ -7,6 +7,11 @@
 FROM ubuntu:latest
 
 ARG GCC_VERSION=15
+# Auto-set by buildx/podman per build platform ("amd64"/"arm64"; empty for a
+# plain host-arch `podman build`). Used below to add the aarch64 cross-toolchain
+# only to the amd64 image -- an x86_64 host cross-compiles arm64 kernels with it
+# (native compiler speed) instead of emulating the whole arm64 toolchain.
+ARG TARGETARCH
 
 # If the requested gcc is not in the default repos for this Ubuntu release,
 # uncomment the two lines below to pull it from the Ubuntu toolchain PPA first.
@@ -16,6 +21,10 @@ ARG GCC_VERSION=15
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
       gcc-${GCC_VERSION} build-essential flex bison libssl-dev libelf-dev bc \
       libncurses-dev cpio kmod git \
+ && if [ "$TARGETARCH" != "arm64" ]; then \
+      DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        gcc-${GCC_VERSION}-aarch64-linux-gnu; \
+    fi \
  && rm -rf /var/lib/apt/lists/*
 
 # Make the selected gcc the default compiler in the image.
