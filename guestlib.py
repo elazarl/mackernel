@@ -111,8 +111,9 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
     # connection (it can't phone home). Boot/cloud-init/sshd need no egress.
     # Set GUEST_NET=open to allow guest egress (e.g. apt).
     restrict = "" if os.environ.get("GUEST_NET") == "open" else ",restrict=on"
+    qbin = mklib.qemu_binary(arch)
     qemu = [
-        mklib.qemu_binary(arch),
+        qbin,
         *mklib.qemu_hardening_args(),
         "-machine", prof["qemu_machine"],
         "-cpu", cpu, "-accel", accel,
@@ -139,7 +140,8 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
     # The serial log may live outside HERE (the service's --log-dir), so bind its
     # dir read-write or qemu can't create the log inside the jail.
     prefix = mklib.sandbox_prefix(arch, run_dir=HERE, files=[kimg, img, seed],
-                                  writable=[Path(serial_log).resolve().parent])
+                                  writable=[Path(serial_log).resolve().parent],
+                                  qemu_bin=qbin)
     if prefix:
         log(f"sandbox: {os.environ.get('MK_SANDBOX')} ({prefix[0]})")
     log(f"booting kernel ({arch}, accel={accel}; serial -> {serial_log.name}) ...")

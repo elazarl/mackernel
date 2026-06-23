@@ -148,7 +148,7 @@ def boot_interactive() -> int:
     ]
     # Optional outer sandbox (MK_SANDBOX); interactive=True keeps the controlling tty.
     cmd = mklib.sandbox_prefix(arch, run_dir=HERE, files=[kimg, img, seed],
-                               interactive=True) + qemu
+                               interactive=True, qemu_bin=qbin) + qemu
     os.execvp(cmd[0], cmd)
 
 

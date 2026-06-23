@@ -329,7 +329,8 @@ def sandbox_mode() -> str:
     return m
 
 
-def sandbox_prefix(arch: str, *, run_dir, files, writable=(), interactive: bool = False) -> list[str]:
+def sandbox_prefix(arch: str, *, run_dir, files, writable=(), interactive: bool = False,
+                   qemu_bin: str | None = None) -> list[str]:
     """Command prefix that confines the qemu process, prepended to the qemu argv.
     Empty when MK_SANDBOX is off. `run_dir` is bind-mounted read-write (serial log
     + -snapshot scratch); `writable` lists extra dirs to bind read-write (e.g. a
@@ -355,7 +356,7 @@ def sandbox_prefix(arch: str, *, run_dir, files, writable=(), interactive: bool 
                    "-p", "MemoryMax=3G", "-p", "CPUQuota=400%", "-p", "TasksMax=512", "--"]
     if "bwrap" in parts:
         _require("bwrap", "linux")
-        prefix += _bwrap_args(run_dir, files, writable, interactive)
+        prefix += _bwrap_args(run_dir, files, writable, interactive, qemu_bin)
     if "seatbelt" in parts:
         _require("sandbox-exec", "mac")
         prefix += _seatbelt_args(run_dir, files, writable)
@@ -370,7 +371,7 @@ def _require(tool: str, need_os: str) -> None:
         raise SystemExit(f"MK_SANDBOX: '{tool}' not found on PATH -- install it or use MK_SANDBOX=off")
 
 
-def _bwrap_args(run_dir: Path, files, writable, interactive: bool) -> list[str]:
+def _bwrap_args(run_dir: Path, files, writable, interactive: bool, qemu_bin: str | None = None) -> list[str]:
     """bubblewrap: read-only system dirs, writable run_dir + tmpfs /tmp, host net
     kept (slirp hostfwd binds a host loopback port, so we must NOT --unshare-net),
     /dev/kvm passed through when present. New PID namespace; new session only when
@@ -401,6 +402,22 @@ def _bwrap_args(run_dir: Path, files, writable, interactive: bool) -> list[str]:
             continue
         bound.add(d)
         args += ["--ro-bind", str(d), str(d)]
+    # A custom qemu binary outside the bound system dirs (e.g. a hand-built emulator
+    # under $HOME) is invisible to the jail -> bwrap `execvp ... No such file`. Bind
+    # its tree read-only. For an in-tree build (<root>/build/qemu-system-*), bind
+    # <root> (one up) so data files symlinked from a sibling pc-bios/ resolve too.
+    # ponytail: heuristic on the build/bin dir name; covers in-tree + installed
+    # layouts without binding something as broad as / or $HOME.
+    if qemu_bin:
+        qp = Path(qemu_bin).resolve()
+        sysroots = ("/usr/", "/bin/", "/sbin/", "/lib/", "/lib64/", "/opt/", "/etc/")
+        if qp.is_file() and not any(str(qp).startswith(s) for s in sysroots):
+            root = qp.parent.parent if qp.parent.name in ("build", "bin") else qp.parent
+            home = Path(os.path.expanduser("~")).resolve()
+            if (root not in bound and root.is_dir() and root != home
+                    and len(root.parts) > 3):  # never bind /, /home, or $HOME itself
+                bound.add(root)
+                args += ["--ro-bind", str(root), str(root)]
     if not interactive:
         args += ["--new-session"]
     return args
