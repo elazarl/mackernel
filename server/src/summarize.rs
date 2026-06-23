@@ -40,9 +40,11 @@ const GGUF_FILE: &str = "Phi-3.5-mini-instruct-Q4_K_M.gguf";
 /// Human-readable model label, surfaced in logs and `/api/summarizer`.
 pub const LABEL: &str = "phi3.5-mini";
 
-/// Context window. Prompts are curated to ~10k chars (~3-4k tokens) plus up to
-/// 400 generated, so 8k is comfortable.
-const CTX_SIZE: usize = 8192;
+/// Total context window. llama-server SPLITS this across the `--parallel` slots, so
+/// with 2 slots each gets CTX_SIZE/2. The `detail` prompt (bundle + ~10k chars of
+/// curated logs ≈ 3-4k tokens) plus 400 generated must fit one slot, so 16384 → 8192
+/// per slot. (At 8192 total, the 4096/slot overflowed and `detail` was rejected.)
+const CTX_SIZE: usize = 16384;
 /// How long to wait for the server to come up. The first-ever boot blocks here
 /// while llama-server downloads the ~2.5 GB GGUF (measured ~15 min on a home
 /// link); cached boots are ~30s. Generous so a cold download doesn't get killed.
