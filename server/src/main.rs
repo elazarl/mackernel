@@ -99,13 +99,14 @@ async fn main() -> anyhow::Result<()> {
         std::thread::spawn(move || -> anyhow::Result<()> {
             let s = summarize::Summarizer::load()?;
             info!("loaded summary model: {} ({} MB RSS)", summarize::LABEL, s.memory_bytes() / 1_048_576);
-            println!("TITLE:  {}", s.title(&md)?);
-            println!("REPRO:  {}", s.summarize_repro(&md)?);
+            let noop = |_: u32| {};
+            println!("TITLE:  {}", s.title(&md, &noop)?.0);
+            println!("REPRO:  {}", s.summarize_repro(&md, &noop)?.0);
             if let Some(logs) = logs_arg {
                 let logs = std::path::Path::new(&logs);
                 let issues = collect_issues(logs);
-                println!("RESULT: {}", s.summarize_result(&md, &issues, Some(1), "done")?);
-                println!("DETAIL: {}", s.detail(&md, logs)?);
+                println!("RESULT: {}", s.summarize_result(&md, &issues, Some(1), "done", &noop)?.0);
+                println!("DETAIL: {}", s.detail(&md, logs, &noop)?.0);
             }
             Ok(())
         })
@@ -548,28 +549,32 @@ async fn scheduler_loop(st: AppState, mut rx: mpsc::UnboundedReceiver<SchedMsg>)
 /// `stage` is "start" (bundle only, preliminary) or "end" (bundle + run output). The
 /// CPU-bound model call runs on a blocking thread, so it never stalls the async runtime,
 /// and it never blocks the job pipeline — failures are logged and leave the summary as-is.
-/// No-op until the model has finished loading (`OnceLock` empty).
-fn spawn_summary(st: &AppState, id: i64, stage: &'static str) {
-    let Some(sumz) = st.summarizer.get().cloned() else { return };
+/// No-op until the model has finished loading (`OnceLock` empty). Returns the spawned
+/// task handles so the caller can await them (the "end" stage closes the SSE channel
+/// only once both summaries finish, so their live token stream reaches the client).
+fn spawn_summary(st: &AppState, id: i64, stage: &'static str) -> Vec<tokio::task::JoinHandle<()>> {
+    let Some(sumz) = st.summarizer.get().cloned() else { return Vec::new() };
     let dir = st.work.join(id.to_string());
     if stage == "start" {
         // Bundle only: title + reproducer one-liner, generated concurrently.
         let s = sumz.clone();
-        spawn_one(st, id, "title", dir.clone(), move |bundle, _logs| s.title(&bundle));
+        let h1 = spawn_one(st, id, "title", dir.clone(), move |bundle, _logs, on_tok| s.title(&bundle, on_tok));
         let s = sumz;
-        spawn_one(st, id, "repro", dir, move |bundle, _logs| s.summarize_repro(&bundle));
+        let h2 = spawn_one(st, id, "repro", dir, move |bundle, _logs, on_tok| s.summarize_repro(&bundle, on_tok));
+        vec![h1, h2]
     } else {
         // Bundle + run output: result one-liner + two-paragraph detail, concurrently.
         let (exit, outcome) = st.db.get_job(id).ok().flatten()
             .map(|j| (j.exit_code, j.status))
             .unwrap_or((None, "done".to_string()));
         let s = sumz.clone();
-        spawn_one(st, id, "result", dir.clone(), move |bundle, logs| {
+        let h1 = spawn_one(st, id, "result", dir.clone(), move |bundle, logs, on_tok| {
             let issues = collect_issues(&logs);
-            s.summarize_result(&bundle, &issues, exit, &outcome)
+            s.summarize_result(&bundle, &issues, exit, &outcome, on_tok)
         });
         let s = sumz;
-        spawn_one(st, id, "detail", dir, move |bundle, logs| s.detail(&bundle, &logs));
+        let h2 = spawn_one(st, id, "detail", dir, move |bundle, logs, on_tok| s.detail(&bundle, &logs, on_tok));
+        vec![h1, h2]
     }
 }
 
@@ -577,16 +582,28 @@ fn spawn_summary(st: &AppState, id: i64, stage: &'static str) {
 /// two outputs run concurrently), store it in the matching column, and broadcast.
 /// `gen` receives the bundle text and the logs dir. Failures are logged and leave the
 /// field as-is; never blocks the job pipeline.
-fn spawn_one<F>(st: &AppState, id: i64, field: &'static str, dir: std::path::PathBuf, gen: F)
+fn spawn_one<F>(st: &AppState, id: i64, field: &'static str, dir: std::path::PathBuf, gen: F) -> tokio::task::JoinHandle<()>
 where
-    F: FnOnce(String, std::path::PathBuf) -> anyhow::Result<String> + Send + 'static,
+    F: FnOnce(String, std::path::PathBuf, &dyn Fn(u32)) -> anyhow::Result<(String, summarize::GenStats)>
+        + Send
+        + 'static,
 {
     let (db, bus) = (st.db.clone(), st.bus.clone());
     tokio::spawn(async move {
         let Ok(bundle) = tokio::fs::read_to_string(dir.join("bundle.md")).await else { return };
         let logs = dir.join("logs");
-        match tokio::task::spawn_blocking(move || gen(bundle, logs)).await {
-            Ok(Ok(text)) if !text.is_empty() => {
+        // Signal "generating" immediately so the UI shows a pending/progress state.
+        bus.publish(id, json!({ "kind": "summary_progress", "field": field, "tokens": 0 }).to_string());
+        let bus_tok = bus.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            let on_tok = move |n: u32| {
+                bus_tok.publish(id, json!({ "kind": "summary_progress", "field": field, "tokens": n }).to_string());
+            };
+            gen(bundle, logs, &on_tok)
+        })
+        .await;
+        match res {
+            Ok(Ok((text, stats))) if !text.is_empty() => {
                 let stored = match field {
                     "title" => db.set_short_title(id, &text),
                     "repro" => db.set_repro(id, &text),
@@ -598,15 +615,19 @@ where
                     warn!("job {id}: storing {field} summary failed: {e:#}");
                     return;
                 }
-                bus.publish(id, json!({ "kind": "summary", "field": field, "text": text }).to_string());
+                if let Err(e) = db.set_summary_meta(id, field, stats.ms, stats.tokens, summarize::LABEL) {
+                    warn!("job {id}: storing {field} summary meta failed: {e:#}");
+                }
+                bus.publish(id, json!({ "kind": "summary", "field": field, "text": text,
+                    "ms": stats.ms, "tokens": stats.tokens, "model": summarize::LABEL }).to_string());
                 bus.publish_global(json!({ "kind": "jobs" }).to_string());
-                info!("job {id}: {field} summary ready");
+                info!("job {id}: {field} summary ready ({} tok, {} ms)", stats.tokens, stats.ms);
             }
             Ok(Ok(_)) => {}
             Ok(Err(e)) => warn!("job {id}: {field} summary failed: {e:#}"),
             Err(e) => warn!("job {id}: {field} summary task panicked: {e}"),
         }
-    });
+    })
 }
 
 async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
@@ -713,8 +734,20 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
     st.bus.publish(id, json!({ "kind": "done", "status": outcome, "exit": exit,
                                "ram_peak": ram, "disk_peak": disk }).to_string());
     st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
-    // Final summary including the run output (supersedes the preliminary one).
-    spawn_summary(st, id, "end");
+    // Final summary including the run output (supersedes the preliminary one). The
+    // end-stage summaries run after the job is terminal, so keep the per-job SSE
+    // channel open until both finish (so their live token stream reaches the client),
+    // then signal completion and close it.
+    let summary_tasks = spawn_summary(st, id, "end");
+    {
+        let bus = st.bus.clone();
+        tokio::spawn(async move {
+            for h in summary_tasks { let _ = h.await; }
+            bus.publish(id, json!({ "kind": "summaries_done" }).to_string());
+            bus.publish_global(json!({ "kind": "jobs" }).to_string());
+            bus.close(id);
+        });
+    }
     // Reclaim the per-job kernel worktree (the ~3 GB build tree) now that the job is
     // done; logs + metrics + the DuckDB row stay. Each job owns its MK_WT_ROOT, so
     // this never races another job. Absent for no-metadata jobs (built in LINUX_SRC).
@@ -735,7 +768,8 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
             }
         }
     }
-    st.bus.close(id);
+    // NB: the per-job SSE channel is closed by the end-summary coordinator above, not
+    // here, so the result/detail token stream isn't cut off.
     info!("job {id}: {outcome} (exit={:?}, ram_peak={ram}, disk_peak={disk})", exit);
     Ok(())
 }

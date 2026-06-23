@@ -18,6 +18,7 @@
 //! tokenization, sampling, EOS, the KV cache, and request concurrency
 //! (`--parallel 2`), so a stage's two outputs still generate concurrently.
 
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -51,6 +52,12 @@ const READY_TIMEOUT: Duration = Duration::from_secs(1800);
 /// Owns one `llama-server` subprocess and an HTTP client that talks to its
 /// OpenAI-compatible API. `Send + Sync` (the `Child` lives behind a `Mutex`), so
 /// it slots into the existing `Arc<OnceLock<Arc<Summarizer>>>`.
+/// Timing + token count for one generation. The model is the constant `LABEL`.
+pub struct GenStats {
+    pub ms: u64,
+    pub tokens: u32,
+}
+
 pub struct Summarizer {
     child: Mutex<Child>,
     client: reqwest::blocking::Client,
@@ -117,7 +124,7 @@ impl Summarizer {
         };
         s.wait_ready().context("llama-server did not become ready")?;
         // Warm up, then measure the child's resident memory for /api/summarizer.
-        let _ = s.generate(SYS_TITLE, "ping", 1, false);
+        let _ = s.generate(SYS_TITLE, "ping", 1, false, &|_| {});
         let pid = s.child.lock().unwrap().id();
         s.mem_bytes = rss_of(pid);
         Ok(s)
@@ -129,16 +136,16 @@ impl Summarizer {
     }
 
     /// Terse two-word title for the job, from the bundle alone (job start).
-    pub fn title(&self, bundle_md: &str) -> Result<String> {
+    pub fn title(&self, bundle_md: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
         let user = curate_bundle(bundle_md);
-        let raw = self.generate(SYS_TITLE, &user, 8, false)?;
-        Ok(two_words(&raw))
+        let (raw, stats) = self.generate(SYS_TITLE, &user, 8, false, on_tok)?;
+        Ok((two_words(&raw), stats))
     }
 
     /// One sentence on what the reproducer tests, from the bundle alone (job start).
-    pub fn summarize_repro(&self, bundle_md: &str) -> Result<String> {
+    pub fn summarize_repro(&self, bundle_md: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
         let user = curate_bundle(bundle_md);
-        self.generate(SYS_REPRO, &user, 64, false)
+        self.generate(SYS_REPRO, &user, 64, false, on_tok)
     }
 
     /// One sentence on what happened on this run: bundle + curated issues + outcome
@@ -149,7 +156,8 @@ impl Summarizer {
         issues_json: &str,
         exit_code: Option<i64>,
         outcome: &str,
-    ) -> Result<String> {
+        on_tok: &dyn Fn(u32),
+    ) -> Result<(String, GenStats)> {
         let exit = exit_code
             .map(|e| e.to_string())
             .unwrap_or_else(|| "unknown".into());
@@ -158,21 +166,29 @@ impl Summarizer {
             curate_bundle(bundle_md),
             curate_issues(issues_json),
         );
-        self.generate(SYS_RESULT, &user, 96, false)
+        self.generate(SYS_RESULT, &user, 96, false, on_tok)
     }
 
     /// Markdown "why it failed", reading the bundle plus all labeled logs (job end).
     /// Returns GitHub-flavored Markdown (a `## Summary` / `## Root cause` /
     /// `## Evidence` document) as a string; the DB stores it verbatim.
-    pub fn detail(&self, bundle_md: &str, logs_dir: &Path) -> Result<String> {
+    pub fn detail(&self, bundle_md: &str, logs_dir: &Path, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
         let user = format!("{}\n\n{}", curate_bundle(bundle_md), curate_logs(logs_dir));
-        self.generate(SYS_DETAIL, &user, 400, false)
+        self.generate(SYS_DETAIL, &user, 400, false, on_tok)
     }
 
-    /// One deterministic (greedy) completion via the OpenAI chat API. llama-server
-    /// applies the model's chat template from the GGUF, so system/user go as
-    /// messages rather than a hand-rolled prompt string.
-    fn generate(&self, sys: &str, user: &str, max_new: usize, json: bool) -> Result<String> {
+    /// One deterministic (greedy) completion via the OpenAI chat API, streamed so we
+    /// can report the live token count (`on_tok`, throttled) and measure wall time.
+    /// llama-server applies the model's chat template from the GGUF, so system/user
+    /// go as messages rather than a hand-rolled prompt string.
+    fn generate(
+        &self,
+        sys: &str,
+        user: &str,
+        max_new: usize,
+        json: bool,
+        on_tok: &dyn Fn(u32),
+    ) -> Result<(String, GenStats)> {
         let mut body = json!({
             "model": LABEL,
             "messages": [
@@ -183,28 +199,54 @@ impl Summarizer {
             "max_tokens": max_new,
             "repeat_penalty": REPEAT_PENALTY,
             "repeat_last_n": REPEAT_LAST_N,
-            "stream": false,
+            "stream": true,
+            "stream_options": {"include_usage": true},
         });
         if json {
             // llama-server constrains output to valid JSON via a grammar.
             body["response_format"] = serde_json::json!({"type": "json_object"});
         }
-        let resp: serde_json::Value = self
+        let started = Instant::now();
+        let resp = self
             .client
             .post(format!("{}/v1/chat/completions", self.base_url))
             .json(&body)
             .send()
             .context("POST /v1/chat/completions")?
             .error_for_status()
-            .context("llama-server returned an error status")?
-            .json()
-            .context("parse completion json")?;
-        let text = resp["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        Ok(text)
+            .context("llama-server returned an error status")?;
+
+        // Parse the OpenAI SSE stream: `data: {json}` lines, ending with `data: [DONE]`.
+        // Each chunk carries an incremental `choices[0].delta.content`; the final usage
+        // chunk (include_usage) carries the authoritative `usage.completion_tokens`.
+        let mut text = String::new();
+        let mut tokens: u32 = 0;
+        let mut usage_tokens: Option<u32> = None;
+        for line in BufReader::new(resp).lines() {
+            let line = line.context("read completion stream")?;
+            let Some(data) = line.strip_prefix("data:") else { continue };
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(chunk): Result<serde_json::Value, _> = serde_json::from_str(data) else { continue };
+            if let Some(c) = chunk["choices"][0]["delta"]["content"].as_str() {
+                if !c.is_empty() {
+                    text.push_str(c);
+                    tokens += 1;
+                    if tokens % 8 == 0 {
+                        on_tok(tokens);
+                    }
+                }
+            }
+            if let Some(n) = chunk["usage"]["completion_tokens"].as_u64() {
+                usage_tokens = Some(n as u32);
+            }
+        }
+        let tokens = usage_tokens.unwrap_or(tokens);
+        on_tok(tokens); // final count
+        let stats = GenStats { ms: started.elapsed().as_millis() as u64, tokens };
+        Ok((text.trim().to_string(), stats))
     }
 
     /// Poll `/health` until the server is ready, the child exits, or we time out.

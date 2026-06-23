@@ -17,6 +17,31 @@ import {
 import specMd from "../../../docs/reproducer-spec.md?raw";
 
 const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
+
+// Per-summary generation metadata (from job.summary_meta JSON) → hover tooltip text.
+type SummaryMeta = { ms: number; tokens: number; model: string };
+function summaryMeta(job: Job | null, field: string): SummaryMeta | null {
+  if (!job?.summary_meta) return null;
+  try { return (JSON.parse(job.summary_meta) as Record<string, SummaryMeta>)[field] ?? null; }
+  catch { return null; }
+}
+function summaryTip(job: Job | null, field: string): string | undefined {
+  const m = summaryMeta(job, field);
+  return m ? `generated in ${m.ms} ms · ${m.model} · ${m.tokens} tokens` : undefined;
+}
+
+// One summary line: the text + hover tooltip once it's generated, a live token count
+// while it streams, or a "pending" placeholder when it's due but not yet started.
+function SummaryLine(
+  { job, field, icon, text, progress, due }:
+  { job: Job | null; field: string; icon: string; text: string | null; progress: Record<string, number>; due: boolean },
+) {
+  if (text) return <p className="summary" title={summaryTip(job, field)}>{icon} {text}</p>;
+  const tok = progress[field];
+  if (tok !== undefined) return <p className="summary"><span className="muted">{icon} generating… {tok} tok</span></p>;
+  if (due) return <p className="summary"><span className="muted">{icon} ⏳ pending</span></p>;
+  return null;
+}
 // `run` is the run-kernel.py orchestrator log: it always carries the failure reason
 // (a die() message or an uncaught traceback), even for early crashes that never reach
 // the phase-specific logs — so it's the reliable place to look when a job fails.
@@ -202,7 +227,7 @@ function Dashboard() {
                 <li key={j.id} className={sel === j.id ? "active" : ""} onClick={() => setSel(j.id)}>
                   <div className="jobrow">
                     <span className="dot" style={{ background: statusColor(j.status) }} />
-                    #{j.id}{j.short_title && <span className="shorttitle"> {j.short_title}</span>} <em>{j.status}</em>
+                    #{j.id}{j.short_title && <span className="shorttitle" title={summaryTip(j, "title")}> {j.short_title}</span>} <em>{j.status}</em>
                     {j.phase && j.status === "running" && <span className="ph"> · {j.phase}</span>}
                     {j.exit_code != null && <span className="ph"> · exit {j.exit_code}</span>}
                     {j.reaped_ms != null && <span className="ph"> · logs expired</span>}
@@ -212,7 +237,7 @@ function Dashboard() {
                     )}
                   </div>
                   {j.title && <div className="jobsum" title={j.title}>{j.title}</div>}
-                  {j.repro_summary && <div className="jobsum" title={j.repro_summary}>{j.repro_summary}</div>}
+                  {j.repro_summary && <div className="jobsum" title={summaryTip(j, "repro") ?? j.repro_summary}>{j.repro_summary}</div>}
                 </li>
               ))}
             </ul>
@@ -249,6 +274,8 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
   const [maxRepro, setMaxRepro] = useState(false);
   // Phase start times (ms) keyed by phase name — used to mark the timeline.
   const [phaseTs, setPhaseTs] = useState<Record<string, number>>({});
+  // Live token count per summary field while it streams (cleared when the summary lands).
+  const [progress, setProgress] = useState<Record<string, number>>({});
   const bundle = useMemo(() => parseBundle(bundleText), [bundleText]);
   // A patch-compare / thread-compare job ran baseline + patched; show them side by side.
   const cmp = useMemo(() => compareMode(bundle), [bundle]);
@@ -256,7 +283,7 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
   const userPicked = useRef(false);
 
   useEffect(() => {
-    setSamples([]); setJob(null); setPhaseTs({});
+    setSamples([]); setJob(null); setPhaseTs({}); setProgress({});
     userPicked.current = false;
     let live = true;
     let es: EventSource | null = null;
@@ -267,9 +294,16 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
       setSamples(m);
       // Stored phase timestamps — so marks show on terminal jobs that never open the SSE.
       getPhases(id).then((evs) => { if (live) setPhaseTs(Object.fromEntries(evs.map((e) => [e.phase, e.ts_ms]))); }).catch(() => {});
-      // Only stream for a still-running job. The server closes the stream when a
-      // job finishes, so opening it on a terminal job just spins reconnects.
-      if (j.status === "done" || j.status === "failed") return;
+      // Stream while the job runs, OR while end-stage summaries (generated after the
+      // job is terminal) are still pending — the server keeps the per-job channel open
+      // until they finish and closes it with a `summaries_done` event. Skip reaped jobs
+      // and terminal jobs whose summaries are all in.
+      const terminal = j.status === "done" || j.status === "failed";
+      const summariesComplete =
+        j.short_title != null && j.repro_summary != null &&
+        j.result_summary != null && j.detail != null;
+      if (j.reaped_ms != null) return;
+      if (terminal && summariesComplete) return;
       es = new EventSource(eventsUrl(id));
       es.onmessage = (e) => {
         try {
@@ -277,8 +311,12 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
           if (v.kind === "metric") setSamples((s) => [...s, v as any].map(toSample));
           if (v.kind === "phase" && v.phase && v.ts_ms)
             setPhaseTs((p) => (p[v.phase] ? p : { ...p, [v.phase]: v.ts_ms }));
+          if (v.kind === "summary_progress" && v.field)
+            setProgress((p) => ({ ...p, [v.field]: v.tokens ?? 0 }));
+          if (v.kind === "summary" && v.field)
+            setProgress((p) => { const n = { ...p }; delete n[v.field]; return n; });
           if (v.kind === "phase" || v.kind === "done" || v.kind === "summary") getJob(id).then(setJob);
-          if (v.kind === "done") es?.close();
+          if (v.kind === "summaries_done") es?.close();
         } catch {}
       };
     })();
@@ -330,18 +368,28 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
             <span key={p} className={"step " + stepClass(job, p)}>{p}</span>
           ))}
         </div>
-        {job?.repro_summary && <p className="summary">📝 {job.repro_summary}</p>}
-        {job?.result_summary && <p className="summary">✅ {job.result_summary}</p>}
+        <SummaryLine job={job} field="repro" icon="📝" text={job?.repro_summary ?? null}
+          progress={progress} due={job != null && job.status !== "queued"} />
+        <SummaryLine job={job} field="result" icon="✅" text={job?.result_summary ?? null}
+          progress={progress} due={job?.status === "done" || job?.status === "failed"} />
         {job && (
           <p className="muted">
             exit {job.exit_code ?? "—"} · peak RAM {gib(job.ram_peak)} GB · peak disk {gib(job.disk_peak)} GB
           </p>
         )}
       </section>
-      {job?.detail && (
+      {(job?.detail || progress["detail"] !== undefined ||
+        job?.status === "done" || job?.status === "failed") && (
         <section className="card">
-          <h2>Why it failed</h2>
-          <p className="detail">{job.detail}</p>
+          <h2>Why it failed{summaryTip(job, "detail") &&
+            <span className="muted" style={{ fontWeight: "normal", fontSize: "0.7em" }}
+              title={summaryTip(job, "detail")}> ⓘ</span>}</h2>
+          {job?.detail
+            ? <div className="md" title={summaryTip(job, "detail")}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{job.detail}</ReactMarkdown>
+              </div>
+            : <p className="muted">{progress["detail"] !== undefined
+                ? `generating… ${progress["detail"]} tok` : "⏳ pending"}</p>}
         </section>
       )}
       {bundleText.trim() && (
