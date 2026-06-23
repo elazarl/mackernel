@@ -185,12 +185,14 @@ def compile_c(srcs, out_name: str, image: str, is_local: bool,
     `out_name`, inside the build container; non-.c files (headers, data) are
     copied alongside so includes resolve. Returns the host path of the binary.
 
-    Builds for the guest's `arch` (native, or an emulated foreign arch via
-    --platform), so the binary matches the kernel.
+    Builds for the guest's `arch` (native, an emulated foreign arch via
+    --platform, or cross-compiled with aarch64-linux-gnu-gcc when an x86_64 host
+    targets arm64), so the binary matches the kernel.
 
     When `log_file` is given, the container's output is captured there (the job's
     compile.log) instead of inheriting stdio."""
     plat_args = mklib.platform_args(arch)
+    cross = mklib.cross_compile(arch)
     builddir = Path(tempfile.mkdtemp(prefix=".mk-build-", dir=HERE))
     cfiles = []
     for s in srcs:
@@ -208,7 +210,7 @@ def compile_c(srcs, out_name: str, image: str, is_local: bool,
     podman += [
         *mklib.hardening_args(arch),
         "-v", mklib.volume(builddir, "/build"), "-w", "/build", image,
-        "gcc-15", "-static", "-O2", "-pthread", *cflags,
+        f"{cross}gcc-15", "-static", "-O2", "-pthread", *cflags,
         "-o", out_name, *cfiles,
     ]
     log(f"compiling {', '.join(cfiles)} statically in {image} ...")
