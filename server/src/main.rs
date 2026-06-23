@@ -91,17 +91,26 @@ async fn main() -> anyhow::Result<()> {
     let argv: Vec<String> = std::env::args().collect();
     if argv.get(1).map(String::as_str) == Some("summarize") {
         let bundle_path = argv.get(2).cloned().unwrap_or_default();
+        let logs_arg = argv.get(3).cloned();
         let md = std::fs::read_to_string(&bundle_path)?;
-        let s = summarize::Summarizer::load()?;
-        info!("loaded summary model: {} ({} MB incl. KV)", summarize::LABEL, s.memory_bytes() / 1_048_576);
-        println!("TITLE:  {}", s.title(&md)?);
-        println!("REPRO:  {}", s.summarize_repro(&md)?);
-        if let Some(logs) = argv.get(3) {
-            let logs = std::path::Path::new(logs);
-            let issues = collect_issues(logs);
-            println!("RESULT: {}", s.summarize_result(&md, &issues, Some(1), "done")?);
-            println!("DETAIL: {}", s.detail(&md, logs)?);
-        }
+        // Summarizer talks to llama-server via reqwest::blocking; run it on a plain
+        // thread so its internal runtime isn't created/dropped in async context (the
+        // service path already does this via spawn_blocking).
+        std::thread::spawn(move || -> anyhow::Result<()> {
+            let s = summarize::Summarizer::load()?;
+            info!("loaded summary model: {} ({} MB RSS)", summarize::LABEL, s.memory_bytes() / 1_048_576);
+            println!("TITLE:  {}", s.title(&md)?);
+            println!("REPRO:  {}", s.summarize_repro(&md)?);
+            if let Some(logs) = logs_arg {
+                let logs = std::path::Path::new(&logs);
+                let issues = collect_issues(logs);
+                println!("RESULT: {}", s.summarize_result(&md, &issues, Some(1), "done")?);
+                println!("DETAIL: {}", s.detail(&md, logs)?);
+            }
+            Ok(())
+        })
+        .join()
+        .map_err(|_| anyhow::anyhow!("summarize thread panicked"))??;
         return Ok(());
     }
 
@@ -137,7 +146,7 @@ async fn main() -> anyhow::Result<()> {
         let slot = summarizer.clone();
         tokio::task::spawn_blocking(move || match summarize::Summarizer::load() {
             Ok(s) => {
-                info!("summary model ready ({}, 4 models, {} MB incl. KV)",
+                info!("summary model ready ({}, llama-server, {} MB RSS)",
                     summarize::LABEL, s.memory_bytes() / 1_048_576);
                 let _ = slot.set(Arc::new(s));
             }
@@ -413,17 +422,16 @@ async fn get_peaks(State(st): State<AppState>) -> Result<Json<Vec<db::Peak>>, St
     Ok(Json(st.db.peaks().map_err(ise)?))
 }
 
-/// Summarizer status: label, model count, and measured RAM (weights + KV caches).
+/// Summarizer status: label and the measured RAM of the llama-server subprocess.
 /// `loaded` is false until the background model load finishes.
 async fn get_summarizer(State(st): State<AppState>) -> Json<serde_json::Value> {
     match st.summarizer.get() {
         Some(s) => Json(json!({
             "loaded": true,
             "label": summarize::LABEL,
-            "models": 2,
             "mem_bytes": s.memory_bytes(),
         })),
-        None => Json(json!({ "loaded": false, "label": summarize::LABEL, "models": 2, "mem_bytes": 0 })),
+        None => Json(json!({ "loaded": false, "label": summarize::LABEL, "mem_bytes": 0 })),
     }
 }
 

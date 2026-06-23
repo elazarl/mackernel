@@ -1,32 +1,29 @@
-//! In-process, CPU-only LLM summarizer for reproducer jobs.
+//! CPU-only LLM summarizer for reproducer jobs.
 //!
-//! Produces four outputs per job via `candle` against the quantized Phi-3.5-mini GGUF
-//! (downloaded once, cached under `~/.cache/huggingface`, loaded at boot):
+//! Produces four outputs per job against the quantized Phi-3.5-mini GGUF (the
+//! "pi3"/Phi-3 model, downloaded once and cached):
 //!   - a short **title**,
 //!   - a one-sentence **reproducer** summary (at job start, bundle only),
 //!   - a one-sentence **result** summary (at job end, + run output),
 //!   - a two-paragraph **detail** ("why it failed", reading the bundle + all logs).
 //! Set `MK_SUMMARY_DISABLE=1` to turn the feature off entirely.
 //!
-//! Each output has its OWN model instance (`title_model`/`repro_model`/`result_model`/
-//! `detail_model`), so the two generations of a stage run concurrently instead of
-//! contending on one lock. The instances share weight tensors by Arc (cold-cloned at
-//! load, before any KV cache is allocated) — ~1x weights, but each carries its own
-//! full-context KV cache, which is why `mem_bytes` is tracked (see `load`).
-//!
-//! candle's quantized CPU prefill does NOT parallelize across cores, so latency scales
-//! with prompt length — hence the aggressive curation in `curate_*`.
+//! Inference runs out-of-process: `load()` spawns llama.cpp's `llama-server` (the
+//! most stable native CPU LLM runtime) as a subprocess and we talk to its
+//! OpenAI-compatible `/v1/chat/completions` endpoint over HTTP. The binary comes
+//! from `$MK_LLAMA_SERVER`, else `llama-server` on `PATH`, else a prebuilt release
+//! is downloaded and cached. The model GGUF is downloaded + cached by llama-server
+//! itself. The child is killed when the `Summarizer` drops. llama-server handles
+//! tokenization, sampling, EOS, the KV cache, and request concurrency
+//! (`--parallel 2`), so a stage's two outputs still generate concurrently.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
-use candle_core::quantized::gguf_file;
-use candle_core::{Device, Tensor};
-use candle_transformers::generation::{LogitsProcessor, Sampling};
-use candle_transformers::models::quantized_phi3::ModelWeights as Model;
-use candle_transformers::utils::apply_repeat_penalty;
-use tokenizers::Tokenizer;
+use anyhow::{bail, Context, Result};
+use serde_json::json;
 
 const SYS_TITLE: &str = "You name Linux kernel bug reproducers. Reply with exactly two words — a terse title — and nothing else. No punctuation, no preamble.";
 const SYS_REPRO: &str = "You summarize Linux kernel bug reproducers. The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
@@ -38,25 +35,35 @@ const REPEAT_LAST_N: usize = 64;
 
 const GGUF_REPO: &str = "bartowski/Phi-3.5-mini-instruct-GGUF";
 const GGUF_FILE: &str = "Phi-3.5-mini-instruct-Q4_K_M.gguf";
-const TOKENIZER_REPO: &str = "microsoft/Phi-3.5-mini-instruct";
-/// Turn-ending special tokens, in priority order.
-const EOS_NAMES: &[&str] = &["<|endoftext|>", "<|end|>"];
 /// Human-readable model label, surfaced in logs and `/api/summarizer`.
 pub const LABEL: &str = "phi3.5-mini";
 
-/// Two model instances sharing weight tensors by Arc (cold-cloned in `load`) but each
-/// with its own KV cache, so a stage's two outputs generate concurrently. `model_a`
-/// serves title (start) + result (end); `model_b` serves repro (start) + detail (end).
-/// Profiling showed the per-model KV cache (~3.9GB), not the shared ~2.8GB weights,
-/// dominates RAM — so two caches instead of four roughly halves resident memory.
-/// `mem_bytes` is the measured RSS of weights + the two KV caches.
+/// Context window. Prompts are curated to ~10k chars (~3-4k tokens) plus up to
+/// 400 generated, so 8k is comfortable.
+const CTX_SIZE: usize = 8192;
+/// How long to wait for the server to come up. The first-ever boot blocks here
+/// while llama-server downloads the ~2.5 GB GGUF (measured ~15 min on a home
+/// link); cached boots are ~30s. Generous so a cold download doesn't get killed.
+/// ponytail: bump if first boots on slow links still time out.
+const READY_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Owns one `llama-server` subprocess and an HTTP client that talks to its
+/// OpenAI-compatible API. `Send + Sync` (the `Child` lives behind a `Mutex`), so
+/// it slots into the existing `Arc<OnceLock<Arc<Summarizer>>>`.
 pub struct Summarizer {
-    model_a: Mutex<Model>,
-    model_b: Mutex<Model>,
-    tokenizer: Tokenizer,
-    device: Device,
-    eos: Vec<u32>,
+    child: Mutex<Child>,
+    client: reqwest::blocking::Client,
+    base_url: String,
     mem_bytes: u64,
+}
+
+impl Drop for Summarizer {
+    fn drop(&mut self) {
+        if let Ok(mut c) = self.child.lock() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
 }
 
 impl Summarizer {
@@ -68,52 +75,54 @@ impl Summarizer {
         )
     }
 
-    /// Download (if needed) and load the model, then cold-clone it into four
-    /// instances. Blocking — call from a blocking thread. First call may download
-    /// ~2.5 GB; later calls hit the `~/.cache/huggingface` cache and are fast.
+    /// Spawn `llama-server` and wait until it's serving. Blocking — call from a
+    /// blocking thread. First call may download the binary and the ~2.5 GB model;
+    /// later calls hit the caches and are fast.
     pub fn load() -> Result<Self> {
-        let api = hf_hub::api::sync::Api::new().context("init hf-hub api")?;
-        let gguf_path = api
-            .model(GGUF_REPO.to_string())
-            .get(GGUF_FILE)
-            .with_context(|| format!("download {GGUF_REPO}/{GGUF_FILE}"))?;
-        let tok_path = api
-            .model(TOKENIZER_REPO.to_string())
-            .get("tokenizer.json")
-            .context("download tokenizer.json")?;
+        let bin = resolve_binary().context("locate or download llama-server")?;
+        let port: u16 = std::env::var("MK_LLAMA_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(18080);
+        let base_url = format!("http://127.0.0.1:{port}");
 
-        let tokenizer = Tokenizer::from_file(&tok_path).map_err(anyhow::Error::msg)?;
-        let device = Device::Cpu;
+        // Run from the binary's own directory so bundled shared libraries resolve.
+        let mut cmd = Command::new(&bin);
+        cmd.args([
+            "--host", "127.0.0.1",
+            "--port", &port.to_string(),
+            "--ctx-size", &CTX_SIZE.to_string(),
+            "--parallel", "2",
+            "--hf-repo", GGUF_REPO,
+            "--hf-file", GGUF_FILE,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+        if let Some(dir) = bin.parent() {
+            cmd.current_dir(dir);
+        }
+        let child = cmd.spawn().with_context(|| format!("spawn {}", bin.display()))?;
 
-        let rss0 = self_rss();
-        let mut fd = std::fs::File::open(&gguf_path)?;
-        let content = gguf_file::Content::read(&mut fd).map_err(|e| e.with_path(&gguf_path))?;
-        let model = Model::from_gguf(false, content, &mut fd, &device)?;
-        // Cold-clone once: the clone shares weight tensors by Arc (the ~2.8GB weights
-        // cost ~1x) and gets its own empty KV cache. NEVER clone a warmed model — its
-        // KV buffer is Arc-shared and writes would corrupt across clones (candle_nn::kv_cache).
-        let vocab = tokenizer.get_vocab(true);
-        let eos: Vec<u32> = EOS_NAMES.iter().filter_map(|n| vocab.get(*n).copied()).collect();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(600))
+            .build()
+            .context("build http client")?;
 
         let mut s = Self {
-            model_a: Mutex::new(model.clone()),
-            model_b: Mutex::new(model),
-            tokenizer,
-            device,
-            eos,
+            child: Mutex::new(child),
+            client,
+            base_url,
             mem_bytes: 0,
         };
-        // Warm both so their KV caches allocate up front; the RSS delta then captures
-        // weights + the two caches. The caches dominate RAM, so two instead of four
-        // halves it (see the Summarizer doc comment).
-        for m in [&s.model_a, &s.model_b] {
-            let _ = s.generate(m, &s.format_prompt("Reply with OK.", "ping"), 1);
-        }
-        s.mem_bytes = self_rss().saturating_sub(rss0);
+        s.wait_ready().context("llama-server did not become ready")?;
+        // Warm up, then measure the child's resident memory for /api/summarizer.
+        let _ = s.generate(SYS_TITLE, "ping", 1);
+        let pid = s.child.lock().unwrap().id();
+        s.mem_bytes = rss_of(pid);
         Ok(s)
     }
 
-    /// Measured RAM of the four model instances (weights + KV caches), in bytes.
+    /// Measured RAM of the llama-server child (weights + KV cache), in bytes.
     pub fn memory_bytes(&self) -> u64 {
         self.mem_bytes
     }
@@ -121,14 +130,14 @@ impl Summarizer {
     /// Terse two-word title for the job, from the bundle alone (job start).
     pub fn title(&self, bundle_md: &str) -> Result<String> {
         let user = curate_bundle(bundle_md);
-        let raw = self.generate(&self.model_a, &self.format_prompt(SYS_TITLE, &user), 8)?;
+        let raw = self.generate(SYS_TITLE, &user, 8)?;
         Ok(two_words(&raw))
     }
 
     /// One sentence on what the reproducer tests, from the bundle alone (job start).
     pub fn summarize_repro(&self, bundle_md: &str) -> Result<String> {
         let user = curate_bundle(bundle_md);
-        self.generate(&self.model_b, &self.format_prompt(SYS_REPRO, &user), 64)
+        self.generate(SYS_REPRO, &user, 64)
     }
 
     /// One sentence on what happened on this run: bundle + curated issues + outcome
@@ -148,82 +157,228 @@ impl Summarizer {
             curate_bundle(bundle_md),
             curate_issues(issues_json),
         );
-        self.generate(&self.model_a, &self.format_prompt(SYS_RESULT, &user), 96)
+        self.generate(SYS_RESULT, &user, 96)
     }
 
     /// Two-paragraph "why it failed", reading the bundle plus all labeled logs (job end).
     pub fn detail(&self, bundle_md: &str, logs_dir: &Path) -> Result<String> {
         let user = format!("{}\n\n{}", curate_bundle(bundle_md), curate_logs(logs_dir));
-        self.generate(&self.model_b, &self.format_prompt(SYS_DETAIL, &user), 400)
+        self.generate(SYS_DETAIL, &user, 400)
     }
 
-    fn format_prompt(&self, sys: &str, user: &str) -> String {
-        format!("<|system|>\n{sys}<|end|>\n<|user|>\n{user}<|end|>\n<|assistant|>\n")
+    /// One deterministic (greedy) completion via the OpenAI chat API. llama-server
+    /// applies the model's chat template from the GGUF, so system/user go as
+    /// messages rather than a hand-rolled prompt string.
+    fn generate(&self, sys: &str, user: &str, max_new: usize) -> Result<String> {
+        let body = json!({
+            "model": LABEL,
+            "messages": [
+                {"role": "system", "content": sys},
+                {"role": "user", "content": user},
+            ],
+            "temperature": 0.0,          // deterministic — matches old Sampling::ArgMax
+            "max_tokens": max_new,
+            "repeat_penalty": REPEAT_PENALTY,
+            "repeat_last_n": REPEAT_LAST_N,
+            "stream": false,
+        });
+        let resp: serde_json::Value = self
+            .client
+            .post(format!("{}/v1/chat/completions", self.base_url))
+            .json(&body)
+            .send()
+            .context("POST /v1/chat/completions")?
+            .error_for_status()
+            .context("llama-server returned an error status")?
+            .json()
+            .context("parse completion json")?;
+        let text = resp["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        Ok(text)
     }
 
-    /// Greedy generation (deterministic) with a light repeat penalty. Holds the given
-    /// model's lock for the whole call; distinct models generate concurrently.
-    fn generate(&self, model: &Mutex<Model>, prompt: &str, max_new: usize) -> Result<String> {
-        let encoding = self
-            .tokenizer
-            .encode(prompt, true)
-            .map_err(anyhow::Error::msg)?;
-        let prompt_tokens = encoding.get_ids().to_vec();
-        if prompt_tokens.is_empty() {
-            anyhow::bail!("empty prompt");
-        }
-
-        let mut model = model.lock().unwrap();
-        let mut logits_processor = LogitsProcessor::from_sampling(42, Sampling::ArgMax);
-
-        // Prefill. Phi3 resets its KV cache when index_pos == 0, so each call starts fresh.
-        let input = Tensor::new(prompt_tokens.as_slice(), &self.device)?.unsqueeze(0)?;
-        let logits = forward(&mut model, &input, 0)?.squeeze(0)?;
-        let mut next = logits_processor.sample(&logits)?;
-
-        let n_prompt = prompt_tokens.len();
-        let mut generated: Vec<u32> = Vec::with_capacity(max_new);
-        for i in 0..max_new {
-            if self.eos.contains(&next) {
-                break;
+    /// Poll `/health` until the server is ready, the child exits, or we time out.
+    fn wait_ready(&self) -> Result<()> {
+        let deadline = Instant::now() + READY_TIMEOUT;
+        let health = format!("{}/health", self.base_url);
+        let poll = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        loop {
+            if let Some(status) = self.child.lock().unwrap().try_wait()? {
+                bail!("llama-server exited early ({status})");
             }
-            generated.push(next);
-            let input = Tensor::new(&[next], &self.device)?.unsqueeze(0)?;
-            let logits = forward(&mut model, &input, n_prompt + i)?.squeeze(0)?;
-            let logits = if generated.len() > 1 {
-                let start = generated.len().saturating_sub(REPEAT_LAST_N);
-                apply_repeat_penalty(&logits, REPEAT_PENALTY, &generated[start..])?
-            } else {
-                logits
-            };
-            next = logits_processor.sample(&logits)?;
+            if let Ok(r) = poll.get(&health).send() {
+                if r.status().is_success() {
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                bail!("timed out after {READY_TIMEOUT:?} waiting for {health}");
+            }
+            std::thread::sleep(Duration::from_millis(500));
         }
-        drop(model);
-
-        let text = self
-            .tokenizer
-            .decode(&generated, true)
-            .map_err(anyhow::Error::msg)?;
-        Ok(text.trim().to_string())
     }
 }
 
-fn forward(model: &mut Model, input: &Tensor, pos: usize) -> candle_core::Result<Tensor> {
-    model.forward(input, pos)
+/// Locate the `llama-server` binary: explicit override, then `PATH`, then download.
+fn resolve_binary() -> Result<PathBuf> {
+    if let Some(p) = std::env::var_os("MK_LLAMA_SERVER") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Ok(p);
+        }
+        bail!("MK_LLAMA_SERVER={} is not a file", p.display());
+    }
+    if let Some(p) = which("llama-server") {
+        return Ok(p);
+    }
+    download_llama_server()
 }
 
-/// Resident set size (bytes) of the current process. Linux reads `/proc/self/statm`;
+/// First `llama-server` found on `PATH` (no external `which` dependency).
+fn which(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(bin))
+        .find(|p| p.is_file())
+}
+
+/// Download the latest prebuilt llama.cpp release for this host and unpack it into
+/// the cache. Reuses an already-unpacked binary if present.
+fn download_llama_server() -> Result<PathBuf> {
+    let dir = cache_root();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    if let Some(existing) = find_server_bin(&dir) {
+        return Ok(existing);
+    }
+
+    let suffix = asset_suffix()?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .user_agent("mackernel-server")
+        .build()?;
+    let rel: serde_json::Value = client
+        .get("https://api.github.com/repos/ggml-org/llama.cpp/releases/latest")
+        .send()?
+        .error_for_status()?
+        .json()
+        .context("parse latest-release json")?;
+    let url = rel["assets"]
+        .as_array()
+        .and_then(|assets| {
+            assets.iter().find_map(|a| {
+                let name = a["name"].as_str()?;
+                name.ends_with(suffix)
+                    .then(|| a["browser_download_url"].as_str())
+                    .flatten()
+            })
+        })
+        .with_context(|| format!("no llama.cpp release asset ending in {suffix}"))?;
+
+    let bytes = client.get(url).send()?.error_for_status()?.bytes()?;
+    let archive = dir.join("llama-release.tar.gz");
+    std::fs::write(&archive, &bytes).with_context(|| format!("write {}", archive.display()))?;
+    extract_targz(&archive, &dir)?;
+    let _ = std::fs::remove_file(&archive);
+    find_server_bin(&dir).context("llama-server not found in downloaded archive")
+}
+
+/// Exact release-asset name suffix for this OS/arch — the plain CPU build (not the
+/// rocm/sycl/vulkan/openvino variants). Selected from `std::env::consts` (compile-time
+/// constants), so a Linux build picks the Linux asset even when built on a Mac.
+/// Linux/macOS ship `.tar.gz`; Windows ships `.zip` and isn't supported here
+/// (set `MK_LLAMA_SERVER` on Windows).
+fn asset_suffix() -> Result<&'static str> {
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let s = match (os, arch) {
+        ("linux", "x86_64") => "bin-ubuntu-x64.tar.gz",
+        ("linux", "aarch64") => "bin-ubuntu-arm64.tar.gz",
+        ("macos", "aarch64") => "bin-macos-arm64.tar.gz",
+        ("macos", "x86_64") => "bin-macos-x64.tar.gz",
+        _ => bail!("no prebuilt llama-server for {os}/{arch}; set MK_LLAMA_SERVER to a binary"),
+    };
+    Ok(s)
+}
+
+/// Unpack a `.tar.gz` via system `tar` (always present on Linux/macOS — same
+/// shell-out style as the `ps` RSS fallback).
+fn extract_targz(archive: &Path, dest: &Path) -> Result<()> {
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(dest)
+        .status()
+        .context("run tar")?;
+    if !status.success() {
+        bail!("tar failed extracting {}", archive.display());
+    }
+    Ok(())
+}
+
+/// Cache dir for the downloaded binary: `$XDG_CACHE_HOME` or `~/.cache`, else tmp.
+fn cache_root() -> PathBuf {
+    if let Some(d) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(d).join("mackernel/llama.cpp");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".cache/mackernel/llama.cpp");
+    }
+    std::env::temp_dir().join("mackernel/llama.cpp")
+}
+
+/// Find `llama-server` anywhere under `dir` and ensure it's executable.
+fn find_server_bin(dir: &Path) -> Option<PathBuf> {
+    let target = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let found = walk(dir)
+        .into_iter()
+        .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(target))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&found) {
+            let mut perm = meta.permissions();
+            perm.set_mode(perm.mode() | 0o755);
+            let _ = std::fs::set_permissions(&found, perm);
+        }
+    }
+    Some(found)
+}
+
+/// Recursively list every file under `dir` (best-effort, skips unreadable dirs).
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// Resident set size (bytes) of process `pid`. Linux reads `/proc/<pid>/statm`;
 /// elsewhere it shells out to `ps`. Best-effort: returns 0 on failure.
 /// ponytail: assumes 4 KiB pages on Linux — fine for the x86_64 home box.
-fn self_rss() -> u64 {
+fn rss_of(pid: u32) -> u64 {
     #[cfg(target_os = "linux")]
-    if let Ok(s) = std::fs::read_to_string("/proc/self/statm") {
+    if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/statm")) {
         if let Some(pages) = s.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok()) {
             return pages * 4096;
         }
     }
     std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .args(["-o", "rss=", "-p", &pid.to_string()])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -233,7 +388,7 @@ fn self_rss() -> u64 {
 }
 
 /// Read each known log file, label it with context, and cap per-file + overall so the
-/// detail prompt stays bounded (candle CPU prefill cost scales with prompt length).
+/// detail prompt stays bounded (model prefill cost scales with prompt length).
 /// ponytail: per-file ~2.5k chars, total ~10k; raise if two-paragraph quality suffers.
 fn curate_logs(logs_dir: &Path) -> String {
     const LOGS: &[(&str, &str)] = &[
@@ -261,7 +416,7 @@ fn curate_logs(logs_dir: &Path) -> String {
 
 /// Reproducer bundles are mostly C source inside code fences; for a short summary we
 /// want the prose + frontmatter only. Strip fenced code blocks, squeeze blank lines,
-/// and cap length (candle CPU prefill cost scales with prompt length).
+/// and cap length (model prefill cost scales with prompt length).
 fn curate_bundle(md: &str) -> String {
     let mut out = String::new();
     let mut in_fence = false;
