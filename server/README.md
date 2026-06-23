@@ -74,6 +74,19 @@ pinned-commit bundle). To keep disk bounded:
 `MK_KEEP_WORKTREES`, `MK_JOB_RETENTION_DAYS`, `MK_LINUX_SRC` (kernel repo to prune;
 default `~/linux`).
 
+## Summarizer (job titles/summaries)
+Summaries come from a `llama-server` (llama.cpp) subprocess we spawn and call over its
+OpenAI-compatible `/v1` API, against the Phi-3.5-mini GGUF (auto-downloaded + cached).
+- `MK_SUMMARY_DISABLE=1` — turn summaries off.
+- `MK_LLAMA_SERVER=/path/to/llama-server` — use this binary instead of auto-download.
+- `MK_LLAMA_PORT` — port for the subprocess (default `18080`).
+
+The binary is taken from `MK_LLAMA_SERVER`, else `llama-server` on `PATH`, else the
+latest prebuilt llama.cpp release for the host OS/arch is downloaded and cached. **On
+old-glibc distros (e.g. RHEL/CentOS 9) the Ubuntu prebuilt won't run** (it needs a
+newer `libstdc++`); set `MK_LLAMA_SERVER` to a locally-built binary there
+(`cmake -B build && cmake --build build --target llama-server`).
+
 ## Auth
 `/api/*` requires a bearer token (header `Authorization: Bearer …`, or `?token=` for
 EventSource). The token defaults to the commit hash that the `v7.1` tag points to and

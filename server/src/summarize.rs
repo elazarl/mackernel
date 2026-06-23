@@ -209,7 +209,12 @@ impl Summarizer {
             .build()?;
         loop {
             if let Some(status) = self.child.lock().unwrap().try_wait()? {
-                bail!("llama-server exited early ({status})");
+                // Common cause: a downloaded prebuilt that won't run on this host
+                // (e.g. the Ubuntu build needs a newer libstdc++ than RHEL ships).
+                bail!(
+                    "llama-server exited early ({status}); if the prebuilt is \
+                     incompatible with this host, set MK_LLAMA_SERVER to a working binary"
+                );
             }
             if let Ok(r) = poll.get(&health).send() {
                 if r.status().is_success() {
