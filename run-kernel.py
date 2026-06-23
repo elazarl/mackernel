@@ -613,8 +613,14 @@ def build_boot_run(b, tree: Path, arch: str, args, log_dir: Path | None,
     proc = g.boot_qemu(arch, tree, img, seed, port, boot_log)
     rc = 1
     gdir = "/tmp/mkbundle"
+    # TCG (foreign-arch emulation, no KVM) boots ~10x slower and is easily starved
+    # by concurrent builds/the summarizer, so triple the SSH wait when emulating.
+    boot_timeout = args.boot_timeout
+    if mklib.qemu_accel_cpu(arch)[0] == "tcg":
+        boot_timeout *= 3
+        log(f"emulated (tcg) boot: extending SSH timeout to {boot_timeout}s")
     try:
-        g.wait_for_ssh(port, key, user, args.boot_timeout)
+        g.wait_for_ssh(port, key, user, boot_timeout)
         g.ssh_run(port, key, user, f"rm -rf {gdir} && mkdir -p {gdir}")
 
         payload = ([binary] if binary else []) + kos + data_files + \
