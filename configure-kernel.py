@@ -157,7 +157,7 @@ def main() -> int:
     arch = mklib.target_arch()
     prof = mklib.arch_profile(arch)
 
-    gcc = os.environ.get("MK_GCC", "15")
+    gcc = os.environ.get("MK_GCC", "14")
     image, is_local = mklib.resolve_image(arch, gcc)
     print(f"using build image: {image} (gcc-{gcc})", flush=True)
     print(f"target arch: {arch}", flush=True)

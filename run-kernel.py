@@ -58,7 +58,10 @@ META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "threa
 # gcc versions for which a build image is published (see Containerfile / CI). A
 # bundle's `compiler:` key selects one; an unsupported value falls back to the default.
 SUPPORTED_GCC = {"13", "14", "15"}
-DEFAULT_GCC = "15"
+# gcc-14 (gnu17) by default for compatibility with older kernels: gcc-15 defaults
+# to C23 and fails on pre-~6.7 kernels' realmode/boot units. A bundle can still
+# opt into another supported version via the `compiler:` key.
+DEFAULT_GCC = "14"
 ROLES = ("user", "module", "kconf", "patch", "init")
 
 # Hardened mode (always on): a bundle never chooses its own kernel remote. Any
@@ -439,16 +442,17 @@ def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool,
     # build the out-of-tree module.
     # Cross prefix (empty for a native build) so the .ko is built by the same
     # toolchain path as the kernel -- natively cross-compiled on an x86_64 host
-    # rather than emulated. CC stays gcc-15 (the cross binary is aarch64-linux-gnu-gcc-15).
+    # rather than emulated. CC tracks MK_GCC (cross binary is e.g. aarch64-linux-gnu-gcc-14).
     cross = mklib.cross_compile(arch)
+    gcc = os.environ.get("MK_GCC", DEFAULT_GCC)
     cmd = [
         "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
         *mklib.hardening_args(arch),
         "-v", mklib.volume(tree, "/linux"), "-v", mklib.volume(moddir, "/mod"),
         "-w", "/mod", image,
         "bash", "-c",
-        f'set -e; make -C /linux ARCH={ka} CROSS_COMPILE={cross} CC={cross}gcc-15 HOSTCC=gcc-15 modules; '
-        f'make -C /linux M=/mod ARCH={ka} CROSS_COMPILE={cross} CC={cross}gcc-15 HOSTCC=gcc-15 modules',
+        f'set -e; make -C /linux ARCH={ka} CROSS_COMPILE={cross} CC={cross}gcc-{gcc} HOSTCC=gcc-{gcc} modules; '
+        f'make -C /linux M=/mod ARCH={ka} CROSS_COMPILE={cross} CC={cross}gcc-{gcc} HOSTCC=gcc-{gcc} modules',
     ]
     log(f"building module(s) {', '.join(s + '.ko' for s in stems)} ...")
     cap = {"stdout": log_file, "stderr": subprocess.STDOUT} if log_file else {}
@@ -715,7 +719,7 @@ def run_bundle(src, args) -> int:
     arch = mklib.target_arch()
     base_src = Path(os.environ.get("LINUX_SRC", os.path.expanduser("~/linux")))
 
-    # Compiler: frontmatter `compiler:` picks the gcc build image (default 15).
+    # Compiler: frontmatter `compiler:` picks the gcc build image (default 14).
     # gcc-15 defaults to C23 and fails on pre-~6.7 kernels' realmode/boot units;
     # gcc-13/14 (gnu17) build them. MK_GCC is read by build-kernel.py.
     gcc = str(b.meta.get("compiler", DEFAULT_GCC)).strip()

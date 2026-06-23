@@ -206,13 +206,14 @@ def compile_c(srcs, out_name: str, image: str, is_local: bool,
         die("no .c files to compile")
 
     mklib.ensure_pulled(image, is_local, plat_args)
+    gcc = os.environ.get("MK_GCC", "14")  # tracks run-kernel.py's DEFAULT_GCC
     podman = ["podman", "run", "--rm", *plat_args]
     if is_local:
         podman += ["--pull=never"]
     podman += [
         *mklib.hardening_args(arch),
         "-v", mklib.volume(builddir, "/build"), "-w", "/build", image,
-        f"{cross}gcc-15", "-static", "-O2", "-pthread", *cflags,
+        f"{cross}gcc-{gcc}", "-static", "-O2", "-pthread", *cflags,
         "-o", out_name, *cfiles,
     ]
     log(f"compiling {', '.join(cfiles)} statically in {image} ...")

@@ -80,7 +80,7 @@ def main() -> int:
     key = Path(os.environ.get("SSH_KEY", "id_mackernel"))
     user = os.environ.get("GUEST_USER", "mac")
 
-    gcc = os.environ.get("MK_GCC", "15")
+    gcc = os.environ.get("MK_GCC", "14")
     image, is_local = mklib.resolve_image(arch, gcc)
     log(f"using build image: {image} (gcc-{gcc}, target arch: {arch})")
 

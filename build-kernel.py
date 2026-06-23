@@ -19,7 +19,7 @@ def main() -> int:
     prof = mklib.arch_profile(arch)
 
     # gcc version from the bundle's `compiler:` key (run-kernel.py sets MK_GCC).
-    gcc = os.environ.get("MK_GCC", "15")
+    gcc = os.environ.get("MK_GCC", "14")
     image, is_local = mklib.resolve_image(arch, gcc)
     print(f"using build image: {image} (gcc-{gcc})", flush=True)
     print(f"target arch: {arch}", flush=True)

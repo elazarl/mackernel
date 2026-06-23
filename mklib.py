@@ -32,9 +32,10 @@ def resolve_image(want_arch: str | None = None, gcc: str = "15") -> tuple[str, b
     different architecture, use the GHCR image instead -- the local single-arch
     image cannot satisfy a cross-arch `--platform` request.
 
-    `gcc` selects the compiler image (from a bundle's `compiler:` key). gcc-15 is
-    the default and uses the unsuffixed tag (back-compatible); other versions use
-    the `-gcc<N>` image published per gcc version by CI / build-container.sh."""
+    `gcc` selects the compiler image (from a bundle's `compiler:` key, default
+    gcc-14). gcc-15 keeps the unsuffixed tag for back-compat; every other version
+    (including the default 14) uses the `-gcc<N>` image published per gcc version
+    by CI / build-container.sh."""
     try:
         version = (HERE / "VERSION").read_text().strip()
     except OSError:
