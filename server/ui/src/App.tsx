@@ -300,6 +300,17 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
   const marks = Object.entries(phaseTs)
     .map(([phase, ts]) => ({ phase, t: Math.max(0, Math.round((ts - t0.current) / 1000)) }))
     .sort((a, b) => a.t - b.t);
+  // Stagger labels onto lower rows so close-together phases don't overlap.
+  const maxT = data.length ? data[data.length - 1].t : 0;
+  const GAP = Math.max(1, maxT * 0.13); // ponytail: ~label-width as a fraction of
+                                        // the time axis; bump if labels still touch
+  const rowLastT: number[] = [];
+  const marksRows = marks.map((m) => {
+    let r = rowLastT.findIndex((last) => m.t - last >= GAP);
+    if (r === -1) r = rowLastT.length;        // need a new row
+    rowLastT[r] = m.t;
+    return { ...m, row: r };
+  });
 
   return (
     <div>
@@ -368,9 +379,19 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
             <YAxis stroke="#8b949e" unit="M" />
             <Tooltip contentStyle={{ background: "var(--card)", border: "1px solid var(--border)" }} />
             <Legend />
-            {marks.map((m) => (
+            {marksRows.map((m) => (
               <ReferenceLine key={m.phase} x={m.t} stroke="#8b949e" strokeDasharray="4 3"
-                label={{ value: m.phase, position: "insideTopRight", fill: "#8b949e", fontSize: 10 }} />
+                label={({ viewBox }: any) => {
+                  const nearRight = maxT > 0 && m.t > maxT * 0.85;
+                  const x = (viewBox.x as number) + (nearRight ? -3 : 3);
+                  const y = (viewBox.y as number) + 4 + m.row * 12; // +4 clears the top Y tick
+                  return (
+                    <text x={x} y={y} fill="#8b949e" fontSize={10}
+                      textAnchor={nearRight ? "end" : "start"} dominantBaseline="hanging">
+                      {m.phase}
+                    </text>
+                  );
+                }} />
             ))}
             <Line type="monotone" dataKey="RAM" stroke="#58a6ff" dot={false} isAnimationActive={false} />
             <Line type="monotone" dataKey="Disk" stroke="#bc8cff" dot={false} isAnimationActive={false} />
