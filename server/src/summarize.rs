@@ -5,7 +5,8 @@
 //!   - a short **title**,
 //!   - a one-sentence **reproducer** summary (at job start, bundle only),
 //!   - a one-sentence **result** summary (at job end, + run output),
-//!   - a two-paragraph **detail** ("why it failed", reading the bundle + all logs).
+//!   - a Markdown **detail** ("why it failed", reading the bundle + all logs;
+//!     a GitHub-flavored Markdown doc with Summary/Root cause/Evidence sections).
 //! Set `MK_SUMMARY_DISABLE=1` to turn the feature off entirely.
 //!
 //! Inference runs out-of-process: `load()` spawns llama.cpp's `llama-server` (the
@@ -28,7 +29,7 @@ use serde_json::json;
 const SYS_TITLE: &str = "You name Linux kernel bug reproducers. Reply with exactly two words — a terse title — and nothing else. No punctuation, no preamble.";
 const SYS_REPRO: &str = "You summarize Linux kernel bug reproducers. The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
 const SYS_RESULT: &str = "You summarize Linux kernel bug reproducer runs. Reply with exactly one short sentence and no preamble describing what actually happened on this run — whether it reproduced and the outcome.";
-const SYS_DETAIL: &str = "Read the reproducer text and the result. Explain in two paragraphs what the failure is, why it happened, and quote excerpts from the logs. No preamble.";
+const SYS_DETAIL: &str = "Read the reproducer text and the result. Reply ONLY with concise GitHub-flavored Markdown and no preamble (do not wrap the whole thing in a code fence). Use exactly these three sections: a `## Summary` heading followed by one sentence on what failed; a `## Root cause` heading followed by one paragraph on what actually went wrong and why; and a `## Evidence` heading followed by a bulleted list where each `- ` item is a short verbatim excerpt quoted from the logs, ideally wrapped in backticks.";
 
 const REPEAT_PENALTY: f32 = 1.1;
 const REPEAT_LAST_N: usize = 64;
@@ -116,7 +117,7 @@ impl Summarizer {
         };
         s.wait_ready().context("llama-server did not become ready")?;
         // Warm up, then measure the child's resident memory for /api/summarizer.
-        let _ = s.generate(SYS_TITLE, "ping", 1);
+        let _ = s.generate(SYS_TITLE, "ping", 1, false);
         let pid = s.child.lock().unwrap().id();
         s.mem_bytes = rss_of(pid);
         Ok(s)
@@ -130,14 +131,14 @@ impl Summarizer {
     /// Terse two-word title for the job, from the bundle alone (job start).
     pub fn title(&self, bundle_md: &str) -> Result<String> {
         let user = curate_bundle(bundle_md);
-        let raw = self.generate(SYS_TITLE, &user, 8)?;
+        let raw = self.generate(SYS_TITLE, &user, 8, false)?;
         Ok(two_words(&raw))
     }
 
     /// One sentence on what the reproducer tests, from the bundle alone (job start).
     pub fn summarize_repro(&self, bundle_md: &str) -> Result<String> {
         let user = curate_bundle(bundle_md);
-        self.generate(SYS_REPRO, &user, 64)
+        self.generate(SYS_REPRO, &user, 64, false)
     }
 
     /// One sentence on what happened on this run: bundle + curated issues + outcome
@@ -157,20 +158,22 @@ impl Summarizer {
             curate_bundle(bundle_md),
             curate_issues(issues_json),
         );
-        self.generate(SYS_RESULT, &user, 96)
+        self.generate(SYS_RESULT, &user, 96, false)
     }
 
-    /// Two-paragraph "why it failed", reading the bundle plus all labeled logs (job end).
+    /// Markdown "why it failed", reading the bundle plus all labeled logs (job end).
+    /// Returns GitHub-flavored Markdown (a `## Summary` / `## Root cause` /
+    /// `## Evidence` document) as a string; the DB stores it verbatim.
     pub fn detail(&self, bundle_md: &str, logs_dir: &Path) -> Result<String> {
         let user = format!("{}\n\n{}", curate_bundle(bundle_md), curate_logs(logs_dir));
-        self.generate(SYS_DETAIL, &user, 400)
+        self.generate(SYS_DETAIL, &user, 400, false)
     }
 
     /// One deterministic (greedy) completion via the OpenAI chat API. llama-server
     /// applies the model's chat template from the GGUF, so system/user go as
     /// messages rather than a hand-rolled prompt string.
-    fn generate(&self, sys: &str, user: &str, max_new: usize) -> Result<String> {
-        let body = json!({
+    fn generate(&self, sys: &str, user: &str, max_new: usize, json: bool) -> Result<String> {
+        let mut body = json!({
             "model": LABEL,
             "messages": [
                 {"role": "system", "content": sys},
@@ -182,6 +185,10 @@ impl Summarizer {
             "repeat_last_n": REPEAT_LAST_N,
             "stream": false,
         });
+        if json {
+            // llama-server constrains output to valid JSON via a grammar.
+            body["response_format"] = serde_json::json!({"type": "json_object"});
+        }
         let resp: serde_json::Value = self
             .client
             .post(format!("{}/v1/chat/completions", self.base_url))
@@ -394,7 +401,7 @@ fn rss_of(pid: u32) -> u64 {
 
 /// Read each known log file, label it with context, and cap per-file + overall so the
 /// detail prompt stays bounded (model prefill cost scales with prompt length).
-/// ponytail: per-file ~2.5k chars, total ~10k; raise if two-paragraph quality suffers.
+/// ponytail: per-file ~2.5k chars, total ~10k; raise if detail JSON quality suffers.
 fn curate_logs(logs_dir: &Path) -> String {
     const LOGS: &[(&str, &str)] = &[
         ("compile.log", "This is the kernel compilation through podman:"),
