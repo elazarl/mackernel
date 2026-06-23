@@ -381,7 +381,7 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
       {(job?.detail || progress["detail"] !== undefined ||
         job?.status === "done" || job?.status === "failed") && (
         <section className="card">
-          <h2>Why it failed{summaryTip(job, "detail") &&
+          <h2>Job summary{summaryTip(job, "detail") &&
             <span className="muted" style={{ fontWeight: "normal", fontSize: "0.7em" }}
               title={summaryTip(job, "detail")}> ⓘ</span>}</h2>
           {job?.detail
