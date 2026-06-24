@@ -42,3 +42,5 @@ arborium = { version = "2.18.0", features = ["lang-c", "lang-bash"] }
 # reqwest::blocking is only called from blocking contexts (spawn_blocking / a
 # dedicated thread). The prebuilt release tarball is unpacked via system `tar`.
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# Human-readable summary generation time ("17s", "2m 3s") for the UI tooltip.
+humantime = "2"

@@ -370,29 +370,26 @@ fn collect_issues(logs: &std::path::Path) -> String {
 /// Scan one log dir's files for problem markers; `prefix` labels the `file` field
 /// (e.g. "baseline/") so variant sources stay distinguishable in the merged result.
 fn scan_issue_dir(logs: &std::path::Path, prefix: &str) -> Vec<serde_json::Value> {
-    // General markers apply to most logs. Sanitizer markers only apply to the
-    // runtime console logs: the build/fetch logs mention KASAN/sanitizer as compile
-    // flags (e.g. -fsanitize=kernel-address), which are not problems. "panic" is
-    // likewise dropped from the compile log — the kernel source is full of
-    // panic()/BUG() calls that are not build problems.
+    // General crash markers. `BUG:` already catches sanitizer splats (KASAN/UBSAN/…
+    // reports are printed as "BUG: KASAN: …"), so we don't search for sanitizer names
+    // separately — that only produced false hits on build logs that mention the
+    // -fsanitize flags. "panic" is dropped from the compile log — the kernel source is
+    // full of panic()/BUG() calls that are not build problems.
     const GENERAL: &[&str] = &[
         "BUG:", "Oops", "panic", "general protection", "use-after-free",
         "WARNING:", "FATAL", "fatal", "Call Trace", "segfault", "error:", "Error",
     ];
-    const SANITIZER: &[&str] = &["KASAN", "UBSAN", "KCSAN", "KFENCE", "KMSAN", "sanitizer"];
     let mut sections = Vec::new();
     for file in ["console.log", "dmesg.log", "exec.log", "compile.log", "fetch.log", "run.log"] {
         let Ok(content) = std::fs::read_to_string(logs.join(file)) else { continue };
         let blocks = if file == "dmesg.log" {
             dmesg_reports(&content)
         } else {
-            let runtime = matches!(file, "console.log" | "exec.log");
             let is_compile = file == "compile.log";
             let hits: Vec<&str> = content
                 .lines()
                 .filter(|l| {
                     GENERAL.iter().any(|m| !(is_compile && *m == "panic") && l.contains(m))
-                        || (runtime && SANITIZER.iter().any(|m| l.contains(m)))
                 })
                 .collect();
             if hits.is_empty() { Vec::new() } else { vec![json!({ "head": hits, "trace": [] })] }

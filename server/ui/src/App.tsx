@@ -19,7 +19,9 @@ import specMd from "../../../docs/reproducer-spec.md?raw";
 const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
 
 // Per-summary generation metadata (from job.summary_meta JSON) → hover tooltip text.
-type SummaryMeta = { ms: number; tokens: number; model: string };
+// `took` is a human-readable duration ("17s", "2m 3s") formatted server-side; `ms` is
+// kept for older rows that predate it.
+type SummaryMeta = { ms: number; took?: string; tokens: number; model: string };
 function summaryMeta(job: Job | null, field: string): SummaryMeta | null {
   if (!job?.summary_meta) return null;
   try { return (JSON.parse(job.summary_meta) as Record<string, SummaryMeta>)[field] ?? null; }
@@ -27,7 +29,8 @@ function summaryMeta(job: Job | null, field: string): SummaryMeta | null {
 }
 function summaryTip(job: Job | null, field: string): string | undefined {
   const m = summaryMeta(job, field);
-  return m ? `generated in ${m.ms} ms · ${m.model} · ${m.tokens} tokens` : undefined;
+  if (!m) return undefined;
+  return `generated in ${m.took ?? `${m.ms} ms`} · ${m.model} · ${m.tokens} tokens`;
 }
 
 // One summary line: the text + hover tooltip once it's generated, a live token count

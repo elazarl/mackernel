@@ -209,7 +209,15 @@ impl Db {
         let mut obj = cur
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .unwrap_or_else(|| serde_json::json!({}));
-        obj[field] = serde_json::json!({"ms": ms, "tokens": tokens, "model": model});
+        // Human-readable duration in a convenient unit (e.g. "17s", "2m 3s"); rounded
+        // to whole seconds once past a second so the tooltip isn't noisy with millis.
+        let dur = if ms >= 1000 {
+            std::time::Duration::from_secs((ms + 500) / 1000)
+        } else {
+            std::time::Duration::from_millis(ms)
+        };
+        let took = humantime::format_duration(dur).to_string();
+        obj[field] = serde_json::json!({"ms": ms, "took": took, "tokens": tokens, "model": model});
         c.execute("UPDATE jobs SET summary_meta=? WHERE id=?",
                   duckdb::params![obj.to_string(), id])?;
         Ok(())
