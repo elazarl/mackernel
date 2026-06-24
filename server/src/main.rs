@@ -64,6 +64,10 @@ struct AppState {
     /// downloaded/loaded. `None`/empty until ready (or if loading failed/disabled), in
     /// which case summarization is silently skipped.
     summarizer: Arc<std::sync::OnceLock<Arc<summarize::Summarizer>>>,
+    /// Summary requests (job id, stage) that arrived before the model finished
+    /// loading; flushed by the background loader once it's ready (instead of being
+    /// silently dropped). See `spawn_summary`.
+    summary_queue: Arc<std::sync::Mutex<Vec<(i64, &'static str)>>>,
 }
 
 fn now_ms() -> i64 {
@@ -140,28 +144,41 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("MK_TOKEN unset -- using built-in v7.1 token for /api/* auth");
     }
 
-    // Load the summary model in the background so a first-boot download (~1-2.5 GB)
-    // doesn't block serving. Until it's ready, summarization is skipped.
+    // The summary model loads in the background so a first-boot download (~1-2.5 GB)
+    // doesn't block serving. Requests that arrive before it's ready are queued (see
+    // `spawn_summary`) and flushed here on load, rather than silently dropped.
     let summarizer = Arc::new(std::sync::OnceLock::<Arc<summarize::Summarizer>>::new());
+    let summary_queue = Arc::new(std::sync::Mutex::new(Vec::<(i64, &'static str)>::new()));
+
+    let (tx, rx) = mpsc::unbounded_channel::<SchedMsg>();
+    let state = AppState {
+        db: database, work: work.clone(), repo: repo.clone(), tx,
+        bus: Bus::default(), cfg: Cfg::from_env(), auth_token,
+        summarizer: summarizer.clone(), summary_queue,
+    };
+
     if summarize::Summarizer::enabled() {
         let slot = summarizer.clone();
+        let flush_st = state.clone();
         tokio::task::spawn_blocking(move || match summarize::Summarizer::load() {
             Ok(s) => {
                 info!("summary model ready ({}, llama-server, {} MB RSS)",
                     summarize::LABEL, s.memory_bytes() / 1_048_576);
                 let _ = slot.set(Arc::new(s));
+                // Flush any summaries requested while the model was warming up.
+                let queued: Vec<_> = flush_st.summary_queue.lock().unwrap().drain(..).collect();
+                if !queued.is_empty() {
+                    info!("flushing {} queued summary request(s)", queued.len());
+                }
+                for (id, stage) in queued {
+                    spawn_summary(&flush_st, id, stage);
+                }
             }
             Err(e) => warn!("summary model unavailable, summaries disabled: {e:#}"),
         });
     } else {
         info!("MK_SUMMARY_DISABLE set -- job summaries disabled");
     }
-
-    let (tx, rx) = mpsc::unbounded_channel::<SchedMsg>();
-    let state = AppState {
-        db: database, work: work.clone(), repo: repo.clone(), tx,
-        bus: Bus::default(), cfg: Cfg::from_env(), auth_token, summarizer,
-    };
 
     tokio::spawn(scheduler_loop(state.clone(), rx));
     tokio::spawn(cleanup_loop(state.clone()));
@@ -209,6 +226,9 @@ async fn submit(State(st): State<AppState>, body: String) -> Result<Json<serde_j
     }
     let id = st.db.create_job(now_ms(), None).map_err(ise)?;
     let dir = st.work.join(id.to_string());
+    // Start clean: after a DB wipe the id sequence resets, so this id's dir may hold
+    // a prior occupant's stale logs (baseline/patched, console.log, …). Remove it.
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("logs")).map_err(ise)?;
     std::fs::write(dir.join("bundle.md"), body.as_bytes()).map_err(ise)?;
     st.tx.send(SchedMsg::New(id)).map_err(ise)?;
@@ -241,6 +261,7 @@ async fn run_candidate(State(st): State<AppState>, Path(msgid): Path<String>)
         .create_job_full(now_ms(), Some("lkml"), Some(&source_url), title.as_deref())
         .map_err(ise)?;
     let dir = st.work.join(id.to_string());
+    let _ = std::fs::remove_dir_all(&dir); // clear any stale dir from a recycled id
     std::fs::create_dir_all(dir.join("logs")).map_err(ise)?;
     std::fs::write(dir.join("bundle.md"), bundle.as_bytes()).map_err(ise)?;
     st.tx.send(SchedMsg::New(id)).map_err(ise)?;
@@ -553,7 +574,12 @@ async fn scheduler_loop(st: AppState, mut rx: mpsc::UnboundedReceiver<SchedMsg>)
 /// task handles so the caller can await them (the "end" stage closes the SSE channel
 /// only once both summaries finish, so their live token stream reaches the client).
 fn spawn_summary(st: &AppState, id: i64, stage: &'static str) -> Vec<tokio::task::JoinHandle<()>> {
-    let Some(sumz) = st.summarizer.get().cloned() else { return Vec::new() };
+    let Some(sumz) = st.summarizer.get().cloned() else {
+        // Model still warming up: queue this request; the loader flushes it on ready.
+        st.summary_queue.lock().unwrap().push((id, stage));
+        info!("job {id}: {stage} summary queued (summarizer warming up)");
+        return Vec::new();
+    };
     let dir = st.work.join(id.to_string());
     if stage == "start" {
         // Bundle only: title + reproducer one-liner, generated concurrently.

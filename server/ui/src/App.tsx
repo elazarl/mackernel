@@ -33,13 +33,13 @@ function summaryTip(job: Job | null, field: string): string | undefined {
 // One summary line: the text + hover tooltip once it's generated, a live token count
 // while it streams, or a "pending" placeholder when it's due but not yet started.
 function SummaryLine(
-  { job, field, icon, text, progress, due }:
-  { job: Job | null; field: string; icon: string; text: string | null; progress: Record<string, number>; due: boolean },
+  { job, field, icon, text, progress, due, summarizerReady }:
+  { job: Job | null; field: string; icon: string; text: string | null; progress: Record<string, number>; due: boolean; summarizerReady: boolean },
 ) {
   if (text) return <p className="summary" title={summaryTip(job, field)}>{icon} {text}</p>;
   const tok = progress[field];
   if (tok !== undefined) return <p className="summary"><span className="muted">{icon} generating… {tok} tok</span></p>;
-  if (due) return <p className="summary"><span className="muted">{icon} ⏳ pending</span></p>;
+  if (due) return <p className="summary"><span className="muted">{icon} {summarizerReady ? "⏳ pending" : "⏳ summarizer warming up…"}</span></p>;
   return null;
 }
 // `run` is the run-kernel.py orchestrator log: it always carries the failure reason
@@ -167,8 +167,8 @@ function Dashboard() {
         <button className="linkbtn" onClick={() => setShowSpec(true)}>Spec</button>
         <button className="linkbtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light" : "🌙 Dark"}</button>
         {summarizer && (
-          <span className="muted summarizer" title={`${summarizer.models} ${summarizer.label} models (shared weights), incl. KV caches`}>
-            🧠 {summarizer.loaded ? `${summarizer.label} · ${gib(summarizer.mem_bytes)} GB` : "loading model…"}
+          <span className="muted summarizer" title={`${summarizer.label} summarizer (llama-server), resident size incl. KV cache`}>
+            🧠 {summarizer.loaded ? `${summarizer.label} · ${gib(summarizer.mem_bytes)} GB` : "warming up…"}
           </span>
         )}
       </div>
@@ -256,7 +256,7 @@ function Dashboard() {
         </div>
         <div className="right">
           {sel == null ? <p className="muted">Select a job to see live progress, metrics, and logs.</p>
-            : <JobDetail id={sel}
+            : <JobDetail id={sel} summarizerReady={summarizer?.loaded ?? false}
                 onEdit={(text) => { setBundle(text); setModalOpen(true); }} />}
         </div>
       </div>
@@ -266,7 +266,7 @@ function Dashboard() {
 
 type IssueSection = { file: string; blocks: { head: string[]; trace: string[] }[] };
 
-function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void }) {
+function JobDetail({ id, summarizerReady, onEdit }: { id: number; summarizerReady: boolean; onEdit: (text: string) => void }) {
   const [job, setJob] = useState<Job | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
@@ -369,9 +369,9 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
           ))}
         </div>
         <SummaryLine job={job} field="repro" icon="📝" text={job?.repro_summary ?? null}
-          progress={progress} due={job != null && job.status !== "queued"} />
+          progress={progress} due={job != null && job.status !== "queued"} summarizerReady={summarizerReady} />
         <SummaryLine job={job} field="result" icon="✅" text={job?.result_summary ?? null}
-          progress={progress} due={job?.status === "done" || job?.status === "failed"} />
+          progress={progress} due={job?.status === "done" || job?.status === "failed"} summarizerReady={summarizerReady} />
         {job && (
           <p className="muted">
             exit {job.exit_code ?? "—"} · peak RAM {gib(job.ram_peak)} GB · peak disk {gib(job.disk_peak)} GB
@@ -389,7 +389,8 @@ function JobDetail({ id, onEdit }: { id: number; onEdit: (text: string) => void 
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{job.detail}</ReactMarkdown>
               </div>
             : <p className="muted">{progress["detail"] !== undefined
-                ? `generating… ${progress["detail"]} tok` : "⏳ pending"}</p>}
+                ? `generating… ${progress["detail"]} tok`
+                : (summarizerReady ? "⏳ pending" : "⏳ summarizer warming up…")}</p>}
         </section>
       )}
       {bundleText.trim() && (

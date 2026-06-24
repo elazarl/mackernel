@@ -243,11 +243,17 @@ def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = Non
     # `thread`: a lore thread URL whose series is git-am'd on top. Set by a `thread:`
     # frontmatter key, or injected by compare_variants for thread-compare's patched run.
     thread = meta.get("thread")
-    if not (url or commit or patch or thread):
-        return linux_src  # no remote work -> no fetch, no fetch.log
+    no_remote = not (url or commit or patch or thread)
+    if no_remote and not (linux_src / ".git").exists():
+        return linux_src  # non-git tree: nothing to isolate, build it as-is
 
     if not (linux_src / ".git").exists():
         die(f"bundle needs a git kernel tree at LINUX_SRC={linux_src}")
+    # Even a no-metadata bundle builds in a per-job worktree (at the current HEAD)
+    # rather than linux_src directly, so concurrent jobs get isolated .config +
+    # build artifacts instead of clobbering each other in the shared tree. The
+    # service sets a per-job MK_WT_ROOT; below, treeish defaults to HEAD and the
+    # url/patch/thread steps are all skipped when there's no remote work.
 
     # Capture this step's git output into fetch.log (in addition to live logging).
     # flog() flushes before each captured subprocess so the lines stay ordered.
