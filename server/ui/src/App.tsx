@@ -703,7 +703,7 @@ const CSS = `
   .jobs { list-style: none; margin: 0; padding: 0; max-height: 280px; overflow: auto; }
   .jobs li { padding: 6px 8px; border-radius: 6px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
   .jobs li.active { background: var(--subtle); }
-  .jobrow { display: flex; align-items: center; gap: 6px; }
+  .jobrow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .jobsum { font-size: .82em; color: var(--muted); line-height: 1.3; padding-left: 14px; }
   .jobs em { color: var(--muted); font-style: normal; } .ph { color: var(--muted); }
   .srclink { margin-left: auto; font-size: .82em; color: var(--accent, #58a6ff); text-decoration: none; }
@@ -712,7 +712,7 @@ const CSS = `
              padding: 8px 10px; border-radius: 6px; margin: 8px 0; line-height: 1.4; }
   .detail { white-space: pre-wrap; line-height: 1.5; margin: 0; }
   .summarizer { margin-left: auto; font-size: .85em; }
-  .shorttitle { color: var(--accent, #58a6ff); font-weight: 600; }
+  .shorttitle { color: var(--accent, #58a6ff); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
   .muted { color: var(--muted); }
   .issues-card { border-color: #f85149; } .issues-card h2 { color: #f85149; }
