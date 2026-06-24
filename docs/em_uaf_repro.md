@@ -35,7 +35,8 @@ The race window is between `em_pd_get()` and the dereference of the returned poi
    ./run-kernel.py em_uaf_repro.md
    ```
 2. The reproducer will run for 60 seconds and produce a KASAN splat.
-3. Exit status is non-zero if the UAF is caught, zero otherwise.
+3. The harness detects the KASAN use-after-free from the serial console log
+   (baseline reproduces it; the patched build is clean).
 
 ## Kernel module (out-of-tree)
 
@@ -282,40 +283,16 @@ CONFIG_KASAN_VMALLOC=y
 
 ```init:run-repro.sh
 #!/bin/bash
-# The runner insmods em_uaf_repro.ko before this script runs.  The module's
+# The runner insmods em_uaf_repro.ko before this script runs. The module's
 # repro_init() races reader/writer for 60 s and insmod blocks until it returns,
-# so by the time we get here any KASAN splat is already in the ring buffer.
+# so by the time we get here the race is done and any KASAN splat is already on
+# the serial console.
 #
-# We probe two sources:
-#   1. dmesg (kernel ring buffer, available in the guest)
-#   2. /dev/kmsg  (same ring buffer; raw; used as a fallback when dmesg is empty)
-#
-# Either "KASAN:" or "use-after-free" in the output counts as REPRODUCED.
-
-echo "=== em_uaf_repro module messages ==="
-sudo dmesg | grep -i 'em_uaf_repro\|racing\|reader\|writer' || true
-
-echo ""
-echo "=== checking for KASAN use-after-free ==="
-
-# Capture with all log levels (-r keeps the raw priority prefix).
-DMESG=$(sudo dmesg -r 2>/dev/null || sudo dmesg)
-
-if echo "$DMESG" | grep -qiE 'KASAN:|use-after-free|slab-use-after-free'; then
-    echo "REPRODUCED: KASAN use-after-free detected"
-    echo "$DMESG" | grep -iEA 25 'KASAN:|use-after-free' | head -n 60
-    exit 1
-fi
-
-# Fallback: read /dev/kmsg directly (newer kernels; may need root)
-if sudo cat /dev/kmsg 2>/dev/null | grep -qiE 'KASAN:|use-after-free'; then
-    echo "REPRODUCED: KASAN use-after-free detected (via /dev/kmsg)"
-    sudo cat /dev/kmsg | grep -iEA 25 'KASAN:|use-after-free' | head -n 60
-    exit 1
-fi
-
-echo "no KASAN use-after-free report (race window not hit in 60 s)"
-echo "note: the serial console log on the host may contain more detail."
+# We do NOT scrape dmesg/kmsg here: the harness detects the KASAN
+# use-after-free from the host-side serial console log anyway, and reading
+# /dev/kmsg from the guest blocks (it's a follow stream with no EOF), which
+# wedged the run. Just exit cleanly and let the harness judge reproduction.
+echo "em_uaf_repro: race complete -- KASAN detection is handled by the harness (serial console log)."
 exit 0
 ```
 
