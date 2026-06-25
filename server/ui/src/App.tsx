@@ -18,6 +18,12 @@ import specMd from "../../../docs/reproducer-spec.md?raw";
 
 const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
 
+// Selected job is encoded in the path as /job/ID; null = nothing selected (root).
+const jobFromPath = (): number | null => {
+  const m = location.pathname.match(/^\/job\/(\d+)/);
+  return m ? +m[1] : null;
+};
+
 // Per-summary generation metadata (from job.summary_meta JSON) → hover tooltip text.
 // `took` is a human-readable duration ("17s", "2m 3s") formatted server-side; `ms` is
 // kept for older rows that predate it.
@@ -117,7 +123,18 @@ function Dashboard() {
   const [peaks, setPeaks] = useState<Peak[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [summarizer, setSummarizer] = useState<SummarizerInfo | null>(null);
-  const [sel, setSel] = useState<number | null>(null);
+  // Selected job mirrors the URL (/job/ID) so jobs are linkable and back/forward work.
+  const [sel, setSel] = useState<number | null>(jobFromPath);
+  const selectJob = (id: number | null) => {
+    setSel(id);
+    const path = id == null ? "/" : `/job/${id}`;
+    if (location.pathname !== path) history.pushState({}, "", path);
+  };
+  useEffect(() => {
+    const onPop = () => setSel(jobFromPath());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
   const [bundle, setBundle] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [showSpec, setShowSpec] = useState(false);
@@ -151,14 +168,14 @@ function Dashboard() {
     const { id } = await submit(bundle);
     setBundle("");
     setModalOpen(false);
-    setSel(id);
+    selectJob(id);
   };
 
   // Run a detected LKML cover letter: the server creates a job from the stored bundle
   // (thread series applied at build time) and we jump to it.
   const onRunCandidate = async (c: Candidate) => {
     const { id } = await runCandidate(c.msgid);
-    setSel(id);
+    selectJob(id);
   };
 
   return (
@@ -215,7 +232,7 @@ function Dashboard() {
                     </div>
                     <div className="candactions">
                       {c.job_id != null
-                        ? <button className="chip" onClick={() => setSel(c.job_id!)}>view job #{c.job_id}</button>
+                        ? <button className="chip" onClick={() => selectJob(c.job_id!)}>view job #{c.job_id}</button>
                         : <button className="chip" onClick={() => onRunCandidate(c)}>Run</button>}
                     </div>
                   </li>
@@ -227,7 +244,7 @@ function Dashboard() {
             <h2>Jobs{jobs.length > JOB_LIMIT && <span className="muted"> · newest {JOB_LIMIT} of {jobs.length}</span>}</h2>
             <ul className="jobs">
               {[...jobs].sort((a, b) => b.id - a.id).slice(0, JOB_LIMIT).map((j) => (
-                <li key={j.id} className={sel === j.id ? "active" : ""} onClick={() => setSel(j.id)}>
+                <li key={j.id} className={sel === j.id ? "active" : ""} onClick={() => selectJob(j.id)}>
                   <div className="jobrow">
                     <span className="dot" style={{ background: statusColor(j.status) }} />
                     #{j.id}{j.short_title && <span className="shorttitle" title={summaryTip(j, "title")}> {j.short_title}</span>} <em>{j.status}</em>
