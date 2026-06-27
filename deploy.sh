@@ -20,7 +20,7 @@
 #   OPENROUTER_API_KEY  if set, adds an OpenRouter (free model) summary backend as
 #                       primary, written to a mode-600 systemd drop-in on the host.
 #                       NEVER committed; e.g.  OPENROUTER_API_KEY=sk-or-... ./deploy.sh
-#   MK_OR_MODEL      OpenRouter model id        (default: google/gemini-2.0-flash-exp:free)
+#   MK_OR_MODEL      OpenRouter model id              (default: openai/gpt-oss-20b:free)
 #   MK_LLAMA_NICE    nice level for the local llama-server          (default: 19)
 set -euo pipefail
 
@@ -30,7 +30,7 @@ SERVICE="${MK_SERVICE:-mackernel-server.service}"
 BRANCH="${MK_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 REMOTE_PATH="${MK_REMOTE_PATH:-\$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin}"
 OR_KEY="${OPENROUTER_API_KEY:-}"
-OR_MODEL="${MK_OR_MODEL:-google/gemini-2.0-flash-exp:free}"
+OR_MODEL="${MK_OR_MODEL:-openai/gpt-oss-20b:free}"
 LLAMA_NICE="${MK_LLAMA_NICE:-19}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
