@@ -55,6 +55,19 @@ pub struct Candidate {
     pub job_id: Option<i64>,
 }
 
+/// One per-server summary for a job (every backend's output for a field). The legacy
+/// per-field columns on `jobs` carry the primary backend's copy; this table carries
+/// all of them, surfaced by the UI's "see all models" expander.
+#[derive(Serialize, Clone)]
+pub struct JobSummary {
+    pub field: String,
+    pub server: String,
+    pub text: String,
+    pub ms: Option<i64>,
+    pub tokens: Option<i64>,
+    pub model: Option<String>,
+}
+
 #[derive(Serialize, Clone)]
 pub struct Sample {
     pub ts_ms: i64,
@@ -106,6 +119,15 @@ impl Db {
             -- Per-summary generation metadata as a JSON object keyed by field
             -- ({"title":{"ms","tokens","model"},...}); drives the UI hover tooltip.
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS summary_meta VARCHAR;
+            -- One row per (job, summary field, backend server): every backend's
+            -- output. The legacy per-field columns above hold the primary backend's
+            -- copy; this holds all of them for the UI's "see all models" view.
+            CREATE TABLE IF NOT EXISTS job_summaries (
+                job_id BIGINT NOT NULL, field VARCHAR NOT NULL, server VARCHAR NOT NULL,
+                text VARCHAR NOT NULL, ms BIGINT, tokens BIGINT, model VARCHAR,
+                created_ms BIGINT NOT NULL,
+                PRIMARY KEY (job_id, field, server)
+            );
             CREATE TABLE IF NOT EXISTS events (
                 job_id BIGINT NOT NULL, ts_ms BIGINT NOT NULL,
                 phase VARCHAR NOT NULL, message VARCHAR
@@ -182,6 +204,62 @@ impl Db {
         self.lock()
             .execute(&format!("UPDATE jobs SET {col}=? WHERE id=?"), duckdb::params![text, id])?;
         Ok(())
+    }
+
+    /// Set a summary column only if it's still NULL (a non-primary backend's
+    /// best-effort fallback so the default view is never blank when the primary fails).
+    /// Column name is a fixed literal (never user input).
+    fn set_summary_col_if_null(&self, id: i64, col: &str, text: &str) -> Result<()> {
+        self.lock().execute(
+            &format!("UPDATE jobs SET {col}=? WHERE id=? AND {col} IS NULL"),
+            duckdb::params![text, id],
+        )?;
+        Ok(())
+    }
+
+    /// Fill a legacy per-field column from a non-primary backend only if empty.
+    /// `field` is the summary field ("title"|"repro"|"result"|"detail").
+    pub fn set_summary_fallback(&self, id: i64, field: &str, text: &str) -> Result<()> {
+        let col = match field {
+            "title" => "short_title",
+            "repro" => "repro_summary",
+            "result" => "result_summary",
+            "detail" => "detail",
+            _ => return Ok(()),
+        };
+        self.set_summary_col_if_null(id, col, text)
+    }
+
+    /// Upsert one backend's summary for a (job, field, server) into `job_summaries`.
+    pub fn set_job_summary(&self, id: i64, field: &str, server: &str, text: &str,
+                           ms: u64, tokens: u32, model: &str, now_ms: i64) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO job_summaries (job_id, field, server, text, ms, tokens, model, created_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (job_id, field, server)
+             DO UPDATE SET text=excluded.text, ms=excluded.ms, tokens=excluded.tokens,
+                           model=excluded.model, created_ms=excluded.created_ms",
+            duckdb::params![id, field, server, text, ms as i64, tokens as i64, model, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// All per-server summaries for a job (every backend, every field), newest first.
+    pub fn get_job_summaries(&self, id: i64) -> Result<Vec<JobSummary>> {
+        let c = self.lock();
+        let mut stmt = c.prepare(
+            "SELECT field, server, text, ms, tokens, model FROM job_summaries
+             WHERE job_id=? ORDER BY field, server",
+        )?;
+        let mut rows = stmt.query(duckdb::params![id])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(JobSummary {
+                field: r.get(0)?, server: r.get(1)?, text: r.get(2)?,
+                ms: r.get(3)?, tokens: r.get(4)?, model: r.get(5)?,
+            });
+        }
+        Ok(out)
     }
 
     pub fn set_short_title(&self, id: i64, text: &str) -> Result<()> {

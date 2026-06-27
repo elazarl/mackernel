@@ -17,6 +17,11 @@
 #   MK_BRANCH        branch to deploy                   (default: current branch)
 #   MK_REMOTE_PATH   PATH to use on the host (cargo)     (default: ~/.cargo/bin + system)
 #   MK_NO_PUSH=1     skip `git push` (deploy what the host can already pull)
+#   OPENROUTER_API_KEY  if set, adds an OpenRouter (free model) summary backend as
+#                       primary, written to a mode-600 systemd drop-in on the host.
+#                       NEVER committed; e.g.  OPENROUTER_API_KEY=sk-or-... ./deploy.sh
+#   MK_OR_MODEL      OpenRouter model id        (default: google/gemini-2.0-flash-exp:free)
+#   MK_LLAMA_NICE    nice level for the local llama-server          (default: 19)
 set -euo pipefail
 
 HOST="${MK_HOST:-home}"
@@ -24,6 +29,9 @@ REMOTE_REPO="${MK_REMOTE_REPO:-mackernel}"
 SERVICE="${MK_SERVICE:-mackernel-server.service}"
 BRANCH="${MK_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 REMOTE_PATH="${MK_REMOTE_PATH:-\$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin}"
+OR_KEY="${OPENROUTER_API_KEY:-}"
+OR_MODEL="${MK_OR_MODEL:-google/gemini-2.0-flash-exp:free}"
+LLAMA_NICE="${MK_LLAMA_NICE:-19}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -56,6 +64,30 @@ REMOTE
 
 log "ship prebuilt UI dist -> $HOST"
 rsync -az --delete "$HERE/server/ui/dist/" "$HOST:$REMOTE_REPO/server/ui/dist/"
+
+# Summary backends + local-model nice level live in a systemd drop-in (merged with
+# the unit's other Environment= lines). The drop-in carries the OpenRouter key, so
+# it's written mode-600 and the key travels over ssh stdin (not argv / not the repo).
+DROPIN="[Service]
+Environment=MK_LLAMA_NICE=${LLAMA_NICE}"
+if [[ -n "$OR_KEY" ]]; then
+  SERVERS_JSON='[{"label":"openrouter","base_url":"https://openrouter.ai/api/v1","model":"'"$OR_MODEL"'","api_key_env":"OPENROUTER_API_KEY","primary":true}]'
+  DROPIN+="
+Environment=MK_OPENAI_SERVERS=${SERVERS_JSON}
+Environment=OPENROUTER_API_KEY=${OR_KEY}"
+  log "configure backends on $HOST: local phi3.5 (nice ${LLAMA_NICE}) + OpenRouter primary (${OR_MODEL})"
+else
+  log "configure backends on $HOST: local phi3.5 only (nice ${LLAMA_NICE}); set OPENROUTER_API_KEY to add OpenRouter"
+fi
+printf '%s\n' "$DROPIN" | ssh "$HOST" bash -eo pipefail -c '
+  dropdir="$HOME/.config/systemd/user/mackernel-server.service.d"
+  mkdir -p "$dropdir"
+  umask 077
+  cat > "$dropdir/extra.conf"
+  chmod 600 "$dropdir/extra.conf"
+  systemctl --user daemon-reload
+  echo "wrote $dropdir/extra.conf"
+'
 
 log "build binary + restart on $HOST"
 ssh "$HOST" bash -seo pipefail <<REMOTE

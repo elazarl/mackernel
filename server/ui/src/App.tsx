@@ -7,8 +7,8 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import {
-  Candidate, eventsUrl, getJob, getLog, getMetrics, getPeaks, getPhases, getSummarizer, gib, globalEventsUrl, hasToken,
-  highlight, highlightCss, Job, listCandidates, listJobs, mib, Peak, runCandidate, Sample,
+  Candidate, eventsUrl, getJob, getJobSummaries, getLog, getMetrics, getPeaks, getPhases, getSummarizer, gib, globalEventsUrl, hasToken,
+  highlight, highlightCss, Job, JobSummary, listCandidates, listJobs, mib, Peak, runCandidate, Sample,
   setToken, submit, SummarizerInfo,
 } from "./api";
 import {
@@ -50,6 +50,43 @@ function SummaryLine(
   if (tok !== undefined) return <p className="summary"><span className="muted">{icon} generating… {tok} tok</span></p>;
   if (due) return <p className="summary"><span className="muted">{icon} {summarizerReady ? "⏳ pending" : "⏳ summarizer warming up…"}</span></p>;
   return null;
+}
+
+// Per-server summary tooltip: model · duration · tokens.
+function jobSummaryTip(s: JobSummary): string {
+  return [s.model, s.ms != null ? `${Math.round(s.ms / 1000)}s` : null,
+    s.tokens != null ? `${s.tokens} tok` : null].filter(Boolean).join(" · ");
+}
+
+// Lazy expander revealing every backend's summary for one field (fetched on open
+// from /api/jobs/:id/summaries). The default line/card shows the primary; this is
+// the "see all models" view. `markdown` renders the detail field as Markdown.
+function MultiSummary({ id, field, markdown }: { id: number; field: string; markdown?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<JobSummary[] | null>(null);
+  const toggle = async () => {
+    const next = !open;
+    setOpen(next);
+    if (next) {
+      try { setRows((await getJobSummaries(id)).filter((s) => s.field === field)); }
+      catch { setRows([]); }
+    }
+  };
+  return (
+    <div className="multi">
+      <button className="linkbtn" onClick={toggle}>{open ? "▾" : "▸"} all models</button>
+      {open && (rows === null ? <p className="muted">loading…</p>
+        : rows.length === 0 ? <p className="muted">no per-model summaries yet</p>
+        : rows.map((s) => (
+            <div key={s.server} className="modelrow">
+              <span className="modellabel" title={jobSummaryTip(s)}>{s.server}</span>
+              {markdown
+                ? <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{s.text}</ReactMarkdown></div>
+                : <span className="modeltext">{s.text}</span>}
+            </div>
+          )))}
+    </div>
+  );
 }
 // `run` is the run-kernel.py orchestrator log: it always carries the failure reason
 // (a die() message or an uncaught traceback), even for early crashes that never reach
@@ -187,8 +224,12 @@ function Dashboard() {
         <button className="linkbtn" onClick={() => setShowSpec(true)}>Spec</button>
         <button className="linkbtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light" : "🌙 Dark"}</button>
         {summarizer && (
-          <span className="muted summarizer" title={`${summarizer.label} summarizer (llama-server), resident size incl. KV cache`}>
-            🧠 {summarizer.loaded ? `${summarizer.label} · ${gib(summarizer.mem_bytes)} GB` : "warming up…"}
+          <span className="muted summarizer"
+            title={(summarizer.servers ?? []).map((s) => `${s.label} (${s.model})${s.primary ? " — primary" : ""}`).join("\n")
+              || `${summarizer.label} summarizer, resident size incl. KV cache`}>
+            🧠 {summarizer.loaded
+              ? `${summarizer.label}${(summarizer.servers?.length ?? 0) > 1 ? ` · ${summarizer.servers!.length} models` : ""} · ${gib(summarizer.mem_bytes)} GB`
+              : "warming up…"}
           </span>
         )}
       </div>
@@ -277,6 +318,7 @@ function Dashboard() {
         <div className="right">
           {sel == null ? <p className="muted">Select a job to see live progress, metrics, and logs.</p>
             : <JobDetail id={sel} summarizerReady={summarizer?.loaded ?? false}
+                nServers={summarizer?.servers?.length ?? 0}
                 onEdit={(text) => { setBundle(text); setModalOpen(true); }} />}
         </div>
       </div>
@@ -286,7 +328,7 @@ function Dashboard() {
 
 type IssueSection = { file: string; blocks: { head: string[]; trace: string[] }[] };
 
-function JobDetail({ id, summarizerReady, onEdit }: { id: number; summarizerReady: boolean; onEdit: (text: string) => void }) {
+function JobDetail({ id, summarizerReady, nServers, onEdit }: { id: number; summarizerReady: boolean; nServers: number; onEdit: (text: string) => void }) {
   const [job, setJob] = useState<Job | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
@@ -390,8 +432,10 @@ function JobDetail({ id, summarizerReady, onEdit }: { id: number; summarizerRead
         </div>
         <SummaryLine job={job} field="repro" icon="📝" text={job?.repro_summary ?? null}
           progress={progress} due={job != null && job.status !== "queued"} summarizerReady={summarizerReady} />
+        {nServers > 1 && <MultiSummary id={id} field="repro" />}
         <SummaryLine job={job} field="result" icon="✅" text={job?.result_summary ?? null}
           progress={progress} due={job?.status === "done" || job?.status === "failed"} summarizerReady={summarizerReady} />
+        {nServers > 1 && <MultiSummary id={id} field="result" />}
         {job && (
           <p className="muted">
             exit {job.exit_code ?? "—"} · peak RAM {gib(job.ram_peak)} GB · peak disk {gib(job.disk_peak)} GB
@@ -411,6 +455,7 @@ function JobDetail({ id, summarizerReady, onEdit }: { id: number; summarizerRead
             : <p className="muted">{progress["detail"] !== undefined
                 ? `generating… ${progress["detail"]} tok`
                 : (summarizerReady ? "⏳ pending" : "⏳ summarizer warming up…")}</p>}
+          {nServers > 1 && <MultiSummary id={id} field="detail" markdown />}
         </section>
       )}
       {bundleText.trim() && (
@@ -730,6 +775,14 @@ const CSS = `
   .candactions { padding-left: 14px; } .candactions .chip { margin-top: 4px; }
   .summary { background: var(--subtle); border-left: 3px solid var(--accent, #58a6ff);
              padding: 8px 10px; border-radius: 6px; margin: 8px 0; line-height: 1.4; }
+  .multi { margin: -2px 0 8px; }
+  .multi > .linkbtn { font-size: 12px; }
+  .modelrow { display: flex; gap: 8px; align-items: baseline; padding: 4px 0 4px 10px;
+              border-left: 2px solid var(--border); margin-top: 4px; }
+  .modellabel { color: var(--accent); font-family: ui-monospace, monospace; font-size: 11px;
+                white-space: nowrap; min-width: 90px; }
+  .modeltext { line-height: 1.4; }
+  .modelrow .md { flex: 1; min-width: 0; }
   .detail { white-space: pre-wrap; line-height: 1.5; margin: 0; }
   .summarizer { margin-left: auto; font-size: .85em; }
   .shorttitle { color: var(--accent, #58a6ff); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }

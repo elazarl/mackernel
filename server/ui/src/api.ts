@@ -24,7 +24,23 @@ export interface Job {
   // hover tooltip. NULL until the first summary lands.
   summary_meta: string | null;
 }
-export interface SummarizerInfo { loaded: boolean; label: string; models: number; mem_bytes: number; }
+export interface SummarizerInfo {
+  loaded: boolean;
+  label: string;
+  mem_bytes: number;
+  // The configured summary backends; one is primary (its output is shown by default).
+  servers?: { label: string; model: string; primary: boolean }[];
+}
+// One backend's summary for a job field (every backend's output, behind the
+// "see all models" expander). The default view uses the per-field columns on Job.
+export interface JobSummary {
+  field: string;   // "title" | "repro" | "result" | "detail"
+  server: string;  // backend label
+  text: string;
+  ms: number | null;
+  tokens: number | null;
+  model: string | null;
+}
 export interface Sample { ts_ms: number; rss_bytes: number; disk_bytes: number; }
 export interface Peak { id: number; ram_peak: number; disk_peak: number; status: string; }
 // A reproducer cover letter found on LKML, runnable with one click.
@@ -72,6 +88,9 @@ export async function listJobs(): Promise<Job[]> {
 }
 export async function getJob(id: number): Promise<Job> {
   return (await authed(`/api/jobs/${id}`)).json();
+}
+export async function getJobSummaries(id: number): Promise<JobSummary[]> {
+  return (await authed(`/api/jobs/${id}/summaries`)).json();
 }
 export async function submit(bundle: string): Promise<{ id: number }> {
   return (await authed("/api/jobs", { method: "POST", body: bundle })).json();

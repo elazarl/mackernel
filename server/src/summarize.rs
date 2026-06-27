@@ -9,14 +9,18 @@
 //!     a GitHub-flavored Markdown doc with Summary/Root cause/Evidence sections).
 //! Set `MK_SUMMARY_DISABLE=1` to turn the feature off entirely.
 //!
-//! Inference runs out-of-process: `load()` spawns llama.cpp's `llama-server` (the
-//! most stable native CPU LLM runtime) as a subprocess and we talk to its
-//! OpenAI-compatible `/v1/chat/completions` endpoint over HTTP. The binary comes
-//! from `$MK_LLAMA_SERVER`, else `llama-server` on `PATH`, else a prebuilt release
-//! is downloaded and cached. The model GGUF is downloaded + cached by llama-server
-//! itself. The child is killed when the `Summarizer` drops. llama-server handles
-//! tokenization, sampling, EOS, the KV cache, and request concurrency
-//! (`--parallel 2`), so a stage's two outputs still generate concurrently.
+//! Inference runs out-of-process against one or more OpenAI-compatible servers.
+//! `load()` spawns llama.cpp's `llama-server` (the most stable native CPU LLM
+//! runtime) as a local subprocess and talks to its `/v1/chat/completions` endpoint
+//! over HTTP; the binary comes from `$MK_LLAMA_SERVER`, else `llama-server` on
+//! `PATH`, else a prebuilt release is downloaded and cached, and the GGUF is
+//! downloaded + cached by llama-server itself. The child is killed when the
+//! `Summarizer` drops, and can be CPU-deprioritized via `MK_LLAMA_NICE`.
+//!
+//! Additional **remote** backends are configured via `MK_OPENAI_SERVERS` (a JSON
+//! array; e.g. OpenRouter). Every summary is generated against *all* backends; one
+//! is the `primary` whose output fills the legacy per-field columns and streams
+//! live to the UI, the rest are stored per-server in `job_summaries`.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -26,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde_json::json;
+use tracing::warn;
 
 const SYS_TITLE: &str = "You name Linux kernel bug reproducers. Reply with exactly two words — a terse title — and nothing else. No punctuation, no preamble.";
 const SYS_REPRO: &str = "You summarize Linux kernel bug reproducers. The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
@@ -51,27 +56,42 @@ const CTX_SIZE: usize = 16384;
 /// ponytail: bump if first boots on slow links still time out.
 const READY_TIMEOUT: Duration = Duration::from_secs(1800);
 
-/// Owns one `llama-server` subprocess and an HTTP client that talks to its
-/// OpenAI-compatible API. `Send + Sync` (the `Child` lives behind a `Mutex`), so
-/// it slots into the existing `Arc<OnceLock<Arc<Summarizer>>>`.
-/// Timing + token count for one generation. The model is the constant `LABEL`.
+/// Timing + token count for one generation.
 pub struct GenStats {
     pub ms: u64,
     pub tokens: u32,
 }
 
+/// One OpenAI-compatible summary backend: a base URL, the model name to request,
+/// an optional bearer key, and whether it's the `primary` (its output fills the
+/// legacy per-field columns and streams live to the UI). The local llama-server is
+/// just one backend (no key); remote ones come from `MK_OPENAI_SERVERS`.
+#[derive(Clone)]
+pub struct Backend {
+    pub label: String,
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub model: String,
+    pub primary: bool,
+}
+
+/// Owns the optional local `llama-server` subprocess (killed on drop) plus the set
+/// of backends and a shared blocking HTTP client. `Send + Sync` (the `Child` lives
+/// behind a `Mutex`), so it slots into the existing `Arc<OnceLock<Arc<Summarizer>>>`.
 pub struct Summarizer {
-    child: Mutex<Child>,
+    child: Option<Mutex<Child>>,
     client: reqwest::blocking::Client,
-    base_url: String,
+    backends: Vec<Backend>,
     mem_bytes: u64,
 }
 
 impl Drop for Summarizer {
     fn drop(&mut self) {
-        if let Ok(mut c) = self.child.lock() {
-            let _ = c.kill();
-            let _ = c.wait();
+        if let Some(child) = &self.child {
+            if let Ok(mut c) = child.lock() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
         }
     }
 }
@@ -85,75 +105,85 @@ impl Summarizer {
         )
     }
 
-    /// Spawn `llama-server` and wait until it's serving. Blocking — call from a
-    /// blocking thread. First call may download the binary and the ~2.5 GB model;
-    /// later calls hit the caches and are fast.
+    /// Assemble the backend set: parse remote backends from `MK_OPENAI_SERVERS`,
+    /// then spawn the local `llama-server` (degrading to remote-only if it can't
+    /// start but remotes exist). Blocking — call from a blocking thread. First call
+    /// may download the binary and the ~2.5 GB model; later calls hit the caches.
     pub fn load() -> Result<Self> {
-        let bin = resolve_binary().context("locate or download llama-server")?;
-        let port: u16 = std::env::var("MK_LLAMA_PORT")
-            .ok()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(18080);
-        let base_url = format!("http://127.0.0.1:{port}");
-
-        // Run from the binary's own directory so bundled shared libraries resolve.
-        let mut cmd = Command::new(&bin);
-        cmd.args([
-            "--host", "127.0.0.1",
-            "--port", &port.to_string(),
-            "--ctx-size", &CTX_SIZE.to_string(),
-            "--parallel", "2",
-            "--hf-repo", GGUF_REPO,
-            "--hf-file", GGUF_FILE,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-        if let Some(dir) = bin.parent() {
-            cmd.current_dir(dir);
-        }
-        let child = cmd.spawn().with_context(|| format!("spawn {}", bin.display()))?;
-
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(600))
             .build()
             .context("build http client")?;
 
-        let mut s = Self {
-            child: Mutex::new(child),
-            client,
-            base_url,
-            mem_bytes: 0,
-        };
-        s.wait_ready().context("llama-server did not become ready")?;
-        // Warm up, then measure the child's resident memory for /api/summarizer.
-        let _ = s.generate(SYS_TITLE, "ping", 1, false, &|_| {});
-        let pid = s.child.lock().unwrap().id();
-        s.mem_bytes = rss_of(pid);
+        // Remote OpenAI-compatible backends (e.g. OpenRouter), if configured.
+        let mut backends: Vec<Backend> = parse_remote_backends();
+
+        // Local llama-server backend. If it can't start but remotes exist, degrade
+        // to remote-only rather than disabling summaries entirely.
+        let mut child: Option<Mutex<Child>> = None;
+        match spawn_local_server() {
+            Ok((c, port)) => {
+                child = Some(Mutex::new(c));
+                backends.push(Backend {
+                    label: LABEL.to_string(),
+                    base_url: format!("http://127.0.0.1:{port}"),
+                    api_key: None,
+                    model: LABEL.to_string(),
+                    primary: false,
+                });
+            }
+            Err(e) if !backends.is_empty() => {
+                warn!("local llama-server unavailable, using remote backends only: {e:#}");
+            }
+            Err(e) => return Err(e).context("start local llama-server (no remote backends configured)"),
+        }
+
+        // Exactly one primary: honor a configured one, else the first backend.
+        if !backends.iter().any(|b| b.primary) {
+            backends[0].primary = true;
+        }
+
+        let mut s = Self { child, client, backends, mem_bytes: 0 };
+        // Warm up the local server and measure its RSS for /api/summarizer.
+        if let Some(local) = s.backends.iter().find(|b| b.label == LABEL).cloned() {
+            let _ = s.generate(&local, SYS_TITLE, "ping", 1, false, &|_| {});
+            if let Some(child) = &s.child {
+                let pid = child.lock().unwrap().id();
+                s.mem_bytes = rss_of(pid);
+            }
+        }
         Ok(s)
     }
 
-    /// Measured RAM of the llama-server child (weights + KV cache), in bytes.
+    /// The configured backends (one is `primary`).
+    pub fn backends(&self) -> &[Backend] {
+        &self.backends
+    }
+
+    /// Measured RAM of the local llama-server child (weights + KV cache), in bytes.
+    /// 0 when running remote-only.
     pub fn memory_bytes(&self) -> u64 {
         self.mem_bytes
     }
 
     /// Terse two-word title for the job, from the bundle alone (job start).
-    pub fn title(&self, bundle_md: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
+    pub fn title(&self, b: &Backend, bundle_md: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
         let user = curate_bundle(bundle_md);
-        let (raw, stats) = self.generate(SYS_TITLE, &user, 8, false, on_tok)?;
+        let (raw, stats) = self.generate(b, SYS_TITLE, &user, 8, false, on_tok)?;
         Ok((two_words(&raw), stats))
     }
 
     /// One sentence on what the reproducer tests, from the bundle alone (job start).
-    pub fn summarize_repro(&self, bundle_md: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
+    pub fn summarize_repro(&self, b: &Backend, bundle_md: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
         let user = curate_bundle(bundle_md);
-        self.generate(SYS_REPRO, &user, 64, false, on_tok)
+        self.generate(b, SYS_REPRO, &user, 64, false, on_tok)
     }
 
     /// One sentence on what happened on this run: bundle + curated issues + outcome
     /// (job end).
     pub fn summarize_result(
         &self,
+        b: &Backend,
         bundle_md: &str,
         issues_json: &str,
         exit_code: Option<i64>,
@@ -168,23 +198,24 @@ impl Summarizer {
             curate_bundle(bundle_md),
             curate_issues(issues_json),
         );
-        self.generate(SYS_RESULT, &user, 96, false, on_tok)
+        self.generate(b, SYS_RESULT, &user, 96, false, on_tok)
     }
 
     /// Markdown "why it failed", reading the bundle plus all labeled logs (job end).
     /// Returns GitHub-flavored Markdown (a `## Summary` / `## Root cause` /
     /// `## Evidence` document) as a string; the DB stores it verbatim.
-    pub fn detail(&self, bundle_md: &str, logs_dir: &Path, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
+    pub fn detail(&self, b: &Backend, bundle_md: &str, logs_dir: &Path, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
         let user = format!("{}\n\n{}", curate_bundle(bundle_md), curate_logs(logs_dir));
-        self.generate(SYS_DETAIL, &user, 400, false, on_tok)
+        self.generate(b, SYS_DETAIL, &user, 400, false, on_tok)
     }
 
     /// One deterministic (greedy) completion via the OpenAI chat API, streamed so we
     /// can report the live token count (`on_tok`, throttled) and measure wall time.
-    /// llama-server applies the model's chat template from the GGUF, so system/user
-    /// go as messages rather than a hand-rolled prompt string.
+    /// The server applies the model's chat template, so system/user go as messages
+    /// rather than a hand-rolled prompt string.
     fn generate(
         &self,
+        b: &Backend,
         sys: &str,
         user: &str,
         max_new: usize,
@@ -192,7 +223,7 @@ impl Summarizer {
         on_tok: &dyn Fn(u32),
     ) -> Result<(String, GenStats)> {
         let mut body = json!({
-            "model": LABEL,
+            "model": b.model,
             "messages": [
                 {"role": "system", "content": sys},
                 {"role": "user", "content": user},
@@ -209,14 +240,18 @@ impl Summarizer {
             body["response_format"] = serde_json::json!({"type": "json_object"});
         }
         let started = Instant::now();
-        let resp = self
+        let mut req = self
             .client
-            .post(format!("{}/v1/chat/completions", self.base_url))
-            .json(&body)
+            .post(format!("{}/v1/chat/completions", b.base_url))
+            .json(&body);
+        if let Some(key) = &b.api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp = req
             .send()
             .context("POST /v1/chat/completions")?
             .error_for_status()
-            .context("llama-server returned an error status")?;
+            .context("summary backend returned an error status")?;
 
         // Parse the OpenAI SSE stream: `data: {json}` lines, ending with `data: [DONE]`.
         // Each chunk carries an incremental `choices[0].delta.content`; the final usage
@@ -251,33 +286,121 @@ impl Summarizer {
         Ok((text.trim().to_string(), stats))
     }
 
-    /// Poll `/health` until the server is ready, the child exits, or we time out.
-    fn wait_ready(&self) -> Result<()> {
-        let deadline = Instant::now() + READY_TIMEOUT;
-        let health = format!("{}/health", self.base_url);
-        let poll = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()?;
-        loop {
-            if let Some(status) = self.child.lock().unwrap().try_wait()? {
-                // Common cause: a downloaded prebuilt that won't run on this host
-                // (e.g. the Ubuntu build needs a newer libstdc++ than RHEL ships).
-                bail!(
-                    "llama-server exited early ({status}); if the prebuilt is \
-                     incompatible with this host, set MK_LLAMA_SERVER to a working binary"
-                );
-            }
-            if let Ok(r) = poll.get(&health).send() {
-                if r.status().is_success() {
-                    return Ok(());
-                }
-            }
-            if Instant::now() >= deadline {
-                bail!("timed out after {READY_TIMEOUT:?} waiting for {health}");
-            }
-            std::thread::sleep(Duration::from_millis(500));
+}
+
+/// Spawn the local `llama-server` (optionally CPU-deprioritized via `MK_LLAMA_NICE`)
+/// and block until it answers `/health`. Returns the child and the port it listens
+/// on. Blocking — the first call may download the binary and the ~2.5 GB GGUF.
+fn spawn_local_server() -> Result<(Child, u16)> {
+    let bin = resolve_binary().context("locate or download llama-server")?;
+    let port: u16 = std::env::var("MK_LLAMA_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(18080);
+    let args = [
+        "--host".to_string(), "127.0.0.1".to_string(),
+        "--port".to_string(), port.to_string(),
+        "--ctx-size".to_string(), CTX_SIZE.to_string(),
+        "--parallel".to_string(), "2".to_string(),
+        "--hf-repo".to_string(), GGUF_REPO.to_string(),
+        "--hf-file".to_string(), GGUF_FILE.to_string(),
+    ];
+    // `MK_LLAMA_NICE` lowers the model's CPU priority (it's a best-effort secondary
+    // once a remote backend is primary): run `nice -n N <bin> …` — a shell-out in
+    // the same style as the `tar`/`ps` calls. Unset = normal priority.
+    let nice = std::env::var("MK_LLAMA_NICE").ok().and_then(|n| n.parse::<i32>().ok());
+    let mut cmd = match nice {
+        Some(n) => {
+            let mut c = Command::new("nice");
+            c.arg("-n").arg(n.to_string()).arg(&bin).args(&args);
+            c
         }
+        None => {
+            let mut c = Command::new(&bin);
+            c.args(&args);
+            c
+        }
+    };
+    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    // Run from the binary's own directory so bundled shared libraries resolve.
+    if let Some(dir) = bin.parent() {
+        cmd.current_dir(dir);
     }
+    let mut child = cmd.spawn().with_context(|| format!("spawn {}", bin.display()))?;
+
+    // Poll /health until ready, the child exits, or we time out.
+    let health = format!("http://127.0.0.1:{port}/health");
+    let deadline = Instant::now() + READY_TIMEOUT;
+    let poll = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            // Common cause: a downloaded prebuilt that won't run on this host
+            // (e.g. the Ubuntu build needs a newer libstdc++ than RHEL ships).
+            bail!(
+                "llama-server exited early ({status}); if the prebuilt is \
+                 incompatible with this host, set MK_LLAMA_SERVER to a working binary"
+            );
+        }
+        if let Ok(r) = poll.get(&health).send() {
+            if r.status().is_success() {
+                return Ok((child, port));
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            bail!("timed out after {READY_TIMEOUT:?} waiting for {health}");
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Parse `MK_OPENAI_SERVERS` — a JSON array of
+/// `{label, base_url, model, api_key_env?, api_key?, primary?}`. `api_key_env` names
+/// an env var holding the bearer key (keeps the secret out of the JSON). Returns []
+/// when the var is unset/blank or not a JSON array.
+fn parse_remote_backends() -> Vec<Backend> {
+    let Some(raw) = std::env::var("MK_OPENAI_SERVERS").ok().filter(|s| !s.trim().is_empty()) else {
+        return Vec::new();
+    };
+    parse_servers(&raw, |k| std::env::var(k).ok().filter(|s| !s.is_empty()))
+}
+
+/// Pure parser for `MK_OPENAI_SERVERS` (env lookup injected for testability). A
+/// backend whose `api_key_env` names an unset/empty var is skipped with a warning.
+fn parse_servers(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> Vec<Backend> {
+    let arr = match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Array(a)) => a,
+        Ok(_) => { warn!("MK_OPENAI_SERVERS is not a JSON array; ignoring"); return Vec::new(); }
+        Err(e) => { warn!("MK_OPENAI_SERVERS is not valid JSON ({e}); ignoring"); return Vec::new(); }
+    };
+    let mut out = Vec::new();
+    for v in arr {
+        let (Some(label), Some(base_url), Some(model)) = (
+            v.get("label").and_then(|x| x.as_str()),
+            v.get("base_url").and_then(|x| x.as_str()),
+            v.get("model").and_then(|x| x.as_str()),
+        ) else {
+            warn!("MK_OPENAI_SERVERS entry missing label/base_url/model; skipping: {v}");
+            continue;
+        };
+        let api_key = match v.get("api_key_env").and_then(|x| x.as_str()) {
+            Some(env_name) => match lookup(env_name) {
+                Some(k) => Some(k),
+                None => { warn!("summary backend '{label}': {env_name} unset/empty; skipping"); continue; }
+            },
+            None => v.get("api_key").and_then(|x| x.as_str()).map(str::to_string),
+        };
+        out.push(Backend {
+            label: label.to_string(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key,
+            model: model.to_string(),
+            primary: v.get("primary").and_then(|x| x.as_bool()).unwrap_or(false),
+        });
+    }
+    out
 }
 
 /// Locate the `llama-server` binary: explicit override, then `PATH`, then download.
@@ -554,6 +677,29 @@ fn cap_chars(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_servers_resolves_key_env_and_skips_missing() {
+        let raw = r#"[
+          {"label":"openrouter","base_url":"https://openrouter.ai/api/v1/","model":"m","api_key_env":"OR_KEY","primary":true},
+          {"label":"nokey","base_url":"https://x/v1","model":"m","api_key_env":"MISSING"},
+          {"label":"local","base_url":"http://127.0.0.1:1/","model":"m"}
+        ]"#;
+        let bs = parse_servers(raw, |k| (k == "OR_KEY").then(|| "sk-x".to_string()));
+        assert_eq!(bs.len(), 2, "the missing-key backend is dropped");
+        assert_eq!(bs[0].label, "openrouter");
+        assert_eq!(bs[0].base_url, "https://openrouter.ai/api/v1"); // trailing slash trimmed
+        assert_eq!(bs[0].api_key.as_deref(), Some("sk-x"));
+        assert!(bs[0].primary);
+        assert_eq!(bs[1].label, "local");
+        assert!(bs[1].api_key.is_none() && !bs[1].primary);
+    }
+
+    #[test]
+    fn parse_servers_tolerates_garbage() {
+        assert!(parse_servers("not json", |_| None).is_empty());
+        assert!(parse_servers("{}", |_| None).is_empty());
+    }
 
     #[test]
     fn curate_strips_code_fences_keeps_prose() {

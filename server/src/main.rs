@@ -102,15 +102,27 @@ async fn main() -> anyhow::Result<()> {
         // service path already does this via spawn_blocking).
         std::thread::spawn(move || -> anyhow::Result<()> {
             let s = summarize::Summarizer::load()?;
-            info!("loaded summary model: {} ({} MB RSS)", summarize::LABEL, s.memory_bytes() / 1_048_576);
+            info!("loaded {} summary backend(s); local RSS {} MB",
+                s.backends().len(), s.memory_bytes() / 1_048_576);
             let noop = |_: u32| {};
-            println!("TITLE:  {}", s.title(&md, &noop)?.0);
-            println!("REPRO:  {}", s.summarize_repro(&md, &noop)?.0);
-            if let Some(logs) = logs_arg {
-                let logs = std::path::Path::new(&logs);
-                let issues = collect_issues(logs);
-                println!("RESULT: {}", s.summarize_result(&md, &issues, Some(1), "done", &noop)?.0);
-                println!("DETAIL: {}", s.detail(&md, logs, &noop)?.0);
+            // One block per backend, continuing past a backend that errors (e.g. a
+            // rate-limited remote) so the others still print.
+            for b in s.backends() {
+                println!("== backend: {} ({}){}", b.label, b.model, if b.primary { " [primary]" } else { "" });
+                let one = || -> anyhow::Result<()> {
+                    println!("TITLE:  {}", s.title(b, &md, &noop)?.0);
+                    println!("REPRO:  {}", s.summarize_repro(b, &md, &noop)?.0);
+                    if let Some(logs) = &logs_arg {
+                        let logs = std::path::Path::new(logs);
+                        let issues = collect_issues(logs);
+                        println!("RESULT: {}", s.summarize_result(b, &md, &issues, Some(1), "done", &noop)?.0);
+                        println!("DETAIL: {}", s.detail(b, &md, logs, &noop)?.0);
+                    }
+                    Ok(())
+                };
+                if let Err(e) = one() {
+                    eprintln!("  backend {} failed: {e:#}", b.label);
+                }
             }
             Ok(())
         })
@@ -162,8 +174,9 @@ async fn main() -> anyhow::Result<()> {
         let flush_st = state.clone();
         tokio::task::spawn_blocking(move || match summarize::Summarizer::load() {
             Ok(s) => {
-                info!("summary model ready ({}, llama-server, {} MB RSS)",
-                    summarize::LABEL, s.memory_bytes() / 1_048_576);
+                let labels: Vec<&str> = s.backends().iter().map(|b| b.label.as_str()).collect();
+                info!("summary backends ready: [{}] (local RSS {} MB)",
+                    labels.join(", "), s.memory_bytes() / 1_048_576);
                 let _ = slot.set(Arc::new(s));
                 // Flush any summaries requested while the model was warming up.
                 let queued: Vec<_> = flush_st.summary_queue.lock().unwrap().drain(..).collect();
@@ -194,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
     let api = Router::new()
         .route("/api/jobs", post(submit).get(list_jobs))
         .route("/api/jobs/:id", get(get_job))
+        .route("/api/jobs/:id/summaries", get(get_job_summaries))
         .route("/api/jobs/:id/events", get(events))
         .route("/api/events", get(global_events))
         .route("/api/jobs/:id/metrics", get(get_metrics))
@@ -243,6 +257,12 @@ async fn list_jobs(State(st): State<AppState>) -> Result<Json<Vec<db::Job>>, Sta
 
 async fn get_job(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json<db::Job>, StatusCode> {
     st.db.get_job(id).map_err(ise)?.map(Json).ok_or(StatusCode::NOT_FOUND)
+}
+
+/// All per-server summaries for a job (every backend, every field) — backs the UI's
+/// "see all models" expander.
+async fn get_job_summaries(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json<Vec<db::JobSummary>>, StatusCode> {
+    Ok(Json(st.db.get_job_summaries(id).map_err(ise)?))
 }
 
 async fn list_candidates(State(st): State<AppState>) -> Result<Json<Vec<db::Candidate>>, StatusCode> {
@@ -445,12 +465,22 @@ async fn get_peaks(State(st): State<AppState>) -> Result<Json<Vec<db::Peak>>, St
 /// `loaded` is false until the background model load finishes.
 async fn get_summarizer(State(st): State<AppState>) -> Json<serde_json::Value> {
     match st.summarizer.get() {
-        Some(s) => Json(json!({
-            "loaded": true,
-            "label": summarize::LABEL,
-            "mem_bytes": s.memory_bytes(),
-        })),
-        None => Json(json!({ "loaded": false, "label": summarize::LABEL, "mem_bytes": 0 })),
+        Some(s) => {
+            let servers: Vec<_> = s.backends().iter()
+                .map(|b| json!({ "label": b.label, "model": b.model, "primary": b.primary }))
+                .collect();
+            // Topbar shows the primary's label; mem is the local llama-server child.
+            let label = s.backends().iter().find(|b| b.primary)
+                .map(|b| b.label.clone())
+                .unwrap_or_else(|| summarize::LABEL.to_string());
+            Json(json!({
+                "loaded": true,
+                "label": label,
+                "mem_bytes": s.memory_bytes(),
+                "servers": servers,
+            }))
+        }
+        None => Json(json!({ "loaded": false, "label": summarize::LABEL, "mem_bytes": 0, "servers": [] })),
     }
 }
 
@@ -578,34 +608,49 @@ fn spawn_summary(st: &AppState, id: i64, stage: &'static str) -> Vec<tokio::task
         return Vec::new();
     };
     let dir = st.work.join(id.to_string());
+    let backends = sumz.backends().to_vec();
+    let mut handles = Vec::new();
+    // Fan out: every field is generated against every backend. The primary backend's
+    // output fills the legacy columns + streams live; the rest land in job_summaries.
     if stage == "start" {
-        // Bundle only: title + reproducer one-liner, generated concurrently.
-        let s = sumz.clone();
-        let h1 = spawn_one(st, id, "title", dir.clone(), move |bundle, _logs, on_tok| s.title(&bundle, on_tok));
-        let s = sumz;
-        let h2 = spawn_one(st, id, "repro", dir, move |bundle, _logs, on_tok| s.summarize_repro(&bundle, on_tok));
-        vec![h1, h2]
+        for b in backends {
+            // Bundle only: title + reproducer one-liner, generated concurrently.
+            let (s, bb) = (sumz.clone(), b.clone());
+            handles.push(spawn_one(st, id, "title", b.clone(), dir.clone(),
+                move |bundle, _logs, on_tok| s.title(&bb, &bundle, on_tok)));
+            let (s, bb) = (sumz.clone(), b.clone());
+            handles.push(spawn_one(st, id, "repro", b, dir.clone(),
+                move |bundle, _logs, on_tok| s.summarize_repro(&bb, &bundle, on_tok)));
+        }
     } else {
         // Bundle + run output: result one-liner + two-paragraph detail, concurrently.
         let (exit, outcome) = st.db.get_job(id).ok().flatten()
             .map(|j| (j.exit_code, j.status))
             .unwrap_or((None, "done".to_string()));
-        let s = sumz.clone();
-        let h1 = spawn_one(st, id, "result", dir.clone(), move |bundle, logs, on_tok| {
-            let issues = collect_issues(&logs);
-            s.summarize_result(&bundle, &issues, exit, &outcome, on_tok)
-        });
-        let s = sumz;
-        let h2 = spawn_one(st, id, "detail", dir, move |bundle, logs, on_tok| s.detail(&bundle, &logs, on_tok));
-        vec![h1, h2]
+        for b in backends {
+            let (s, bb, o) = (sumz.clone(), b.clone(), outcome.clone());
+            handles.push(spawn_one(st, id, "result", b.clone(), dir.clone(),
+                move |bundle, logs, on_tok| {
+                    let issues = collect_issues(&logs);
+                    s.summarize_result(&bb, &bundle, &issues, exit, &o, on_tok)
+                }));
+            let (s, bb) = (sumz.clone(), b.clone());
+            handles.push(spawn_one(st, id, "detail", b, dir.clone(),
+                move |bundle, logs, on_tok| s.detail(&bb, &bundle, &logs, on_tok)));
+        }
     }
+    handles
 }
 
-/// Run one summary generation (its own model, its own blocking thread, so a stage's
-/// two outputs run concurrently), store it in the matching column, and broadcast.
+/// Run one summary generation for one backend (its own blocking thread, so a stage's
+/// outputs across fields × backends run concurrently). Always records the result in
+/// `job_summaries` keyed by backend; for the **primary** backend it also fills the
+/// legacy per-field column, records meta, and streams live tokens (the default UI
+/// path). Non-primary backends fill the legacy column only if the primary hasn't.
 /// `gen` receives the bundle text and the logs dir. Failures are logged and leave the
 /// field as-is; never blocks the job pipeline.
-fn spawn_one<F>(st: &AppState, id: i64, field: &'static str, dir: std::path::PathBuf, gen: F) -> tokio::task::JoinHandle<()>
+fn spawn_one<F>(st: &AppState, id: i64, field: &'static str, backend: summarize::Backend,
+                dir: std::path::PathBuf, gen: F) -> tokio::task::JoinHandle<()>
 where
     F: FnOnce(String, std::path::PathBuf, &dyn Fn(u32)) -> anyhow::Result<(String, summarize::GenStats)>
         + Send
@@ -615,40 +660,56 @@ where
     tokio::spawn(async move {
         let Ok(bundle) = tokio::fs::read_to_string(dir.join("bundle.md")).await else { return };
         let logs = dir.join("logs");
-        // Signal "generating" immediately so the UI shows a pending/progress state.
-        bus.publish(id, json!({ "kind": "summary_progress", "field": field, "tokens": 0 }).to_string());
+        let is_primary = backend.primary;
+        // Only the primary drives the live progress line the default UI shows.
+        if is_primary {
+            bus.publish(id, json!({ "kind": "summary_progress", "field": field, "tokens": 0 }).to_string());
+        }
         let bus_tok = bus.clone();
         let res = tokio::task::spawn_blocking(move || {
             let on_tok = move |n: u32| {
-                bus_tok.publish(id, json!({ "kind": "summary_progress", "field": field, "tokens": n }).to_string());
+                if is_primary {
+                    bus_tok.publish(id, json!({ "kind": "summary_progress", "field": field, "tokens": n }).to_string());
+                }
             };
             gen(bundle, logs, &on_tok)
         })
         .await;
         match res {
             Ok(Ok((text, stats))) if !text.is_empty() => {
-                let stored = match field {
-                    "title" => db.set_short_title(id, &text),
-                    "repro" => db.set_repro(id, &text),
-                    "result" => db.set_result(id, &text),
-                    "detail" => db.set_detail(id, &text),
-                    _ => Ok(()),
-                };
-                if let Err(e) = stored {
-                    warn!("job {id}: storing {field} summary failed: {e:#}");
-                    return;
+                // Always record this backend's output in the per-server table.
+                if let Err(e) = db.set_job_summary(id, field, &backend.label, &text,
+                        stats.ms, stats.tokens, &backend.model, now_ms()) {
+                    warn!("job {id}: storing {field} summary for {} failed: {e:#}", backend.label);
                 }
-                if let Err(e) = db.set_summary_meta(id, field, stats.ms, stats.tokens, summarize::LABEL) {
-                    warn!("job {id}: storing {field} summary meta failed: {e:#}");
+                if backend.primary {
+                    let stored = match field {
+                        "title" => db.set_short_title(id, &text),
+                        "repro" => db.set_repro(id, &text),
+                        "result" => db.set_result(id, &text),
+                        "detail" => db.set_detail(id, &text),
+                        _ => Ok(()),
+                    };
+                    if let Err(e) = stored {
+                        warn!("job {id}: storing {field} summary failed: {e:#}");
+                        return;
+                    }
+                    if let Err(e) = db.set_summary_meta(id, field, stats.ms, stats.tokens, &backend.model) {
+                        warn!("job {id}: storing {field} summary meta failed: {e:#}");
+                    }
+                    bus.publish(id, json!({ "kind": "summary", "field": field, "text": text,
+                        "ms": stats.ms, "tokens": stats.tokens, "model": backend.model }).to_string());
+                    bus.publish_global(json!({ "kind": "jobs" }).to_string());
+                } else {
+                    // Never-blank fallback: fill the legacy column if the primary hasn't.
+                    let _ = db.set_summary_fallback(id, field, &text);
                 }
-                bus.publish(id, json!({ "kind": "summary", "field": field, "text": text,
-                    "ms": stats.ms, "tokens": stats.tokens, "model": summarize::LABEL }).to_string());
-                bus.publish_global(json!({ "kind": "jobs" }).to_string());
-                info!("job {id}: {field} summary ready ({} tok, {} ms)", stats.tokens, stats.ms);
+                info!("job {id}: {field} summary ready via {} ({} tok, {} ms)",
+                    backend.label, stats.tokens, stats.ms);
             }
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => warn!("job {id}: {field} summary failed: {e:#}"),
-            Err(e) => warn!("job {id}: {field} summary task panicked: {e}"),
+            Ok(Err(e)) => warn!("job {id}: {field} summary via {} failed: {e:#}", backend.label),
+            Err(e) => warn!("job {id}: {field} summary via {} task panicked: {e}", backend.label),
         }
     })
 }
