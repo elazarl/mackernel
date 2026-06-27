@@ -41,6 +41,12 @@ const SYS_DETAIL: &str = "Read the reproducer text and the result and summarize 
 const REPEAT_PENALTY: f32 = 1.1;
 const REPEAT_LAST_N: usize = 64;
 
+/// Extra `max_tokens` for remote backends. Many free remote models (e.g. gpt-oss)
+/// are *reasoning* models that spend the budget thinking before emitting any
+/// `content` (the only part we keep), so a tight cap yields an empty answer. The
+/// local non-reasoning model keeps its tight per-field caps.
+const REMOTE_REASONING_HEADROOM: usize = 1024;
+
 const GGUF_REPO: &str = "bartowski/Phi-3.5-mini-instruct-GGUF";
 const GGUF_FILE: &str = "Phi-3.5-mini-instruct-Q4_K_M.gguf";
 /// Human-readable model label, surfaced in logs and `/api/summarizer`.
@@ -223,6 +229,8 @@ impl Summarizer {
         json: bool,
         on_tok: &dyn Fn(u32),
     ) -> Result<(String, GenStats)> {
+        // Reasoning remote models need headroom (see REMOTE_REASONING_HEADROOM).
+        let max_tokens = if b.api_key.is_some() { max_new + REMOTE_REASONING_HEADROOM } else { max_new };
         let mut body = json!({
             "model": b.model,
             "messages": [
@@ -230,7 +238,7 @@ impl Summarizer {
                 {"role": "user", "content": user},
             ],
             "temperature": 0.0,          // deterministic — matches old Sampling::ArgMax
-            "max_tokens": max_new,
+            "max_tokens": max_tokens,
             "repeat_penalty": REPEAT_PENALTY,
             "repeat_last_n": REPEAT_LAST_N,
             "stream": true,
