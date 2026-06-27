@@ -66,27 +66,28 @@ log "ship prebuilt UI dist -> $HOST"
 rsync -az --delete "$HERE/server/ui/dist/" "$HOST:$REMOTE_REPO/server/ui/dist/"
 
 # Summary backends + local-model nice level live in a systemd drop-in (merged with
-# the unit's other Environment= lines). The drop-in carries the OpenRouter key, so
-# it's written mode-600 and the key travels over ssh stdin (not argv / not the repo).
+# the unit's other Environment= lines). MK_OPENAI_SERVERS uses a quote-free,
+# space-free spec (key=value, ',' between fields, ';' between servers) because
+# systemd's Environment= strips double quotes — JSON would arrive mangled. The
+# drop-in carries the OpenRouter key, so it's written mode-600 and the whole file
+# travels over ssh *stdin* (never argv, never the repo).
 DROPIN="[Service]
 Environment=MK_LLAMA_NICE=${LLAMA_NICE}"
 if [[ -n "$OR_KEY" ]]; then
-  SERVERS_JSON='[{"label":"openrouter","base_url":"https://openrouter.ai/api/v1","model":"'"$OR_MODEL"'","api_key_env":"OPENROUTER_API_KEY","primary":true}]'
+  SERVERS_SPEC="label=openrouter,base_url=https://openrouter.ai/api/v1,model=${OR_MODEL},api_key_env=OPENROUTER_API_KEY,primary=true"
   DROPIN+="
-Environment=MK_OPENAI_SERVERS=${SERVERS_JSON}
+Environment=MK_OPENAI_SERVERS=${SERVERS_SPEC}
 Environment=OPENROUTER_API_KEY=${OR_KEY}"
   log "configure backends on $HOST: local phi3.5 (nice ${LLAMA_NICE}) + OpenRouter primary (${OR_MODEL})"
 else
   log "configure backends on $HOST: local phi3.5 only (nice ${LLAMA_NICE}); set OPENROUTER_API_KEY to add OpenRouter"
 fi
-printf '%s\n' "$DROPIN" | ssh "$HOST" bash -eo pipefail -c '
-  dropdir="$HOME/.config/systemd/user/mackernel-server.service.d"
-  mkdir -p "$dropdir"
-  umask 077
-  cat > "$dropdir/extra.conf"
-  chmod 600 "$dropdir/extra.conf"
-  systemctl --user daemon-reload
-  echo "wrote $dropdir/extra.conf"
+# One single-quoted remote command run by the login shell (no `bash -c` wrapper —
+# that mis-parsed the multi-line script); `cat` reads the drop-in from ssh stdin.
+printf '%s\n' "$DROPIN" | ssh "$HOST" '
+  d="$HOME/.config/systemd/user/mackernel-server.service.d"
+  mkdir -p "$d" && umask 077 && cat > "$d/extra.conf" && chmod 600 "$d/extra.conf"
+  systemctl --user daemon-reload && echo "wrote $d/extra.conf"
 '
 
 log "build binary + restart on $HOST"

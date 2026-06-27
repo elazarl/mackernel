@@ -17,10 +17,11 @@
 //! downloaded + cached by llama-server itself. The child is killed when the
 //! `Summarizer` drops, and can be CPU-deprioritized via `MK_LLAMA_NICE`.
 //!
-//! Additional **remote** backends are configured via `MK_OPENAI_SERVERS` (a JSON
-//! array; e.g. OpenRouter). Every summary is generated against *all* backends; one
-//! is the `primary` whose output fills the legacy per-field columns and streams
-//! live to the UI, the rest are stored per-server in `job_summaries`.
+//! Additional **remote** backends are configured via `MK_OPENAI_SERVERS` (a
+//! quote-free `;`/`,`-delimited spec; e.g. OpenRouter — see `parse_servers`). Every
+//! summary is generated against *all* backends; one is the `primary` whose output
+//! fills the legacy per-field columns and streams live to the UI, the rest are
+//! stored per-server in `job_summaries`.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -356,10 +357,14 @@ fn spawn_local_server() -> Result<(Child, u16)> {
     }
 }
 
-/// Parse `MK_OPENAI_SERVERS` — a JSON array of
-/// `{label, base_url, model, api_key_env?, api_key?, primary?}`. `api_key_env` names
-/// an env var holding the bearer key (keeps the secret out of the JSON). Returns []
-/// when the var is unset/blank or not a JSON array.
+/// Parse `MK_OPENAI_SERVERS`. Format is a quote-free, space-free spec (so systemd
+/// `Environment=` and shell quoting can't mangle it — JSON's double quotes get
+/// stripped by systemd): `;`-separated server entries, each a `,`-separated list of
+/// `key=value` fields. Keys: `label`, `base_url`, `model` (required), `api_key_env`
+/// (env var holding the bearer key — keeps the secret out of this value), `api_key`
+/// (literal, discouraged), `primary` (true/1/yes). Example:
+/// `label=openrouter,base_url=https://openrouter.ai/api/v1,model=x:free,api_key_env=OPENROUTER_API_KEY,primary=true`
+/// Returns [] when the var is unset/blank.
 fn parse_remote_backends() -> Vec<Backend> {
     let Some(raw) = std::env::var("MK_OPENAI_SERVERS").ok().filter(|s| !s.trim().is_empty()) else {
         return Vec::new();
@@ -367,38 +372,39 @@ fn parse_remote_backends() -> Vec<Backend> {
     parse_servers(&raw, |k| std::env::var(k).ok().filter(|s| !s.is_empty()))
 }
 
-/// Pure parser for `MK_OPENAI_SERVERS` (env lookup injected for testability). A
-/// backend whose `api_key_env` names an unset/empty var is skipped with a warning.
+/// Pure parser for the `MK_OPENAI_SERVERS` spec (env lookup injected for
+/// testability). A backend whose `api_key_env` names an unset/empty var is skipped
+/// with a warning, as is one missing label/base_url/model.
 fn parse_servers(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> Vec<Backend> {
-    let arr = match serde_json::from_str::<serde_json::Value>(raw) {
-        Ok(serde_json::Value::Array(a)) => a,
-        Ok(_) => { warn!("MK_OPENAI_SERVERS is not a JSON array; ignoring"); return Vec::new(); }
-        Err(e) => { warn!("MK_OPENAI_SERVERS is not valid JSON ({e}); ignoring"); return Vec::new(); }
-    };
     let mut out = Vec::new();
-    for v in arr {
-        let (Some(label), Some(base_url), Some(model)) = (
-            v.get("label").and_then(|x| x.as_str()),
-            v.get("base_url").and_then(|x| x.as_str()),
-            v.get("model").and_then(|x| x.as_str()),
-        ) else {
-            warn!("MK_OPENAI_SERVERS entry missing label/base_url/model; skipping: {v}");
+    for entry in raw.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        let (mut label, mut base_url, mut model) = (None, None, None);
+        let (mut api_key, mut api_key_env, mut primary) = (None, None, false);
+        for kv in entry.split(',') {
+            let Some((k, v)) = kv.split_once('=') else { continue };
+            let v = v.trim().to_string();
+            match k.trim() {
+                "label" => label = Some(v),
+                "base_url" => base_url = Some(v.trim_end_matches('/').to_string()),
+                "model" => model = Some(v),
+                "api_key" => api_key = Some(v),
+                "api_key_env" => api_key_env = Some(v),
+                "primary" => primary = matches!(v.as_str(), "1" | "true" | "yes"),
+                other => warn!("MK_OPENAI_SERVERS: ignoring unknown field '{other}'"),
+            }
+        }
+        let (Some(label), Some(base_url), Some(model)) = (label, base_url, model) else {
+            warn!("MK_OPENAI_SERVERS entry missing label/base_url/model; skipping: {entry}");
             continue;
         };
-        let api_key = match v.get("api_key_env").and_then(|x| x.as_str()) {
-            Some(env_name) => match lookup(env_name) {
+        let api_key = match api_key_env {
+            Some(env_name) => match lookup(&env_name) {
                 Some(k) => Some(k),
                 None => { warn!("summary backend '{label}': {env_name} unset/empty; skipping"); continue; }
             },
-            None => v.get("api_key").and_then(|x| x.as_str()).map(str::to_string),
+            None => api_key,
         };
-        out.push(Backend {
-            label: label.to_string(),
-            base_url: base_url.trim_end_matches('/').to_string(),
-            api_key,
-            model: model.to_string(),
-            primary: v.get("primary").and_then(|x| x.as_bool()).unwrap_or(false),
-        });
+        out.push(Backend { label, base_url, api_key, model, primary });
     }
     out
 }
@@ -680,15 +686,14 @@ mod tests {
 
     #[test]
     fn parse_servers_resolves_key_env_and_skips_missing() {
-        let raw = r#"[
-          {"label":"openrouter","base_url":"https://openrouter.ai/api/v1/","model":"m","api_key_env":"OR_KEY","primary":true},
-          {"label":"nokey","base_url":"https://x/v1","model":"m","api_key_env":"MISSING"},
-          {"label":"local","base_url":"http://127.0.0.1:1/","model":"m"}
-        ]"#;
+        let raw = "label=openrouter,base_url=https://openrouter.ai/api/v1/,model=g:free,api_key_env=OR_KEY,primary=true;\
+                   label=nokey,base_url=https://x/v1,model=m,api_key_env=MISSING;\
+                   label=local,base_url=http://127.0.0.1:1/,model=m";
         let bs = parse_servers(raw, |k| (k == "OR_KEY").then(|| "sk-x".to_string()));
         assert_eq!(bs.len(), 2, "the missing-key backend is dropped");
         assert_eq!(bs[0].label, "openrouter");
         assert_eq!(bs[0].base_url, "https://openrouter.ai/api/v1"); // trailing slash trimmed
+        assert_eq!(bs[0].model, "g:free");
         assert_eq!(bs[0].api_key.as_deref(), Some("sk-x"));
         assert!(bs[0].primary);
         assert_eq!(bs[1].label, "local");
@@ -697,8 +702,8 @@ mod tests {
 
     #[test]
     fn parse_servers_tolerates_garbage() {
-        assert!(parse_servers("not json", |_| None).is_empty());
-        assert!(parse_servers("{}", |_| None).is_empty());
+        assert!(parse_servers("", |_| None).is_empty());
+        assert!(parse_servers("nonsense-without-fields", |_| None).is_empty());
     }
 
     #[test]
