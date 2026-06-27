@@ -133,7 +133,9 @@ impl Summarizer {
                 child = Some(Mutex::new(c));
                 backends.push(Backend {
                     label: LABEL.to_string(),
-                    base_url: format!("http://127.0.0.1:{port}"),
+                    // base_url is the full OpenAI API base incl. version (we append
+                    // only `/chat/completions`); llama-server serves `/v1/...`.
+                    base_url: format!("http://127.0.0.1:{port}/v1"),
                     api_key: None,
                     model: LABEL.to_string(),
                     primary: false,
@@ -251,7 +253,7 @@ impl Summarizer {
         let started = Instant::now();
         let mut req = self
             .client
-            .post(format!("{}/v1/chat/completions", b.base_url))
+            .post(format!("{}/chat/completions", b.base_url))
             .json(&body);
         if let Some(key) = &b.api_key {
             req = req.bearer_auth(key);
@@ -370,7 +372,8 @@ fn spawn_local_server() -> Result<(Child, u16)> {
 /// stripped by systemd): `;`-separated server entries, each a `,`-separated list of
 /// `key=value` fields. Keys: `label`, `base_url`, `model` (required), `api_key_env`
 /// (env var holding the bearer key — keeps the secret out of this value), `api_key`
-/// (literal, discouraged), `primary` (true/1/yes). Example:
+/// (literal, discouraged), `primary` (true/1/yes). `base_url` is the full OpenAI API
+/// base *including* the version path (we append only `/chat/completions`). Example:
 /// `label=openrouter,base_url=https://openrouter.ai/api/v1,model=x:free,api_key_env=OPENROUTER_API_KEY,primary=true`
 /// Returns [] when the var is unset/blank.
 fn parse_remote_backends() -> Vec<Backend> {
