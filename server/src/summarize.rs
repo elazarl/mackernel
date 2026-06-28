@@ -129,6 +129,10 @@ pub struct Summarizer {
     client: reqwest::blocking::Client,
     backends: Vec<Backend>,
     mem_bytes: u64,
+    /// Serializes `opencode` CLI runs: the free zen tier rejects concurrent
+    /// invocations (a job's result+detail fire at once), and two heavyweight CLI
+    /// agents also spike the host. One at a time keeps it reliable.
+    opencode_lock: Mutex<()>,
 }
 
 impl Drop for Summarizer {
@@ -199,6 +203,7 @@ impl Summarizer {
             client,
             backends,
             mem_bytes: 0,
+            opencode_lock: Mutex::new(()),
         };
         // Warm up the local server and measure its RSS for /api/summarizer.
         if let Some(local) = s.backends.iter().find(|b| b.label == LABEL).cloned() {
@@ -297,7 +302,7 @@ impl Summarizer {
         on_tok: &dyn Fn(u32),
     ) -> Result<(String, GenStats)> {
         if b.kind == BackendKind::Opencode {
-            return generate_opencode(b, sys, user, on_tok);
+            return generate_opencode(&self.opencode_lock, b, sys, user, on_tok);
         }
         self.generate_openai(b, sys, user, max_new, json, on_tok)
     }
@@ -399,7 +404,10 @@ impl Summarizer {
 /// without invoking tools. Binary from `$MK_OPENCODE_BIN`, else `opencode` on PATH.
 /// Runs in a neutral cwd so it doesn't scan a project, and is killed after a timeout.
 /// opencode emits no token usage, so `tokens` is a whitespace-word estimate.
-fn generate_opencode(b: &Backend, sys: &str, user: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
+/// `lock` serializes runs — the free zen tier rejects concurrent invocations.
+fn generate_opencode(lock: &Mutex<()>, b: &Backend, sys: &str, user: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
+    // Held for the whole run so only one opencode CLI executes at a time.
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     let bin = std::env::var("MK_OPENCODE_BIN").unwrap_or_else(|_| "opencode".to_string());
     let prompt = format!("{sys}\n\n{user}");
     let started = Instant::now();
