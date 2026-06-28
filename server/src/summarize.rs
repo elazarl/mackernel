@@ -23,7 +23,7 @@
 //! fills the legacy per-field columns and streams live to the UI, the rest are
 //! stored per-server in `job_summaries`.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -62,6 +62,9 @@ const REMOTE_REASONING_HEADROOM: usize = 1024;
 const LOCAL_LOG_CAP: usize = 10_000;
 const REMOTE_LOG_CAP: usize = 200_000;
 
+/// How long to wait for an `opencode run` one-shot before killing it.
+const OPENCODE_TIMEOUT: Duration = Duration::from_secs(300);
+
 const GGUF_REPO: &str = "bartowski/Phi-3.5-mini-instruct-GGUF";
 const GGUF_FILE: &str = "Phi-3.5-mini-instruct-Q4_K_M.gguf";
 /// Human-readable model label, surfaced in logs and `/api/summarizer`.
@@ -87,10 +90,19 @@ pub struct GenStats {
     pub tokens: u32,
 }
 
-/// One OpenAI-compatible summary backend: a base URL, the model name to request,
-/// an optional bearer key, and whether it's the `primary` (its output fills the
-/// legacy per-field columns and streams live to the UI). The local llama-server is
-/// just one backend (no key); remote ones come from `MK_OPENAI_SERVERS`.
+/// How a backend is invoked: an OpenAI-compatible HTTP endpoint, or the `opencode`
+/// CLI run one-shot (`opencode run --pure -m <model> "<prompt>"`, stdout = answer).
+#[derive(Clone, PartialEq)]
+pub enum BackendKind {
+    OpenAi,
+    Opencode,
+}
+
+/// One summary backend: the model name plus how to reach it. For `OpenAi` it's an
+/// HTTP base URL + optional bearer key (the local llama-server, or remotes like
+/// OpenRouter from `MK_OPENAI_SERVERS`). For `Opencode` it's a `provider/model` run
+/// through the local `opencode` CLI (no base_url/key). `primary` = its output fills
+/// the legacy per-field columns and streams live to the UI.
 #[derive(Clone)]
 pub struct Backend {
     pub label: String,
@@ -98,6 +110,15 @@ pub struct Backend {
     pub api_key: Option<String>,
     pub model: String,
     pub primary: bool,
+    pub kind: BackendKind,
+}
+
+impl Backend {
+    /// The local, context-constrained llama-server (gets the tight log cap). Remote
+    /// HTTP backends and opencode have big contexts and get fuller logs.
+    fn is_local(&self) -> bool {
+        self.kind == BackendKind::OpenAi && self.api_key.is_none()
+    }
 }
 
 /// Owns the optional local `llama-server` subprocess (killed on drop) plus the set
@@ -157,6 +178,7 @@ impl Summarizer {
                     api_key: None,
                     model: LABEL.to_string(),
                     primary: false,
+                    kind: BackendKind::OpenAi,
                 });
             }
             Err(e) if !backends.is_empty() => {
@@ -256,18 +278,35 @@ impl Summarizer {
         logs_dir: &Path,
         on_tok: &dyn Fn(u32),
     ) -> Result<(String, GenStats)> {
-        // Per-backend log cap: remote backends (api_key set) have huge contexts and
-        // get near-full logs; the local model stays tight to fit its slot.
-        let cap = if b.api_key.is_some() { REMOTE_LOG_CAP } else { LOCAL_LOG_CAP };
+        // Per-backend log cap: only the local llama-server is context-constrained;
+        // remote HTTP backends and opencode have huge contexts and get near-full logs.
+        let cap = if b.is_local() { LOCAL_LOG_CAP } else { REMOTE_LOG_CAP };
         let user = curate_end_context(bundle_md, logs_dir, cap);
         self.generate(b, SYS_DETAIL, &user, 400, false, on_tok)
+    }
+
+    /// One completion against a backend. Dispatches to the OpenAI HTTP path or the
+    /// `opencode` CLI depending on the backend kind.
+    fn generate(
+        &self,
+        b: &Backend,
+        sys: &str,
+        user: &str,
+        max_new: usize,
+        json: bool,
+        on_tok: &dyn Fn(u32),
+    ) -> Result<(String, GenStats)> {
+        if b.kind == BackendKind::Opencode {
+            return generate_opencode(b, sys, user, on_tok);
+        }
+        self.generate_openai(b, sys, user, max_new, json, on_tok)
     }
 
     /// One deterministic (greedy) completion via the OpenAI chat API, streamed so we
     /// can report the live token count (`on_tok`, throttled) and measure wall time.
     /// The server applies the model's chat template, so system/user go as messages
     /// rather than a hand-rolled prompt string.
-    fn generate(
+    fn generate_openai(
         &self,
         b: &Backend,
         sys: &str,
@@ -354,6 +393,53 @@ impl Summarizer {
     }
 }
 
+/// One completion via the `opencode` CLI run one-shot: `opencode run --pure -m
+/// <model> "<sys>\n\n<user>"`. With `--pure`, stdout is exactly the answer (the
+/// "> build · model" header and ANSI go to stderr), and the agent answers directly
+/// without invoking tools. Binary from `$MK_OPENCODE_BIN`, else `opencode` on PATH.
+/// Runs in a neutral cwd so it doesn't scan a project, and is killed after a timeout.
+/// opencode emits no token usage, so `tokens` is a whitespace-word estimate.
+fn generate_opencode(b: &Backend, sys: &str, user: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
+    let bin = std::env::var("MK_OPENCODE_BIN").unwrap_or_else(|_| "opencode".to_string());
+    let prompt = format!("{sys}\n\n{user}");
+    let started = Instant::now();
+    let mut child = Command::new(&bin)
+        .args(["run", "--pure", "-m", &b.model, &prompt])
+        .current_dir(std::env::temp_dir())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn {bin} run"))?;
+
+    let deadline = Instant::now() + OPENCODE_TIMEOUT;
+    loop {
+        match child.try_wait()? {
+            Some(status) if status.success() => break,
+            Some(status) => bail!("opencode run exited with {status}"),
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    bail!("opencode run timed out after {OPENCODE_TIMEOUT:?}");
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+
+    // Summaries are small, so reading stdout after the child exits won't deadlock.
+    let mut text = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_string(&mut text).context("read opencode stdout")?;
+    }
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        bail!("opencode produced no output");
+    }
+    let tokens = text.split_whitespace().count() as u32; // estimate; CLI has no usage
+    on_tok(tokens);
+    Ok((text, GenStats { ms: started.elapsed().as_millis() as u64, tokens }))
+}
+
 /// Spawn the local `llama-server` (optionally CPU-deprioritized via `MK_LLAMA_NICE`)
 /// and block until it answers `/health`. Returns the child and the port it listens
 /// on. Blocking — the first call may download the binary and the ~2.5 GB GGUF.
@@ -437,9 +523,12 @@ fn spawn_local_server() -> Result<(Child, u16)> {
 /// stripped by systemd): `;`-separated server entries, each a `,`-separated list of
 /// `key=value` fields. Keys: `label`, `base_url`, `model` (required), `api_key_env`
 /// (env var holding the bearer key — keeps the secret out of this value), `api_key`
-/// (literal, discouraged), `primary` (true/1/yes). `base_url` is the full OpenAI API
-/// base *including* the version path (we append only `/chat/completions`). Example:
+/// (literal, discouraged), `primary` (true/1/yes), `kind` (`opencode` to run via the
+/// opencode CLI; default HTTP). `base_url` is the full OpenAI API base *including* the
+/// version path (we append only `/chat/completions`) and is required for HTTP backends
+/// but not for `kind=opencode`. Examples:
 /// `label=openrouter,base_url=https://openrouter.ai/api/v1,model=x:free,api_key_env=OPENROUTER_API_KEY,primary=true`
+/// `label=opencode,model=opencode/deepseek-v4-flash-free,kind=opencode,primary=true`
 /// Returns [] when the var is unset/blank.
 fn parse_remote_backends() -> Vec<Backend> {
     let Some(raw) = std::env::var("MK_OPENAI_SERVERS")
@@ -459,6 +548,7 @@ fn parse_servers(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> Vec<Back
     for entry in raw.split(';').map(str::trim).filter(|s| !s.is_empty()) {
         let (mut label, mut base_url, mut model) = (None, None, None);
         let (mut api_key, mut api_key_env, mut primary) = (None, None, false);
+        let mut kind = BackendKind::OpenAi;
         for kv in entry.split(',') {
             let Some((k, v)) = kv.split_once('=') else {
                 continue;
@@ -471,13 +561,21 @@ fn parse_servers(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> Vec<Back
                 "api_key" => api_key = Some(v),
                 "api_key_env" => api_key_env = Some(v),
                 "primary" => primary = matches!(v.as_str(), "1" | "true" | "yes"),
+                "kind" => kind = if v == "opencode" { BackendKind::Opencode } else { BackendKind::OpenAi },
                 other => warn!("MK_OPENAI_SERVERS: ignoring unknown field '{other}'"),
             }
         }
-        let (Some(label), Some(base_url), Some(model)) = (label, base_url, model) else {
-            warn!("MK_OPENAI_SERVERS entry missing label/base_url/model; skipping: {entry}");
+        // label + model always required; base_url only for HTTP (OpenAI) backends —
+        // opencode is invoked via its CLI and needs no URL.
+        let (Some(label), Some(model)) = (label, model) else {
+            warn!("MK_OPENAI_SERVERS entry missing label/model; skipping: {entry}");
             continue;
         };
+        let base_url = base_url.unwrap_or_default();
+        if kind == BackendKind::OpenAi && base_url.is_empty() {
+            warn!("summary backend '{label}': base_url required for an HTTP backend; skipping");
+            continue;
+        }
         let api_key = match api_key_env {
             Some(env_name) => match lookup(&env_name) {
                 Some(k) => Some(k),
@@ -494,6 +592,7 @@ fn parse_servers(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> Vec<Back
             api_key,
             model,
             primary,
+            kind,
         });
     }
     out
@@ -809,16 +908,20 @@ mod tests {
     fn parse_servers_resolves_key_env_and_skips_missing() {
         let raw = "label=openrouter,base_url=https://openrouter.ai/api/v1/,model=g:free,api_key_env=OR_KEY,primary=true;\
                    label=nokey,base_url=https://x/v1,model=m,api_key_env=MISSING;\
+                   label=httpnobase,model=m;\
+                   label=oc,model=opencode/deepseek-v4-flash-free,kind=opencode;\
                    label=local,base_url=http://127.0.0.1:1/,model=m";
         let bs = parse_servers(raw, |k| (k == "OR_KEY").then(|| "sk-x".to_string()));
-        assert_eq!(bs.len(), 2, "the missing-key backend is dropped");
+        assert_eq!(bs.len(), 3, "missing-key and base-less-HTTP backends are dropped");
         assert_eq!(bs[0].label, "openrouter");
         assert_eq!(bs[0].base_url, "https://openrouter.ai/api/v1"); // trailing slash trimmed
         assert_eq!(bs[0].model, "g:free");
         assert_eq!(bs[0].api_key.as_deref(), Some("sk-x"));
-        assert!(bs[0].primary);
-        assert_eq!(bs[1].label, "local");
-        assert!(bs[1].api_key.is_none() && !bs[1].primary);
+        assert!(bs[0].primary && bs[0].kind == BackendKind::OpenAi);
+        assert_eq!(bs[1].label, "oc");
+        assert!(bs[1].kind == BackendKind::Opencode && bs[1].base_url.is_empty());
+        assert_eq!(bs[2].label, "local");
+        assert!(bs[2].api_key.is_none() && !bs[2].primary);
     }
 
     #[test]

@@ -20,8 +20,10 @@
 #   OPENROUTER_API_KEY  if set, adds OpenRouter summary backend(s) (the first is
 #                       primary), written to a mode-600 systemd drop-in on the host.
 #                       NEVER committed; e.g.  OPENROUTER_API_KEY=sk-or-... ./deploy.sh
-#   MK_OR_MODELS     space-separated OpenRouter model ids; first is primary
+#   MK_OR_MODELS     space-separated OpenRouter model ids (non-primary)
 #                    (default: "poolside/laguna-xs.2:free nvidia/nemotron-3-ultra-550b-a55b:free")
+#   MK_OPENCODE_MODEL  opencode (CLI) free model, the PRIMARY backend
+#                    (default: opencode/deepseek-v4-flash-free)
 #   MK_LLAMA_NICE    nice level for the local llama-server          (default: 19)
 set -euo pipefail
 
@@ -32,6 +34,7 @@ BRANCH="${MK_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 REMOTE_PATH="${MK_REMOTE_PATH:-\$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin}"
 OR_KEY="${OPENROUTER_API_KEY:-}"
 OR_MODELS="${MK_OR_MODELS:-poolside/laguna-xs.2:free nvidia/nemotron-3-ultra-550b-a55b:free}"
+OPENCODE_MODEL="${MK_OPENCODE_MODEL:-opencode/deepseek-v4-flash-free}"
 LLAMA_NICE="${MK_LLAMA_NICE:-19}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -73,25 +76,27 @@ rsync -az --delete "$HERE/server/ui/dist/" "$HOST:$REMOTE_REPO/server/ui/dist/"
 # drop-in carries the OpenRouter key, so it's written mode-600 and the whole file
 # travels over ssh *stdin* (never argv, never the repo).
 DROPIN="[Service]
-Environment=MK_LLAMA_NICE=${LLAMA_NICE}"
+Environment=MK_LLAMA_NICE=${LLAMA_NICE}
+Environment=MK_OPENCODE_BIN=%h/.opencode/bin/opencode"
+# opencode (free zen model via the opencode CLI) is the PRIMARY backend; the
+# OpenRouter HTTP models (if a key is set) are added as non-primary. Label is the
+# model basename minus ':free' (full id shows in the UI tooltip). %h = user home.
+SERVERS_SPEC="label=opencode,model=${OPENCODE_MODEL},kind=opencode,primary=true"
 if [[ -n "$OR_KEY" ]]; then
-  # One backend per model (';'-separated entries); the first model is primary. Label
-  # is the model basename minus ':free' (full id shows in the UI tooltip).
   read -ra _models <<< "$OR_MODELS"
-  SERVERS_SPEC=""; first=true
   for m in "${_models[@]}"; do
     label="${m##*/}"; label="${label%:free}"
-    if $first; then prim=true; first=false; else prim=false; fi
-    entry="label=${label},base_url=https://openrouter.ai/api/v1,model=${m},api_key_env=OPENROUTER_API_KEY,primary=${prim}"
-    SERVERS_SPEC="${SERVERS_SPEC:+$SERVERS_SPEC;}$entry"
+    entry="label=${label},base_url=https://openrouter.ai/api/v1,model=${m},api_key_env=OPENROUTER_API_KEY,primary=false"
+    SERVERS_SPEC="${SERVERS_SPEC};$entry"
   done
   DROPIN+="
-Environment=MK_OPENAI_SERVERS=${SERVERS_SPEC}
 Environment=OPENROUTER_API_KEY=${OR_KEY}"
-  log "configure backends on $HOST: local phi3.5 (nice ${LLAMA_NICE}) + OpenRouter [${OR_MODELS}] (first=primary)"
+  log "configure backends on $HOST: opencode primary (${OPENCODE_MODEL}) + local phi3.5 (nice ${LLAMA_NICE}) + OpenRouter [${OR_MODELS}]"
 else
-  log "configure backends on $HOST: local phi3.5 only (nice ${LLAMA_NICE}); set OPENROUTER_API_KEY to add OpenRouter"
+  log "configure backends on $HOST: opencode primary (${OPENCODE_MODEL}) + local phi3.5 (nice ${LLAMA_NICE})"
 fi
+DROPIN+="
+Environment=MK_OPENAI_SERVERS=${SERVERS_SPEC}"
 # One single-quoted remote command run by the login shell (no `bash -c` wrapper —
 # that mis-parsed the multi-line script); `cat` reads the drop-in from ssh stdin.
 printf '%s\n' "$DROPIN" | ssh "$HOST" '
