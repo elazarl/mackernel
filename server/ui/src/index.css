@@ -1,0 +1,91 @@
+@import "tailwindcss";
+
+/* data-theme (set by lib/theme.ts) drives the palette via plain CSS vars so
+   recharts' inline `var(--card)` styles keep working; @theme inline re-exports
+   them as Tailwind color utilities (bg-card, text-muted, border-border, …). */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  color-scheme: dark;
+  --bg: #0d1117; --card: #161b22; --subtle: #21262d; --border: #30363d;
+  --fg: #c9d1d9; --muted: #8b949e; --accent: #58a6ff; --tab-active: #1f6feb;
+  --overlay: rgba(1, 4, 9, .7);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff; --card: #f6f8fa; --subtle: #eaeef2; --border: #d0d7de;
+  --fg: #1f2328; --muted: #656d76; --accent: #0969da; --tab-active: #0969da;
+  --overlay: rgba(140, 149, 159, .4);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-card: var(--card);
+  --color-subtle: var(--subtle);
+  --color-border: var(--border);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-accent: var(--accent);
+  --color-tab-active: var(--tab-active);
+  --color-ok: #3fb950;
+  --color-fail: #f85149;
+  --color-warn: #d29922;
+  --color-ram: #58a6ff;
+  --color-disk: #bc8cff;
+}
+
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 system-ui, sans-serif; }
+h1 { font-size: 20px; }
+/* Card section headings (markdown headings are re-styled under .md below). */
+h2 { font-size: 14px; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; margin: 0 0 10px; }
+
+/* Reusable surfaces. Layout lives in the components as Tailwind utilities; these are
+   the few patterns repeated enough to be worth a class. */
+@layer components {
+  .card {
+    @apply bg-card border border-border rounded-lg p-3.5 mb-4;
+  }
+  .log {
+    @apply bg-bg border border-border rounded-md p-2.5 max-h-90 overflow-auto
+           whitespace-pre-wrap text-xs;
+    font-family: ui-monospace, monospace;
+  }
+  .summary {
+    @apply bg-subtle rounded-md px-2.5 py-2 my-2 leading-snug;
+    border-left: 3px solid var(--accent);
+  }
+  .step {
+    @apply px-2.5 py-0.5 rounded-full border border-border text-muted text-xs;
+  }
+  .step.cur { @apply border-warn text-warn; }
+  .step.done { @apply border-ok text-ok; }
+  .step.fail { @apply border-fail text-fail; }
+
+  .btn {
+    @apply rounded-md px-3.5 py-[7px] text-white border-0 cursor-pointer
+           disabled:opacity-50 disabled:cursor-default;
+    background: #238636;
+  }
+  .linkbtn {
+    @apply bg-transparent border-0 text-accent cursor-pointer p-0 m-0 text-[13px] underline;
+  }
+  .chip {
+    @apply bg-subtle text-fg border border-border rounded-md px-2.5 py-[3px] text-xs
+           cursor-pointer hover:border-accent;
+    font-family: ui-monospace, monospace;
+  }
+}
+
+/* Markdown (react-markdown output) + server-highlighted code (arborium injects its
+   own color CSS at runtime; .arb just carries it). Ported from the old CSS so the
+   rendering is unchanged. */
+.md { color: var(--fg); }
+.md a { color: var(--accent); }
+.md h1, .md h2, .md h3 { color: var(--fg); text-transform: none; letter-spacing: 0; }
+.md h1 { font-size: 20px; } .md h2 { font-size: 16px; } .md h3 { font-size: 14px; }
+.md table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+.md th, .md td { border: 1px solid var(--border); padding: 4px 9px; text-align: left; }
+.md th { background: var(--subtle); }
+.md code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; font-family: ui-monospace, monospace; font-size: 12px; }
+.md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow: auto; }
+.md pre code { border: 0; padding: 0; background: none; }
