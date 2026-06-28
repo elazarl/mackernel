@@ -58,36 +58,6 @@ function jobSummaryTip(s: JobSummary): string {
     s.tokens != null ? `${s.tokens} tok` : null].filter(Boolean).join(" · ");
 }
 
-// Lazy expander revealing every backend's summary for one field (fetched on open
-// from /api/jobs/:id/summaries). The default line/card shows the primary; this is
-// the "see all models" view. `markdown` renders the detail field as Markdown.
-function MultiSummary({ id, field, markdown }: { id: number; field: string; markdown?: boolean }) {
-  const [open, setOpen] = useState(false);
-  const [rows, setRows] = useState<JobSummary[] | null>(null);
-  const toggle = async () => {
-    const next = !open;
-    setOpen(next);
-    if (next) {
-      try { setRows((await getJobSummaries(id)).filter((s) => s.field === field)); }
-      catch { setRows([]); }
-    }
-  };
-  return (
-    <div className="multi">
-      <button className="linkbtn" onClick={toggle}>{open ? "▾" : "▸"} all models</button>
-      {open && (rows === null ? <p className="muted">loading…</p>
-        : rows.length === 0 ? <p className="muted">no per-model summaries yet</p>
-        : rows.map((s) => (
-            <div key={s.server} className="modelrow">
-              <span className="modellabel" title={jobSummaryTip(s)}>{s.server}</span>
-              {markdown
-                ? <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{s.text}</ReactMarkdown></div>
-                : <span className="modeltext">{s.text}</span>}
-            </div>
-          )))}
-    </div>
-  );
-}
 // `run` is the run-kernel.py orchestrator log: it always carries the failure reason
 // (a die() message or an uncaught traceback), even for early crashes that never reach
 // the phase-specific logs — so it's the reliable place to look when a job fails.
@@ -318,7 +288,7 @@ function Dashboard() {
         <div className="right">
           {sel == null ? <p className="muted">Select a job to see live progress, metrics, and logs.</p>
             : <JobDetail id={sel} summarizerReady={summarizer?.loaded ?? false}
-                nServers={summarizer?.servers?.length ?? 0}
+                servers={summarizer?.servers ?? []}
                 onEdit={(text) => { setBundle(text); setModalOpen(true); }} />}
         </div>
       </div>
@@ -328,12 +298,38 @@ function Dashboard() {
 
 type IssueSection = { file: string; blocks: { head: string[]; trace: string[] }[] };
 
-function JobDetail({ id, summarizerReady, nServers, onEdit }: { id: number; summarizerReady: boolean; nServers: number; onEdit: (text: string) => void }) {
+function JobDetail({ id, summarizerReady, servers, onEdit }:
+  { id: number; summarizerReady: boolean; servers: SummarizerInfo["servers"]; onEdit: (text: string) => void }) {
   const [job, setJob] = useState<Job | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
   const [bundleText, setBundleText] = useState("");
   const [maxRepro, setMaxRepro] = useState(false);
+  // All backends' summaries (per server/field); the model switcher picks which one
+  // the whole view shows. The primary keeps the live-streamed columns from `job`.
+  const [summaries, setSummaries] = useState<JobSummary[]>([]);
+  const srv = servers ?? [];
+  const primaryLabel = srv.find((s) => s.primary)?.label ?? srv[0]?.label ?? "";
+  const [view, setView] = useState("");
+  useEffect(() => { setView(primaryLabel); }, [primaryLabel, id]);
+  const isPrimary = !view || view === primaryLabel;
+  const selModel = srv.find((s) => s.label === view)?.model ?? view;
+  const byServer = useMemo(() => {
+    const m = new Map<string, Map<string, JobSummary>>();
+    for (const s of summaries) {
+      if (!m.has(s.server)) m.set(s.server, new Map());
+      m.get(s.server)!.set(s.field, s);
+    }
+    return m;
+  }, [summaries]);
+  const cell = (field: string) => byServer.get(view)?.get(field);
+  // One-line summary for a non-primary backend (tooltip carries model · time · tokens).
+  const serverLine = (field: string, icon: string) => {
+    const r = cell(field);
+    return r
+      ? <p className="summary" title={jobSummaryTip(r)}>{icon} {r.text}</p>
+      : <p className="summary"><span className="muted">{icon} no summary from {selModel} yet</span></p>;
+  };
   // Phase start times (ms) keyed by phase name — used to mark the timeline.
   const [phaseTs, setPhaseTs] = useState<Record<string, number>>({});
   // Live token count per summary field while it streams (cleared when the summary lands).
@@ -345,15 +341,17 @@ function JobDetail({ id, summarizerReady, nServers, onEdit }: { id: number; summ
   const userPicked = useRef(false);
 
   useEffect(() => {
-    setSamples([]); setJob(null); setPhaseTs({}); setProgress({});
+    setSamples([]); setJob(null); setPhaseTs({}); setProgress({}); setSummaries([]);
     userPicked.current = false;
     let live = true;
     let es: EventSource | null = null;
+    const refreshSummaries = () => getJobSummaries(id).then((s) => { if (live) setSummaries(s); }).catch(() => {});
     (async () => {
       const j = await getJob(id); if (!live) return; setJob(j);
       const m = await getMetrics(id); if (!live) return;
       t0.current = m[0]?.ts_ms ?? Date.now();
       setSamples(m);
+      refreshSummaries();
       // Stored phase timestamps — so marks show on terminal jobs that never open the SSE.
       getPhases(id).then((evs) => { if (live) setPhaseTs(Object.fromEntries(evs.map((e) => [e.phase, e.ts_ms]))); }).catch(() => {});
       // Stream while the job runs, OR while end-stage summaries (generated after the
@@ -378,6 +376,7 @@ function JobDetail({ id, summarizerReady, nServers, onEdit }: { id: number; summ
           if (v.kind === "summary" && v.field)
             setProgress((p) => { const n = { ...p }; delete n[v.field]; return n; });
           if (v.kind === "phase" || v.kind === "done" || v.kind === "summary") getJob(id).then(setJob);
+          if (v.kind === "summary" || v.kind === "done" || v.kind === "summaries_done") refreshSummaries();
           if (v.kind === "summaries_done") es?.close();
         } catch {}
       };
@@ -423,41 +422,65 @@ function JobDetail({ id, summarizerReady, nServers, onEdit }: { id: number; summ
         <IssuesCard id={id} status={job?.status} />
       )}
       <section className="card">
-        <h2>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
-          {cmp && <span className="muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
+        <div className="cardhead">
+          <h2 style={{ margin: 0 }}>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
+            {cmp && <span className="muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
+          {/* Switch the whole view between backends; hover an option for its model id. */}
+          {srv.length > 1 && (
+            <span className="tabs modelswitch" title="Show summaries from this model">
+              {srv.map((s) => (
+                <button key={s.label} title={`${s.model}${s.primary ? " · primary" : ""}`}
+                  className={s.label === view ? "tab active" : "tab"}
+                  onClick={() => setView(s.label)}>{s.label}</button>
+              ))}
+            </span>
+          )}
+        </div>
         <div className="stepper">
           {PHASES.map((p) => (
             <span key={p} className={"step " + stepClass(job, p)}>{p}</span>
           ))}
         </div>
-        <SummaryLine job={job} field="repro" icon="📝" text={job?.repro_summary ?? null}
-          progress={progress} due={job != null && job.status !== "queued"} summarizerReady={summarizerReady} />
-        {nServers > 1 && <MultiSummary id={id} field="repro" />}
-        <SummaryLine job={job} field="result" icon="✅" text={job?.result_summary ?? null}
-          progress={progress} due={job?.status === "done" || job?.status === "failed"} summarizerReady={summarizerReady} />
-        {nServers > 1 && <MultiSummary id={id} field="result" />}
+        {isPrimary
+          ? <SummaryLine job={job} field="repro" icon="📝" text={job?.repro_summary ?? null}
+              progress={progress} due={job != null && job.status !== "queued"} summarizerReady={summarizerReady} />
+          : serverLine("repro", "📝")}
+        {isPrimary
+          ? <SummaryLine job={job} field="result" icon="✅" text={job?.result_summary ?? null}
+              progress={progress} due={job?.status === "done" || job?.status === "failed"} summarizerReady={summarizerReady} />
+          : serverLine("result", "✅")}
         {job && (
           <p className="muted">
             exit {job.exit_code ?? "—"} · peak RAM {gib(job.ram_peak)} GB · peak disk {gib(job.disk_peak)} GB
           </p>
         )}
       </section>
-      {(job?.detail || progress["detail"] !== undefined ||
-        job?.status === "done" || job?.status === "failed") && (
+      {(() => {
+        // Detail markdown + its tooltip follow the selected model: live column for the
+        // primary, the per-server row otherwise.
+        const detailText = isPrimary ? job?.detail ?? null : cell("detail")?.text ?? null;
+        const detailTip = isPrimary ? summaryTip(job, "detail")
+          : (cell("detail") ? jobSummaryTip(cell("detail")!) : undefined);
+        const show = detailText != null ||
+          (isPrimary && (progress["detail"] !== undefined || job?.status === "done" || job?.status === "failed"));
+        if (!show) return null;
+        return (
         <section className="card">
-          <h2>Job summary{summaryTip(job, "detail") &&
+          <h2>Job summary{detailTip &&
             <span className="muted" style={{ fontWeight: "normal", fontSize: "0.7em" }}
-              title={summaryTip(job, "detail")}> ⓘ</span>}</h2>
-          {job?.detail
-            ? <div className="md" title={summaryTip(job, "detail")}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{job.detail}</ReactMarkdown>
+              title={detailTip}> ⓘ</span>}</h2>
+          {detailText != null
+            ? <div className="md" title={detailTip}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{detailText}</ReactMarkdown>
               </div>
-            : <p className="muted">{progress["detail"] !== undefined
-                ? `generating… ${progress["detail"]} tok`
-                : (summarizerReady ? "⏳ pending" : "⏳ summarizer warming up…")}</p>}
-          {nServers > 1 && <MultiSummary id={id} field="detail" markdown />}
+            : isPrimary
+              ? <p className="muted">{progress["detail"] !== undefined
+                  ? `generating… ${progress["detail"]} tok`
+                  : (summarizerReady ? "⏳ pending" : "⏳ summarizer warming up…")}</p>
+              : <p className="muted">no summary from {selModel} yet</p>}
         </section>
-      )}
+        );
+      })()}
       {bundleText.trim() && (
         <section className="card">
           <div className="cardhead">
@@ -775,14 +798,8 @@ const CSS = `
   .candactions { padding-left: 14px; } .candactions .chip { margin-top: 4px; }
   .summary { background: var(--subtle); border-left: 3px solid var(--accent, #58a6ff);
              padding: 8px 10px; border-radius: 6px; margin: 8px 0; line-height: 1.4; }
-  .multi { margin: -2px 0 8px; }
-  .multi > .linkbtn { font-size: 12px; }
-  .modelrow { display: flex; gap: 8px; align-items: baseline; padding: 4px 0 4px 10px;
-              border-left: 2px solid var(--border); margin-top: 4px; }
-  .modellabel { color: var(--accent); font-family: ui-monospace, monospace; font-size: 11px;
-                white-space: nowrap; min-width: 90px; }
-  .modeltext { line-height: 1.4; }
-  .modelrow .md { flex: 1; min-width: 0; }
+  .modelswitch { gap: 4px; flex-wrap: wrap; }
+  .modelswitch .tab { font-family: ui-monospace, monospace; font-size: 11px; padding: 3px 8px; }
   .detail { white-space: pre-wrap; line-height: 1.5; margin: 0; }
   .summarizer { margin-left: auto; font-size: .85em; }
   .shorttitle { color: var(--accent, #58a6ff); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
