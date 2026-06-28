@@ -33,10 +33,16 @@ use anyhow::{bail, Context, Result};
 use serde_json::json;
 use tracing::warn;
 
-const SYS_TITLE: &str = "You name Linux kernel bug reproducers. Reply with exactly two words — a terse title — and nothing else. No punctuation, no preamble.";
-const SYS_REPRO: &str = "You summarize Linux kernel bug reproducers. The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
-const SYS_RESULT: &str = "You summarize Linux kernel bug reproducer runs. Reply with exactly one short sentence and no preamble describing what actually happened on this run — whether it reproduced and the outcome.";
-const SYS_DETAIL: &str = "Read the reproducer text and the result and summarize this job, whether it succeeded or failed. Reply ONLY with concise GitHub-flavored Markdown and no preamble (do not wrap the whole thing in a code fence). Use exactly these three sections: a `## Summary` heading followed by one sentence on what the reproducer tested and how the run ended; a `## Analysis` heading followed by one paragraph on why it ended that way (the root cause if it failed, or what the successful run demonstrated); and a `## Evidence` heading followed by a single fenced code block (open and close it with a line of three backticks) containing the most relevant verbatim log lines, one per line — no bullets and no inline backticks.";
+const SYS_TITLE: &str =
+    "Reply with exactly two words — a terse title — and nothing else. No punctuation, no preamble.";
+const SYS_REPRO: &str = "The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
+const SYS_RESULT: &str = r#"Reply with exactly one short sentence and no preamble describing what actually happened on this run — whether it reproduced and the outcome."#;
+const SYS_DETAIL: &str = r#"Reply ONLY with concise GitHub-flavored Markdown and no preamble.
+Reply with GitHub-flavored. Analyze why this run failed and what it did.
+
+Include evidence excerpts from the log for each analysis line.
+Explain where this log came from (serial port dmesg, compilation of kernel, userspace run, etc)
+"#;
 
 const REPEAT_PENALTY: f32 = 1.1;
 const REPEAT_LAST_N: usize = 64;
@@ -144,7 +150,9 @@ impl Summarizer {
             Err(e) if !backends.is_empty() => {
                 warn!("local llama-server unavailable, using remote backends only: {e:#}");
             }
-            Err(e) => return Err(e).context("start local llama-server (no remote backends configured)"),
+            Err(e) => {
+                return Err(e).context("start local llama-server (no remote backends configured)")
+            }
         }
 
         // Exactly one primary: honor a configured one, else the first backend.
@@ -152,7 +160,12 @@ impl Summarizer {
             backends[0].primary = true;
         }
 
-        let mut s = Self { child, client, backends, mem_bytes: 0 };
+        let mut s = Self {
+            child,
+            client,
+            backends,
+            mem_bytes: 0,
+        };
         // Warm up the local server and measure its RSS for /api/summarizer.
         if let Some(local) = s.backends.iter().find(|b| b.label == LABEL).cloned() {
             let _ = s.generate(&local, SYS_TITLE, "ping", 1, false, &|_| {});
@@ -176,14 +189,24 @@ impl Summarizer {
     }
 
     /// Terse two-word title for the job, from the bundle alone (job start).
-    pub fn title(&self, b: &Backend, bundle_md: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
+    pub fn title(
+        &self,
+        b: &Backend,
+        bundle_md: &str,
+        on_tok: &dyn Fn(u32),
+    ) -> Result<(String, GenStats)> {
         let user = curate_bundle(bundle_md);
         let (raw, stats) = self.generate(b, SYS_TITLE, &user, 8, false, on_tok)?;
         Ok((two_words(&raw), stats))
     }
 
     /// One sentence on what the reproducer tests, from the bundle alone (job start).
-    pub fn summarize_repro(&self, b: &Backend, bundle_md: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
+    pub fn summarize_repro(
+        &self,
+        b: &Backend,
+        bundle_md: &str,
+        on_tok: &dyn Fn(u32),
+    ) -> Result<(String, GenStats)> {
         let user = curate_bundle(bundle_md);
         self.generate(b, SYS_REPRO, &user, 64, false, on_tok)
     }
@@ -213,7 +236,13 @@ impl Summarizer {
     /// Markdown "why it failed", reading the bundle plus all labeled logs (job end).
     /// Returns GitHub-flavored Markdown (a `## Summary` / `## Root cause` /
     /// `## Evidence` document) as a string; the DB stores it verbatim.
-    pub fn detail(&self, b: &Backend, bundle_md: &str, logs_dir: &Path, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
+    pub fn detail(
+        &self,
+        b: &Backend,
+        bundle_md: &str,
+        logs_dir: &Path,
+        on_tok: &dyn Fn(u32),
+    ) -> Result<(String, GenStats)> {
         let user = format!("{}\n\n{}", curate_bundle(bundle_md), curate_logs(logs_dir));
         self.generate(b, SYS_DETAIL, &user, 400, false, on_tok)
     }
@@ -232,7 +261,11 @@ impl Summarizer {
         on_tok: &dyn Fn(u32),
     ) -> Result<(String, GenStats)> {
         // Reasoning remote models need headroom (see REMOTE_REASONING_HEADROOM).
-        let max_tokens = if b.api_key.is_some() { max_new + REMOTE_REASONING_HEADROOM } else { max_new };
+        let max_tokens = if b.api_key.is_some() {
+            max_new + REMOTE_REASONING_HEADROOM
+        } else {
+            max_new
+        };
         let mut body = json!({
             "model": b.model,
             "messages": [
@@ -272,12 +305,16 @@ impl Summarizer {
         let mut usage_tokens: Option<u32> = None;
         for line in BufReader::new(resp).lines() {
             let line = line.context("read completion stream")?;
-            let Some(data) = line.strip_prefix("data:") else { continue };
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
             let data = data.trim();
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
-            let Ok(chunk): Result<serde_json::Value, _> = serde_json::from_str(data) else { continue };
+            let Ok(chunk): Result<serde_json::Value, _> = serde_json::from_str(data) else {
+                continue;
+            };
             if let Some(c) = chunk["choices"][0]["delta"]["content"].as_str() {
                 if !c.is_empty() {
                     text.push_str(c);
@@ -293,10 +330,12 @@ impl Summarizer {
         }
         let tokens = usage_tokens.unwrap_or(tokens);
         on_tok(tokens); // final count
-        let stats = GenStats { ms: started.elapsed().as_millis() as u64, tokens };
+        let stats = GenStats {
+            ms: started.elapsed().as_millis() as u64,
+            tokens,
+        };
         Ok((text.trim().to_string(), stats))
     }
-
 }
 
 /// Spawn the local `llama-server` (optionally CPU-deprioritized via `MK_LLAMA_NICE`)
@@ -309,17 +348,25 @@ fn spawn_local_server() -> Result<(Child, u16)> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(18080);
     let args = [
-        "--host".to_string(), "127.0.0.1".to_string(),
-        "--port".to_string(), port.to_string(),
-        "--ctx-size".to_string(), CTX_SIZE.to_string(),
-        "--parallel".to_string(), "2".to_string(),
-        "--hf-repo".to_string(), GGUF_REPO.to_string(),
-        "--hf-file".to_string(), GGUF_FILE.to_string(),
+        "--host".to_string(),
+        "127.0.0.1".to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--ctx-size".to_string(),
+        CTX_SIZE.to_string(),
+        "--parallel".to_string(),
+        "2".to_string(),
+        "--hf-repo".to_string(),
+        GGUF_REPO.to_string(),
+        "--hf-file".to_string(),
+        GGUF_FILE.to_string(),
     ];
     // `MK_LLAMA_NICE` lowers the model's CPU priority (it's a best-effort secondary
     // once a remote backend is primary): run `nice -n N <bin> …` — a shell-out in
     // the same style as the `tar`/`ps` calls. Unset = normal priority.
-    let nice = std::env::var("MK_LLAMA_NICE").ok().and_then(|n| n.parse::<i32>().ok());
+    let nice = std::env::var("MK_LLAMA_NICE")
+        .ok()
+        .and_then(|n| n.parse::<i32>().ok());
     let mut cmd = match nice {
         Some(n) => {
             let mut c = Command::new("nice");
@@ -337,7 +384,9 @@ fn spawn_local_server() -> Result<(Child, u16)> {
     if let Some(dir) = bin.parent() {
         cmd.current_dir(dir);
     }
-    let mut child = cmd.spawn().with_context(|| format!("spawn {}", bin.display()))?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("spawn {}", bin.display()))?;
 
     // Poll /health until ready, the child exits, or we time out.
     let health = format!("http://127.0.0.1:{port}/health");
@@ -377,7 +426,10 @@ fn spawn_local_server() -> Result<(Child, u16)> {
 /// `label=openrouter,base_url=https://openrouter.ai/api/v1,model=x:free,api_key_env=OPENROUTER_API_KEY,primary=true`
 /// Returns [] when the var is unset/blank.
 fn parse_remote_backends() -> Vec<Backend> {
-    let Some(raw) = std::env::var("MK_OPENAI_SERVERS").ok().filter(|s| !s.trim().is_empty()) else {
+    let Some(raw) = std::env::var("MK_OPENAI_SERVERS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    else {
         return Vec::new();
     };
     parse_servers(&raw, |k| std::env::var(k).ok().filter(|s| !s.is_empty()))
@@ -392,7 +444,9 @@ fn parse_servers(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> Vec<Back
         let (mut label, mut base_url, mut model) = (None, None, None);
         let (mut api_key, mut api_key_env, mut primary) = (None, None, false);
         for kv in entry.split(',') {
-            let Some((k, v)) = kv.split_once('=') else { continue };
+            let Some((k, v)) = kv.split_once('=') else {
+                continue;
+            };
             let v = v.trim().to_string();
             match k.trim() {
                 "label" => label = Some(v),
@@ -411,11 +465,20 @@ fn parse_servers(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> Vec<Back
         let api_key = match api_key_env {
             Some(env_name) => match lookup(&env_name) {
                 Some(k) => Some(k),
-                None => { warn!("summary backend '{label}': {env_name} unset/empty; skipping"); continue; }
+                None => {
+                    warn!("summary backend '{label}': {env_name} unset/empty; skipping");
+                    continue;
+                }
             },
             None => api_key,
         };
-        out.push(Backend { label, base_url, api_key, model, primary });
+        out.push(Backend {
+            label,
+            base_url,
+            api_key,
+            model,
+            primary,
+        });
     }
     out
 }
@@ -529,7 +592,11 @@ fn cache_root() -> PathBuf {
 
 /// Find `llama-server` anywhere under `dir` and ensure it's executable.
 fn find_server_bin(dir: &Path) -> Option<PathBuf> {
-    let target = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let target = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
     let found = walk(dir)
         .into_iter()
         .find(|p| p.file_name().and_then(|n| n.to_str()) == Some(target))?;
@@ -550,7 +617,9 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() {
@@ -569,7 +638,11 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
 fn rss_of(pid: u32) -> u64 {
     #[cfg(target_os = "linux")]
     if let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/statm")) {
-        if let Some(pages) = s.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok()) {
+        if let Some(pages) = s
+            .split_whitespace()
+            .nth(1)
+            .and_then(|p| p.parse::<u64>().ok())
+        {
             return pages * 4096;
         }
     }
@@ -588,7 +661,10 @@ fn rss_of(pid: u32) -> u64 {
 /// ponytail: per-file ~2.5k chars, total ~10k; raise if detail JSON quality suffers.
 fn curate_logs(logs_dir: &Path) -> String {
     const LOGS: &[(&str, &str)] = &[
-        ("compile.log", "This is the kernel compilation through podman:"),
+        (
+            "compile.log",
+            "This is the kernel compilation through podman:",
+        ),
         ("dmesg.log", "This is the dmesg from the VM serial:"),
         ("console.log", "This is the raw VM serial console:"),
         ("exec.log", "This is the in-VM reproducer execution log:"),
@@ -597,7 +673,9 @@ fn curate_logs(logs_dir: &Path) -> String {
     ];
     let mut out = String::new();
     for (file, label) in LOGS {
-        let Ok(content) = std::fs::read_to_string(logs_dir.join(file)) else { continue };
+        let Ok(content) = std::fs::read_to_string(logs_dir.join(file)) else {
+            continue;
+        };
         let content = content.trim();
         if content.is_empty() {
             continue;
@@ -768,7 +846,10 @@ mod tests {
         assert!(c.contains("kernel compilation through podman"), "{c}");
         assert!(c.contains("dmesg from the VM serial"));
         assert!(c.contains("fatal error xyz"));
-        assert!(!c.contains("raw VM serial console"), "blank log should be skipped");
+        assert!(
+            !c.contains("raw VM serial console"),
+            "blank log should be skipped"
+        );
         assert!(c.chars().count() <= 10_001, "overall cap");
         std::fs::remove_dir_all(&dir).ok();
     }
