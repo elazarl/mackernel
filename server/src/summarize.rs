@@ -852,18 +852,28 @@ fn curate_bundle(md: &str) -> String {
     cap_chars(squeezed.trim(), 1600)
 }
 
-/// `collect_issues` returns a JSON array `[{"file","lines":[...]}]`. Flatten to a short
-/// plaintext block (capped) for the prompt, or a clear "no issues" note when empty.
+/// `collect_issues` returns a JSON array `[{"file", "blocks":[{"head":[...], "trace":[...]}]}]`
+/// (scanning the top-level logs plus the per-variant baseline/ and patched/ subdirs).
+/// Flatten the `head` lines, each tagged with its file, into a short plaintext block
+/// (capped) for the prompt, or a clear "no issues" note when empty. NOTE: this must
+/// match collect_issues' shape — it previously looked for a `"lines"` key that shape
+/// never has, so it always reported "no errors" and the result summary was wrong.
 fn curate_issues(issues_json: &str) -> String {
     let parsed: serde_json::Value =
         serde_json::from_str(issues_json).unwrap_or(serde_json::Value::Null);
-    let mut lines: Vec<&str> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
     if let Some(arr) = parsed.as_array() {
         for section in arr {
-            if let Some(ls) = section.get("lines").and_then(|l| l.as_array()) {
-                for l in ls {
-                    if let Some(s) = l.as_str() {
-                        lines.push(s);
+            let file = section.get("file").and_then(|f| f.as_str()).unwrap_or("");
+            let Some(blocks) = section.get("blocks").and_then(|b| b.as_array()) else {
+                continue;
+            };
+            for block in blocks {
+                if let Some(head) = block.get("head").and_then(|h| h.as_array()) {
+                    for l in head {
+                        if let Some(s) = l.as_str() {
+                            lines.push(format!("{file}: {}", s.trim()));
+                        }
                     }
                 }
             }
@@ -872,12 +882,12 @@ fn curate_issues(issues_json: &str) -> String {
     if lines.is_empty() {
         return "No errors or sanitizer reports were found in the logs.".to_string();
     }
-    let mut s = String::from("Issues found in logs:\n");
+    let mut s = String::from("Issues found in logs (file: line):\n");
     for l in lines.iter().take(40) {
-        s.push_str(l.trim());
+        s.push_str(l);
         s.push('\n');
     }
-    cap_chars(s.trim(), 1200)
+    cap_chars(s.trim(), 1500)
 }
 
 /// Keep the first two whitespace-separated tokens, stripped of surrounding punctuation —
@@ -947,11 +957,15 @@ mod tests {
     }
 
     #[test]
-    fn curate_issues_flattens_lines() {
-        let j = r#"[{"file":"dmesg.log","lines":["BUG: KASAN: slab-use-after-free","x"]}]"#;
+    fn curate_issues_flattens_blocks() {
+        // Must match collect_issues' real shape: [{file, blocks:[{head, trace}]}].
+        let j = r#"[{"file":"baseline/console.log","blocks":[{"head":["BUG: KASAN: slab-use-after-free in reader_fn"],"trace":[]}]}]"#;
         let c = curate_issues(j);
-        assert!(c.contains("Issues found in logs"));
+        assert!(c.contains("Issues found in logs"), "{c}");
         assert!(c.contains("KASAN"));
+        assert!(c.contains("baseline/console.log"), "line is tagged with its file: {c}");
+        // The legacy {file, lines:[...]} shape must NOT silently report 'no errors'
+        // via the wrong key — with the real shape it surfaces the issue.
     }
 
     #[test]
