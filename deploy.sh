@@ -21,7 +21,7 @@
 #                       primary), written to a mode-600 systemd drop-in on the host.
 #                       NEVER committed; e.g.  OPENROUTER_API_KEY=sk-or-... ./deploy.sh
 #   MK_OR_MODELS     space-separated OpenRouter model ids; first is primary
-#                    (default: "z-ai/glm-5.1 nvidia/nemotron-3-ultra-550b-a55b:free")
+#                    (default: "poolside/laguna-xs.2:free nvidia/nemotron-3-ultra-550b-a55b:free")
 #   MK_LLAMA_NICE    nice level for the local llama-server          (default: 19)
 set -euo pipefail
 
@@ -31,7 +31,7 @@ SERVICE="${MK_SERVICE:-mackernel-server.service}"
 BRANCH="${MK_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 REMOTE_PATH="${MK_REMOTE_PATH:-\$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin}"
 OR_KEY="${OPENROUTER_API_KEY:-}"
-OR_MODELS="${MK_OR_MODELS:-z-ai/glm-5.1 nvidia/nemotron-3-ultra-550b-a55b:free}"
+OR_MODELS="${MK_OR_MODELS:-poolside/laguna-xs.2:free nvidia/nemotron-3-ultra-550b-a55b:free}"
 LLAMA_NICE="${MK_LLAMA_NICE:-19}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
