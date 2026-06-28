@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
 import {
-  Candidate, getPeaks, getSummarizer, gib, globalEventsUrl, highlightCss, Job, JobSummary,
-  listCandidates, listJobs, Peak, runCandidate, submit, SummarizerInfo,
+  getPeaks, getSummarizer, gib, globalEventsUrl, highlightCss, Job, JobSummary,
+  listJobs, LkmlPatch, Peak, submit, SummarizerInfo,
 } from "../api";
-import { EXAMPLES } from "../bundle";
+import { EXAMPLES, upsertMeta } from "../bundle";
 import { getTheme, setTheme as persistTheme, Theme } from "../lib/theme";
 import { jobFromPath, statusColor, summaryTip } from "../lib/format";
 import { ModelSwitcher } from "./ModelSwitcher";
 import { BundleModal } from "./BundleModal";
 import { SpecModal } from "./SpecModal";
+import { LkmlBrowser } from "./LkmlBrowser";
 import { PeaksChart } from "./charts";
 import { JobDetail } from "./JobDetail";
 
@@ -18,7 +19,6 @@ const JOB_LIMIT = 20;
 export function Dashboard() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [peaks, setPeaks] = useState<Peak[]>([]);
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [summarizer, setSummarizer] = useState<SummarizerInfo | null>(null);
   const srv = summarizer?.servers ?? [];
   const primaryLabel = srv.find((s) => s.primary)?.label ?? srv[0]?.label ?? "";
@@ -38,6 +38,7 @@ export function Dashboard() {
   }, []);
   const [bundle, setBundle] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [lkmlOpen, setLkmlOpen] = useState(false);
   const [showSpec, setShowSpec] = useState(false);
   const [theme, setTheme] = useState<Theme>(getTheme());
   const toggleTheme = () => {
@@ -54,7 +55,6 @@ export function Dashboard() {
       try {
         setJobs(await listJobs());
         setPeaks(await getPeaks());
-        setCandidates(await listCandidates());
         setSummarizer(await getSummarizer());
       } catch {}
     };
@@ -72,11 +72,14 @@ export function Dashboard() {
     selectJob(id);
   };
 
-  // Run a detected LKML cover letter: the server creates a job from the stored bundle
-  // (thread series applied at build time) and we jump to it.
-  const onRunCandidate = async (c: Candidate) => {
-    const { id } = await runCandidate(c.msgid);
-    selectJob(id);
+  // Pick a patch in the LKML browser: open its cover letter as a reproducer. Inject a
+  // `thread:` key pointing at the lore thread (upsertMeta keeps any existing frontmatter
+  // and just sets thread:, or prepends a new block when the cover letter has none), then
+  // open the edit/preview/run modal.
+  const onPickPatch = (p: LkmlPatch) => {
+    setBundle(upsertMeta(p.body, "thread", p.url));
+    setLkmlOpen(false);
+    setModalOpen(true);
   };
 
   return (
@@ -104,10 +107,16 @@ export function Dashboard() {
         <BundleModal bundle={bundle} theme={theme} onChange={setBundle}
           onRun={onRun} onClose={() => setModalOpen(false)} />
       )}
+      {lkmlOpen && <LkmlBrowser onPick={onPickPatch} onClose={() => setLkmlOpen(false)} />}
       <div className="grid grid-cols-[380px_1fr] gap-4 items-start">
         <div>
           <section className="card">
-            <h2>Submit a bundle</h2>
+            <div className="flex items-center justify-between">
+              <h2>Submit a bundle</h2>
+              {/* Browse lore.kernel.org on demand: pick a list, pick a patch, open its
+                  cover letter as a reproducer (no polling). */}
+              <button className="chip" onClick={() => setLkmlOpen(true)}>Browse LKML</button>
+            </div>
             {/* Pasting a bundle opens the modal — the one place you edit / preview / run. */}
             <input
               className="mb-2.5 w-full box-border rounded-md border border-border bg-bg p-[9px] font-mono text-fg outline-none focus:border-accent"
@@ -128,27 +137,6 @@ export function Dashboard() {
               ))}
             </div>
           </section>
-          {candidates.length > 0 && (
-            <section className="card">
-              <h2>From LKML <span className="text-muted">· {candidates.length} candidate{candidates.length === 1 ? "" : "s"}</span></h2>
-              <ul className="m-0 max-h-70 list-none overflow-auto p-0">
-                {candidates.map((c) => (
-                  <li key={c.msgid} className="flex flex-col gap-0.5 rounded-md px-2 py-1.5">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <a className="text-accent" href={c.source_url} target="_blank" rel="noreferrer"
-                        onClick={(e) => e.stopPropagation()}>{c.title || c.msgid}</a>
-                      {c.list && <span className="text-muted"> · {c.list}</span>}
-                    </div>
-                    <div className="pl-3.5">
-                      {c.job_id != null
-                        ? <button className="chip mt-1" onClick={() => selectJob(c.job_id!)}>view job #{c.job_id}</button>
-                        : <button className="chip mt-1" onClick={() => onRunCandidate(c)}>Run</button>}
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
           <section className="card">
             <h2>Jobs{jobs.length > JOB_LIMIT && <span className="text-muted"> · newest {JOB_LIMIT} of {jobs.length}</span>}</h2>
             <ul className="m-0 max-h-70 list-none overflow-auto p-0">

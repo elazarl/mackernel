@@ -1,85 +1,53 @@
-//! LKML monitor: poll public-inbox Atom feeds, detect cover letters whose
-//! frontmatter matches the reproducer spec, and record them as runnable candidates.
+//! On-demand LKML browse: list recent patch cover letters on a public-inbox list by
+//! reading its Atom feed. No polling — the UI calls `GET /api/lkml/patches?list=…`
+//! when the user picks a list, and opens the chosen cover letter as a reproducer
+//! (injecting a `thread:` key client-side; see ui/src/bundle.ts:upsertMeta).
 //!
-//! Disabled unless `MK_LKML_LISTS` is set (see sched::Cfg). For each watched list we
-//! fetch `<base>/<list>/new.atom`, and for every message we haven't evaluated before
-//! (tracked in the `lkml_seen` table) we fetch its raw text and check for our
-//! metadata block. A match becomes a `candidates` row — listed on the site with a
-//! Run button; nothing builds until a human clicks it (see main.rs:run_candidate).
-//!
-//! The thread's patch series is applied at run time by run-kernel.py: we inject a
-//! `thread:` key (the cover-letter permalink) into the stored bundle so it `git am`s
-//! the `[PATCH n/m]` mails of the thread on top of the bundle's `commit`.
+//! lore.kernel.org sits behind Anubis bot-protection: only `.atom` feeds are reachable,
+//! and only with a User-Agent (a bare request gets HTTP 403). HTML pages, per-message
+//! `raw`, `t.mbox.gz`, and search are all blocked — so we read `<list>/new.atom`, whose
+//! entries already carry the full message body inline (`<content>`), and never touch
+//! those paths.
 
-use std::time::Duration;
+use serde::Serialize;
 
-use tracing::{info, warn};
+/// User-Agent for lore fetches. lore's Anubis bot-protection inverts the usual rule:
+/// it *challenges* browser-looking UAs (`Mozilla/…`) and lets bot UAs through, so we
+/// send a git-style UA — empirically the one that passes every lore path (.atom feeds
+/// and manifest alike). curl's own default UA is rejected.
+const LORE_UA: &str = "git/2.43";
 
-use crate::AppState;
-
-/// Cap on entries processed per (list, poll) so a backfilled feed can't wedge a poll.
-const MAX_PER_POLL: usize = 200;
-/// Metadata keys that make a `---` block count as our frontmatter (mirror of
-/// run-kernel.py's META_KEYS).
-const RECOGNIZED: &[&str] = &["url", "commit", "patch", "arch", "thread"];
-
-/// Background loop: every `cfg.lkml_poll_secs`, poll each watched list. Only spawned
-/// when at least one list is configured.
-pub async fn monitor_loop(st: AppState) {
-    let lists = st.cfg.lkml_lists.clone();
-    let period = st.cfg.lkml_poll_secs.max(30);
-    info!("lkml monitor: watching {:?} every {}s (base {})", lists, period, st.cfg.lkml_base);
-    let mut tick = tokio::time::interval(Duration::from_secs(period));
-    loop {
-        tick.tick().await;
-        for list in &lists {
-            if let Err(e) = poll_list(&st, list).await {
-                warn!("lkml monitor: list {list} poll failed: {e}");
-            }
-        }
-    }
+/// A patch-series root (cover letter) or standalone patch found on a list, ready to be
+/// opened as a reproducer. `body` is the message text (the cover letter == patch 0).
+#[derive(Serialize)]
+pub struct Patch {
+    pub title: String,
+    pub url: String,
+    pub body: String,
 }
 
-async fn poll_list(st: &AppState, list: &str) -> anyhow::Result<()> {
-    let feed_url = format!("{}/{}/new.atom", st.cfg.lkml_base.trim_end_matches('/'), list);
+/// Recent patch cover letters / standalone patches on `list`, newest first. Reads
+/// `<base>/<list>/new.atom` and keeps series roots (`[PATCH 0/N]`, `[PATCH 1/1]`, or a
+/// single `[PATCH]` with no n/m), dropping individual `n/m` patches and replies.
+pub async fn list_patches(base: &str, list: &str) -> anyhow::Result<Vec<Patch>> {
+    let feed_url = format!("{}/{}/new.atom", base.trim_end_matches('/'), list);
     let feed = curl_text(&feed_url).await?;
-    let mut added = 0u32;
-    for (permalink, title) in parse_atom(&feed).into_iter().take(MAX_PER_POLL) {
-        let msgid = msgid_from(&permalink);
-        if msgid.is_empty() || st.db.lkml_seen(&msgid)? {
+    let mut out = Vec::new();
+    for e in parse_entries(&feed) {
+        if !is_series_root(&e.title) {
             continue;
         }
-        // Mark seen before fetching: a fetch failure shouldn't make us retry the same
-        // message every poll forever.
-        st.db.lkml_mark_seen(&msgid, list, crate::now_ms())?;
-        let raw_url = format!("{}raw", ensure_trailing_slash(&permalink));
-        let raw = match curl_text(&raw_url).await {
-            Ok(t) => t,
-            Err(e) => {
-                warn!("lkml: fetch {raw_url} failed: {e}");
-                continue;
-            }
-        };
-        if !has_frontmatter(&raw) {
-            continue;
-        }
-        // Inject the thread permalink so run-kernel.py applies the whole series.
-        let bundle = upsert_thread(&raw, &permalink);
-        st.db.add_candidate(&msgid, list, &title, &permalink, &bundle, crate::now_ms())?;
-        info!("lkml: new candidate from {list}: {title} <{permalink}>");
-        added += 1;
+        out.push(Patch { title: e.title, url: e.permalink, body: xhtml_to_text(&e.content) });
     }
-    if added > 0 {
-        st.bus.publish_global(serde_json::json!({ "kind": "candidates" }).to_string());
-    }
-    Ok(())
+    Ok(out)
 }
 
-/// Fetch a URL as text via curl (the server already shells out to git/python/curl;
-/// this avoids pulling in an HTTP-client dependency). 30s cap; non-2xx -> Err.
+/// Fetch a URL as text via curl with a User-Agent (Anubis returns 403 without one).
+/// 30s cap; non-2xx -> Err. We shell out rather than pull in an HTTP-client dep, like
+/// the rest of the server.
 async fn curl_text(url: &str) -> anyhow::Result<String> {
     let out = tokio::process::Command::new("curl")
-        .args(["-LfsS", "--max-time", "30", url])
+        .args(["-LfsS", "-A", LORE_UA, "--max-time", "30", url])
         .output()
         .await?;
     if !out.status.success() {
@@ -88,31 +56,28 @@ async fn curl_text(url: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// The message id is the last path segment of a lore permalink
-/// (`https://lore.kernel.org/<list>/<msgid>/`) — globally unique, so it dedups
-/// across lists too.
-fn msgid_from(permalink: &str) -> String {
-    permalink.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string()
-}
-
-fn ensure_trailing_slash(url: &str) -> String {
-    if url.ends_with('/') { url.to_string() } else { format!("{url}/") }
-}
-
 // --- Atom feed parsing ------------------------------------------------------
 // public-inbox emits a regular Atom feed: one <entry> per message, each with a
-// <link href="<permalink>"/> and a <title>. We scan for those rather than depend on
-// a full XML parser.
+// <link href="<permalink>"/>, a <title>, and a <content type="xhtml"> body. We scan
+// for those rather than depend on a full XML parser.
 
-/// Extract `(permalink, title)` per `<entry>` in the feed.
-fn parse_atom(feed: &str) -> Vec<(String, String)> {
+struct Entry {
+    permalink: String,
+    title: String,
+    /// Raw (still entity-escaped) XHTML of the message body.
+    content: String,
+}
+
+fn parse_entries(feed: &str) -> Vec<Entry> {
     let mut out = Vec::new();
     for chunk in feed.split("<entry").skip(1) {
         let entry = chunk.split("</entry>").next().unwrap_or(chunk);
-        if let Some(href) = find_attr(entry, "<link", "href") {
-            let title = find_tag_text(entry, "title").unwrap_or_default();
-            out.push((href, title));
-        }
+        let Some(permalink) = find_attr(entry, "<link", "href") else { continue };
+        let title = find_tag_text(entry, "title").unwrap_or_default();
+        // Body is left entity-escaped here; xhtml_to_text strips tags first, then
+        // unescapes — so an entity-escaped `&lt;` in the body isn't mistaken for a tag.
+        let content = tag_inner(entry, "content").unwrap_or_default().to_string();
+        out.push(Entry { permalink, title, content });
     }
     out
 }
@@ -128,13 +93,18 @@ fn find_attr(hay: &str, tag: &str, attr: &str) -> Option<String> {
     Some(xml_unescape(&rest[..rest.find('"')?]))
 }
 
-/// Text content of the first `<tag ...>...</tag>` in `hay`.
-fn find_tag_text(hay: &str, tag: &str) -> Option<String> {
+/// Raw inner text of the first `<tag ...>...</tag>` in `hay` (no unescape).
+fn tag_inner<'a>(hay: &'a str, tag: &str) -> Option<&'a str> {
     let start = hay.find(&format!("<{tag}"))?;
     let after = &hay[start..];
     let after = &after[after.find('>')? + 1..];
     let end = after.find(&format!("</{tag}>"))?;
-    Some(xml_unescape(after[..end].trim()))
+    Some(&after[..end])
+}
+
+/// Unescaped text content of the first `<tag ...>...</tag>` in `hay`.
+fn find_tag_text(hay: &str, tag: &str) -> Option<String> {
+    tag_inner(hay, tag).map(|s| xml_unescape(s.trim()))
 }
 
 fn xml_unescape(s: &str) -> String {
@@ -142,117 +112,53 @@ fn xml_unescape(s: &str) -> String {
         .replace("&#39;", "'").replace("&apos;", "'").replace("&amp;", "&")
 }
 
-// --- frontmatter detection (mirror of run-kernel.py:parse_bundle) ------------
+// --- cover-letter detection + body extraction --------------------------------
 
-/// True if `text` contains a `---`-delimited metadata block (column 0, outside a
-/// fenced code block) whose lines are all `key: value` (or blank) and include at
-/// least one recognized key. Mirrors the spec's parser so detection matches what
-/// run-kernel.py will actually parse.
-fn has_frontmatter(text: &str) -> bool {
-    let lines: Vec<&str> = text.lines().collect();
-    let fenced = fence_mask(&lines);
-    let dashes: Vec<usize> = (0..lines.len())
-        .filter(|&i| lines[i].trim_end() == "---" && !fenced[i])
-        .collect();
-    for w in dashes.windows(2) {
-        if let Some(keys) = parse_kv_keys(&lines[w[0] + 1..w[1]]) {
-            if keys.iter().any(|k| RECOGNIZED.contains(&k.as_str())) {
-                return true;
+/// Is this subject a patch-series root (cover letter / standalone patch) rather than a
+/// follow-on `n/m` patch or a reply? Keeps `[PATCH 0/N]`, `[PATCH 1/1]`, and any
+/// `[PATCH …]` with no `n/m`. (ponytail: keys on `[PATCH`; misses `[RFC PATCH …]`
+/// variants — broaden the marker if that matters.)
+fn is_series_root(title: &str) -> bool {
+    let t = title.trim_start();
+    if t.starts_with("Re:") || t.starts_with("RE:") {
+        return false;
+    }
+    let Some(p) = t.find("[PATCH") else { return false };
+    let close = t[p..].find(']').map(|i| p + i).unwrap_or(t.len());
+    let tag = &t[p..close];
+    match patch_index(tag) {
+        Some((n, m)) => n == 0 || (n == 1 && m == 1),
+        None => true,
+    }
+}
+
+/// The `(n, m)` from an `n/m` token inside a `[PATCH …]` tag, if any.
+fn patch_index(tag: &str) -> Option<(u32, u32)> {
+    for part in tag.split([' ', '[', ']']) {
+        if let Some((a, b)) = part.split_once('/') {
+            if let (Ok(n), Ok(m)) = (a.parse::<u32>(), b.parse::<u32>()) {
+                return Some((n, m));
             }
         }
     }
-    false
+    None
 }
 
-/// Per-line "inside a ``` fence" mask, matching parse_bundle: a line opening with
-/// ``` (3+ backticks) starts a fence, closed by the next bare ```-only line.
-fn fence_mask<S: AsRef<str>>(lines: &[S]) -> Vec<bool> {
-    let mut mask = vec![false; lines.len()];
-    let mut i = 0;
-    while i < lines.len() {
-        if lines[i].as_ref().starts_with("```") {
-            let start = i;
-            i += 1;
-            while i < lines.len() && !is_fence_close(lines[i].as_ref()) {
-                i += 1;
-            }
-            let end = i.min(lines.len() - 1);
-            for m in mask.iter_mut().take(end + 1).skip(start) {
-                *m = true;
-            }
-            i += 1;
-        } else {
-            i += 1;
+/// Convert a public-inbox `<content type="xhtml">` body (a `<div><pre>…</pre></div>`
+/// with URLs wrapped as `<a href=…>url</a>`) to plain text: drop every tag (anchor
+/// text is the URL itself, so this preserves links), then unescape entities last.
+fn xhtml_to_text(xhtml: &str) -> String {
+    let mut out = String::with_capacity(xhtml.len());
+    let mut in_tag = false;
+    for c in xhtml.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
         }
     }
-    mask
-}
-
-fn is_fence_close(l: &str) -> bool {
-    let t = l.trim_end();
-    t.starts_with("```") && t.trim_start_matches('`').is_empty()
-}
-
-/// Parse `key: value` lines; return the keys, or None if any non-blank line isn't a
-/// valid `key: value` (so a thematic-break `---` block of prose is rejected).
-fn parse_kv_keys(block: &[&str]) -> Option<Vec<String>> {
-    let mut keys = Vec::new();
-    for ln in block {
-        let s = ln.trim();
-        if s.is_empty() {
-            continue;
-        }
-        let (k, _v) = s.split_once(':')?;
-        let k = k.trim();
-        let mut chars = k.chars();
-        let first_ok = chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
-        let rest_ok = k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-        if !first_ok || !rest_ok {
-            return None;
-        }
-        keys.push(k.to_string());
-    }
-    Some(keys)
-}
-
-// --- thread-key injection (mirror of bundle.ts:upsertMeta) -------------------
-
-/// Set `thread: <url>` in the bundle's frontmatter: update it in place if present,
-/// insert into the existing block otherwise, or prepend a new block if there is none
-/// (qualifying bundles always have a block, so the prepend branch is a safety net).
-fn upsert_thread(text: &str, url: &str) -> String {
-    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
-    let kv = format!("thread: {url}");
-    if let Some((open, close)) = frontmatter_range(&lines) {
-        for i in open + 1..close {
-            if is_key(&lines[i], "thread") {
-                lines[i] = kv;
-                return lines.join("\n");
-            }
-        }
-        lines.insert(close, kv);
-        return lines.join("\n");
-    }
-    format!("---\n{kv}\n---\n\n{text}")
-}
-
-/// `(open, close)` line indices of the first column-0 `---…---` block outside any
-/// fence, or None.
-fn frontmatter_range(lines: &[String]) -> Option<(usize, usize)> {
-    let fenced = fence_mask(lines);
-    let dashes: Vec<usize> = (0..lines.len())
-        .filter(|&i| lines[i].trim_end() == "---" && !fenced[i])
-        .collect();
-    if dashes.len() >= 2 {
-        Some((dashes[0], dashes[1]))
-    } else {
-        None
-    }
-}
-
-/// True if `line` is a `key:` entry for `key` (e.g. `thread: ...`).
-fn is_key(line: &str, key: &str) -> bool {
-    line.trim().split_once(':').map(|(k, _)| k.trim() == key).unwrap_or(false)
+    xml_unescape(out.trim())
 }
 
 #[cfg(test)]
@@ -260,50 +166,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detects_spec_frontmatter() {
-        let cover = "Subject line\n\n---\ncommit: v6.12\n---\n\n```init:init.sh\n#!/bin/sh\n```\n";
-        assert!(has_frontmatter(cover));
-        let with_thread = "---\nthread: x\narch: x86_64\n---\n";
-        assert!(has_frontmatter(with_thread));
-    }
-
-    #[test]
-    fn ignores_non_frontmatter_dashes() {
-        // A git cover letter's scissors/diffstat `---` separators are not a kv block.
-        let plain = "Some prose\n\n---\n drivers/x.c | 2 +-\n 1 file changed\n---\n";
-        assert!(!has_frontmatter(plain));
-        // `---` inside a fenced code block (a doc example) must be ignored.
-        let fenced = "```\n---\ncommit: v6.12\n---\n```\n";
-        assert!(!has_frontmatter(fenced));
-        // No metadata block at all.
-        assert!(!has_frontmatter("just a normal email body\nwith no metadata\n"));
-    }
-
-    #[test]
-    fn upserts_thread_into_existing_block() {
-        let b = "---\ncommit: v6.12\n---\n\nbody\n";
-        let out = upsert_thread(b, "https://lore.kernel.org/all/abc/");
-        assert!(out.contains("thread: https://lore.kernel.org/all/abc/"));
-        assert!(out.contains("commit: v6.12"));
-        // Re-upsert replaces rather than duplicates.
-        let again = upsert_thread(&out, "https://lore.kernel.org/all/xyz/");
-        assert_eq!(again.matches("thread:").count(), 1);
-        assert!(again.contains("xyz"));
-    }
-
-    #[test]
-    fn parses_atom_entries() {
+    fn parses_atom_entries_with_body() {
         let feed = r#"<feed>
           <entry><title>[PATCH 0/2] fix</title>
-            <link href="https://lore.kernel.org/lkml/msg1@x/"/></entry>
+            <link href="https://lore.kernel.org/lkml/msg1@x/"/>
+            <content type="xhtml"><div><pre>Cover letter body
+with &lt;angle&gt; brackets and a <a href="http://x/">http://x/</a> link.</pre></div></content></entry>
           <entry><title>Re: hi &amp; bye</title>
-            <link href="https://lore.kernel.org/lkml/msg2@x/"/></entry>
+            <link href="https://lore.kernel.org/lkml/msg2@x/"/>
+            <content type="xhtml"><div><pre>reply</pre></div></content></entry>
         </feed>"#;
-        let entries = parse_atom(feed);
+        let entries = parse_entries(feed);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].0, "https://lore.kernel.org/lkml/msg1@x/");
-        assert_eq!(entries[0].1, "[PATCH 0/2] fix");
-        assert_eq!(entries[1].1, "Re: hi & bye");
-        assert_eq!(msgid_from(&entries[1].0), "msg2@x");
+        assert_eq!(entries[0].permalink, "https://lore.kernel.org/lkml/msg1@x/");
+        assert_eq!(entries[0].title, "[PATCH 0/2] fix");
+        let body = xhtml_to_text(&entries[0].content);
+        assert_eq!(body, "Cover letter body\nwith <angle> brackets and a http://x/ link.");
+    }
+
+    #[test]
+    fn keeps_series_roots_drops_followups_and_replies() {
+        assert!(is_series_root("[PATCH 0/9] treewide: cleanup"));
+        assert!(is_series_root("[PATCH v2] mm: single patch"));
+        assert!(is_series_root("[PATCH net 1/1] tcp: bound timers"));
+        assert!(!is_series_root("[PATCH 2/9] mm: one of many"));
+        assert!(!is_series_root("Re: [PATCH 0/2] fix"));
+        assert!(!is_series_root("just a normal email"));
     }
 }

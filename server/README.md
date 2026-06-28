@@ -48,6 +48,11 @@ sandboxed qemu / podman mounts work.
 - `GET /api/jobs/{id}/metrics` — RAM/disk sample time-series (from DuckDB).
 - `GET /api/jobs/{id}/logs/{compile|dmesg|exec}` — the three logs.
 - `GET /api/metrics/peaks` — per-job peak RAM/disk for the overview chart.
+- `GET /api/lkml/patches?list=<name>` — recent patch cover letters on a lore list
+  (`[{title,url,body}]`), backing the UI's **Browse LKML** button. Reads the list's
+  `new.atom` feed on demand (no polling); pick a patch to open its cover letter as a
+  reproducer with a `thread:` key. lore is behind Anubis, so only `.atom` feeds are
+  used, with a `User-Agent`.
 
 ## Scheduler
 A resource-aware admission loop runs queued jobs while the per-job RAM reservation

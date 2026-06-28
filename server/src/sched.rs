@@ -16,10 +16,8 @@ pub struct Cfg {
     pub keep_worktrees: bool,   // skip reclaiming work/<id>/wt on job finish
     pub retention_days: u64,    // delete a finished job's whole dir after this many days
     pub linux_src: std::path::PathBuf, // kernel repo to `git worktree prune`
-    // LKML monitor (see src/lkml.rs). Disabled unless `lkml_lists` is non-empty so we
-    // never poll lore.kernel.org by default.
-    pub lkml_lists: Vec<String>,    // public-inbox list names to watch (MK_LKML_LISTS)
-    pub lkml_poll_secs: u64,        // seconds between polls (MK_LKML_POLL_SECS)
+    // On-demand LKML browse (see src/lkml.rs); no polling. Base URL of the
+    // public-inbox instance the UI lists patches from.
     pub lkml_base: String,          // public-inbox base URL (MK_LKML_BASE)
 }
 
@@ -43,10 +41,6 @@ impl Cfg {
             retention_days: std::env::var("MK_JOB_RETENTION_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(30),
             linux_src: std::path::PathBuf::from(
                 std::env::var("MK_LINUX_SRC").unwrap_or_else(|_| format!("{home}/linux"))),
-            lkml_lists: std::env::var("MK_LKML_LISTS").ok().unwrap_or_default()
-                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
-            lkml_poll_secs: std::env::var("MK_LKML_POLL_SECS").ok()
-                .and_then(|v| v.parse().ok()).unwrap_or(300),
             lkml_base: std::env::var("MK_LKML_BASE").ok()
                 .filter(|s| !s.is_empty()).unwrap_or_else(|| "https://lore.kernel.org".into()),
         }

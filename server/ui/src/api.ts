@@ -101,6 +101,12 @@ export async function listCandidates(): Promise<Candidate[]> {
 export async function runCandidate(msgid: string): Promise<{ id: number }> {
   return (await authed(`/api/candidates/${encodeURIComponent(msgid)}/run`, { method: "POST" })).json();
 }
+// A patch-series cover letter (or standalone patch) on a lore list, from the on-demand
+// LKML browser. `body` is the cover-letter text — the reproducer-to-be.
+export interface LkmlPatch { title: string; url: string; body: string; }
+export async function listLkmlPatches(list: string): Promise<LkmlPatch[]> {
+  return (await authed(`/api/lkml/patches?list=${encodeURIComponent(list)}`)).json();
+}
 export async function getMetrics(id: number): Promise<Sample[]> {
   return (await authed(`/api/jobs/${id}/metrics`)).json();
 }
