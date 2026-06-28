@@ -130,6 +130,13 @@ function Dashboard() {
   const [peaks, setPeaks] = useState<Peak[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [summarizer, setSummarizer] = useState<SummarizerInfo | null>(null);
+  // Which backend's summaries the whole app shows (global model switcher in the
+  // topbar). Defaults to the primary once the summarizer reports its servers.
+  const srv = summarizer?.servers ?? [];
+  const primaryLabel = srv.find((s) => s.primary)?.label ?? srv[0]?.label ?? "";
+  const [view, setView] = useState("");
+  useEffect(() => { if (!view && primaryLabel) setView(primaryLabel); }, [primaryLabel]);
+  const selModel = srv.find((s) => s.label === view)?.model ?? view;
   // Selected job mirrors the URL (/job/ID) so jobs are linkable and back/forward work.
   const [sel, setSel] = useState<number | null>(jobFromPath);
   const selectJob = (id: number | null) => {
@@ -194,12 +201,24 @@ function Dashboard() {
         <button className="linkbtn" onClick={() => setShowSpec(true)}>Spec</button>
         <button className="linkbtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light" : "🌙 Dark"}</button>
         {summarizer && (
-          <span className="muted summarizer"
-            title={(summarizer.servers ?? []).map((s) => `${s.label} (${s.model})${s.primary ? " — primary" : ""}`).join("\n")
-              || `${summarizer.label} summarizer, resident size incl. KV cache`}>
-            🧠 {summarizer.loaded
-              ? `${summarizer.label}${(summarizer.servers?.length ?? 0) > 1 ? ` · ${summarizer.servers!.length} models` : ""} · ${gib(summarizer.mem_bytes)} GB`
-              : "warming up…"}
+          <span className="muted summarizer">
+            🧠{" "}
+            {!summarizer.loaded ? "warming up…"
+              : srv.length > 1 ? (
+                <>
+                  {/* Global model switcher: changes which backend's summaries the
+                      whole app shows. Tooltip is the selected model's full id. */}
+                  <select className="modelswitch" value={view} title={selModel}
+                    onChange={(e) => setView(e.target.value)}>
+                    {srv.map((s) => (
+                      <option key={s.label} value={s.label} title={s.model}>
+                        {s.label}{s.primary ? " (primary)" : ""}
+                      </option>
+                    ))}
+                  </select>
+                  {` · ${srv.length} models · ${gib(summarizer.mem_bytes)} GB`}
+                </>
+              ) : `${summarizer.label} · ${gib(summarizer.mem_bytes)} GB`}
           </span>
         )}
       </div>
@@ -288,7 +307,7 @@ function Dashboard() {
         <div className="right">
           {sel == null ? <p className="muted">Select a job to see live progress, metrics, and logs.</p>
             : <JobDetail id={sel} summarizerReady={summarizer?.loaded ?? false}
-                servers={summarizer?.servers ?? []}
+                servers={srv} view={view}
                 onEdit={(text) => { setBundle(text); setModalOpen(true); }} />}
         </div>
       </div>
@@ -298,8 +317,8 @@ function Dashboard() {
 
 type IssueSection = { file: string; blocks: { head: string[]; trace: string[] }[] };
 
-function JobDetail({ id, summarizerReady, servers, onEdit }:
-  { id: number; summarizerReady: boolean; servers: SummarizerInfo["servers"]; onEdit: (text: string) => void }) {
+function JobDetail({ id, summarizerReady, servers, view, onEdit }:
+  { id: number; summarizerReady: boolean; servers: SummarizerInfo["servers"]; view: string; onEdit: (text: string) => void }) {
   const [job, setJob] = useState<Job | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
@@ -310,8 +329,6 @@ function JobDetail({ id, summarizerReady, servers, onEdit }:
   const [summaries, setSummaries] = useState<JobSummary[]>([]);
   const srv = servers ?? [];
   const primaryLabel = srv.find((s) => s.primary)?.label ?? srv[0]?.label ?? "";
-  const [view, setView] = useState("");
-  useEffect(() => { setView(primaryLabel); }, [primaryLabel, id]);
   const isPrimary = !view || view === primaryLabel;
   const selModel = srv.find((s) => s.label === view)?.model ?? view;
   const byServer = useMemo(() => {
@@ -422,22 +439,8 @@ function JobDetail({ id, summarizerReady, servers, onEdit }:
         <IssuesCard id={id} status={job?.status} />
       )}
       <section className="card">
-        <div className="cardhead">
-          <h2 style={{ margin: 0 }}>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
-            {cmp && <span className="muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
-          {/* Switch the whole view between backends; the select's tooltip is the
-              selected model's full id. */}
-          {srv.length > 1 && (
-            <select className="modelswitch" value={view} title={selModel}
-              onChange={(e) => setView(e.target.value)}>
-              {srv.map((s) => (
-                <option key={s.label} value={s.label} title={s.model}>
-                  {s.label}{s.primary ? " (primary)" : ""}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
+        <h2>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
+          {cmp && <span className="muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
         <div className="stepper">
           {PHASES.map((p) => (
             <span key={p} className={"step " + stepClass(job, p)}>{p}</span>
