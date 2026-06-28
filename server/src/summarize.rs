@@ -53,16 +53,28 @@ const REPEAT_LAST_N: usize = 64;
 /// local non-reasoning model keeps its tight per-field caps.
 const REMOTE_REASONING_HEADROOM: usize = 1024;
 
+/// Per-file cap (chars) for logs attached to the end-of-job `detail` prompt. The cap
+/// is per backend: the local model has a small context window (`CTX_SIZE`/2 per slot)
+/// so its logs stay tight; remote backends have far larger contexts (e.g. 262K–1M
+/// tokens) and get near-full logs so late lines (the KASAN `BUG:`, the run outcome)
+/// are never truncated away. Remote stays bounded so a pathological multi-MB build log
+/// can't overflow even a big context.
+const LOCAL_LOG_CAP: usize = 10_000;
+const REMOTE_LOG_CAP: usize = 200_000;
+
 const GGUF_REPO: &str = "bartowski/Phi-3.5-mini-instruct-GGUF";
 const GGUF_FILE: &str = "Phi-3.5-mini-instruct-Q4_K_M.gguf";
 /// Human-readable model label, surfaced in logs and `/api/summarizer`.
 pub const LABEL: &str = "phi3.5-mini";
 
-/// Total context window. llama-server SPLITS this across the `--parallel` slots, so
-/// with 2 slots each gets CTX_SIZE/2. The `detail` prompt (bundle + ~10k chars of
-/// curated logs ≈ 3-4k tokens) plus 400 generated must fit one slot, so 16384 → 8192
-/// per slot. (At 8192 total, the 4096/slot overflowed and `detail` was rejected.)
-const CTX_SIZE: usize = 16384;
+/// Total context window (KV cache). llama-server SPLITS this across the `--parallel`
+/// slots, so with 2 slots each gets CTX_SIZE/2 = 16384 tokens. Sized so the `detail`
+/// prompt — repro spec + the per-file-capped logs for the LOCAL backend (see
+/// `LOCAL_LOG_CAP`) ≈ 10k tokens — plus 400 generated fits one slot with margin.
+/// Bumped 16384 → 32768 (≈ +3 GB KV RAM on the home box, which has headroom) so the
+/// local model can take the larger labeled-log prompts. Remote backends have their
+/// own (much larger) context and get fuller logs (see `REMOTE_LOG_CAP`).
+const CTX_SIZE: usize = 32768;
 /// How long to wait for the server to come up. The first-ever boot blocks here
 /// while llama-server downloads the ~2.5 GB GGUF (measured ~15 min on a home
 /// link); cached boots are ~30s. Generous so a cold download doesn't get killed.
@@ -244,7 +256,10 @@ impl Summarizer {
         logs_dir: &Path,
         on_tok: &dyn Fn(u32),
     ) -> Result<(String, GenStats)> {
-        let user = curate_end_context(bundle_md, logs_dir);
+        // Per-backend log cap: remote backends (api_key set) have huge contexts and
+        // get near-full logs; the local model stays tight to fit its slot.
+        let cap = if b.api_key.is_some() { REMOTE_LOG_CAP } else { LOCAL_LOG_CAP };
+        let user = curate_end_context(bundle_md, logs_dir, cap);
         self.generate(b, SYS_DETAIL, &user, 400, false, on_tok)
     }
 
@@ -675,7 +690,7 @@ fn read_log_capped(logs_dir: &Path, name: &str, cap: usize) -> Option<String> {
 /// with a plain-language explanation of what it is, so the model knows what each
 /// attachment is. Capped per file so the prompt stays bounded (prefill cost scales
 /// with length).
-fn curate_end_context(bundle_md: &str, logs_dir: &Path) -> String {
+fn curate_end_context(bundle_md: &str, logs_dir: &Path, log_cap: usize) -> String {
     let mut out = String::new();
     out.push_str("This is the reproducer you are using (the spec submitted to the runner):\n");
     out.push_str(&curate_bundle(bundle_md));
@@ -691,12 +706,11 @@ fn curate_end_context(bundle_md: &str, logs_dir: &Path) -> String {
           `BUG:` can hang or panic the kernel, so an SSH hang or timeout here is expected and \
           signals reproduction — not an infrastructure failure:"),
     ];
-    // 8000 chars/file: the decisive lines land late (the KASAN `BUG:` is ~7k bytes
-    // into console.log after the boot/cloud-init spam; run.log's SSH-connect + outcome
-    // are at its end), so a tight head cap chopped them off. Still fits the local
-    // model's per-slot context (bundle + 3 logs + 400 generated < 8192 tokens).
+    // The decisive lines land late (the KASAN `BUG:` is ~7k bytes into console.log
+    // after the boot/cloud-init spam; run.log's SSH-connect + outcome are at its end),
+    // so the cap must be generous enough to reach them — hence the large REMOTE cap.
     for (file, label) in ATTACH {
-        if let Some(c) = read_log_capped(logs_dir, file, 8000) {
+        if let Some(c) = read_log_capped(logs_dir, file, log_cap) {
             out.push_str(label);
             out.push('\n');
             out.push_str(&c);
@@ -861,7 +875,7 @@ mod tests {
         // console.log only exists per-variant (compare job) -> baseline fallback.
         std::fs::write(dir.join("baseline").join("console.log"), "BUG: KASAN: slab-use-after-free").unwrap();
         std::fs::write(dir.join("run.log"), "ssh: running repro").unwrap();
-        let c = curate_end_context("# bug\nProse only.\n", &dir);
+        let c = curate_end_context("# bug\nProse only.\n", &dir, 8000);
         assert!(c.contains("reproducer you are using"), "{c}");
         assert!(c.contains("compiles the kernel") && c.contains("fatal error xyz"));
         assert!(c.contains("dmesg from the serial port") && c.contains("KASAN"), "baseline fallback: {c}");
