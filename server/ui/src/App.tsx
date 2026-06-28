@@ -425,15 +425,17 @@ function JobDetail({ id, summarizerReady, servers, onEdit }:
         <div className="cardhead">
           <h2 style={{ margin: 0 }}>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
             {cmp && <span className="muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
-          {/* Switch the whole view between backends; hover an option for its model id. */}
+          {/* Switch the whole view between backends; the select's tooltip is the
+              selected model's full id. */}
           {srv.length > 1 && (
-            <span className="tabs modelswitch" title="Show summaries from this model">
+            <select className="modelswitch" value={view} title={selModel}
+              onChange={(e) => setView(e.target.value)}>
               {srv.map((s) => (
-                <button key={s.label} title={`${s.model}${s.primary ? " · primary" : ""}`}
-                  className={s.label === view ? "tab active" : "tab"}
-                  onClick={() => setView(s.label)}>{s.label}</button>
+                <option key={s.label} value={s.label} title={s.model}>
+                  {s.label}{s.primary ? " (primary)" : ""}
+                </option>
               ))}
-            </span>
+            </select>
           )}
         </div>
         <div className="stepper">
@@ -798,8 +800,10 @@ const CSS = `
   .candactions { padding-left: 14px; } .candactions .chip { margin-top: 4px; }
   .summary { background: var(--subtle); border-left: 3px solid var(--accent, #58a6ff);
              padding: 8px 10px; border-radius: 6px; margin: 8px 0; line-height: 1.4; }
-  .modelswitch { gap: 4px; flex-wrap: wrap; }
-  .modelswitch .tab { font-family: ui-monospace, monospace; font-size: 11px; padding: 3px 8px; }
+  .modelswitch { background: var(--subtle); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 6px; font-family: ui-monospace, monospace; font-size: 12px;
+    padding: 4px 8px; margin: 0; cursor: pointer; max-width: 240px; }
+  .modelswitch:focus { outline: none; border-color: var(--accent); }
   .detail { white-space: pre-wrap; line-height: 1.5; margin: 0; }
   .summarizer { margin-left: auto; font-size: .85em; }
   .shorttitle { color: var(--accent, #58a6ff); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
