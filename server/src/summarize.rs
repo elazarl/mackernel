@@ -691,8 +691,12 @@ fn curate_end_context(bundle_md: &str, logs_dir: &Path) -> String {
           `BUG:` can hang or panic the kernel, so an SSH hang or timeout here is expected and \
           signals reproduction — not an infrastructure failure:"),
     ];
+    // 8000 chars/file: the decisive lines land late (the KASAN `BUG:` is ~7k bytes
+    // into console.log after the boot/cloud-init spam; run.log's SSH-connect + outcome
+    // are at its end), so a tight head cap chopped them off. Still fits the local
+    // model's per-slot context (bundle + 3 logs + 400 generated < 8192 tokens).
     for (file, label) in ATTACH {
-        if let Some(c) = read_log_capped(logs_dir, file, 2500) {
+        if let Some(c) = read_log_capped(logs_dir, file, 8000) {
             out.push_str(label);
             out.push('\n');
             out.push_str(&c);
