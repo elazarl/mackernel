@@ -686,7 +686,10 @@ fn curate_end_context(bundle_md: &str, logs_dir: &Path) -> String {
          "This compiles the kernel, the out-of-tree module, and the userspace from the reproducer:"),
         ("console.log", "This is the dmesg from the serial port:"),
         ("run.log",
-         "This is the ssh session running the userspace program (or the kernel module, if one exists):"),
+         "This is the orchestrator log: it connects to the VM over SSH and runs the user's \
+          commands (the userspace program, or the kernel module if one exists). A reproduced \
+          `BUG:` can hang or panic the kernel, so an SSH hang or timeout here is expected and \
+          signals reproduction — not an infrastructure failure:"),
     ];
     for (file, label) in ATTACH {
         if let Some(c) = read_log_capped(logs_dir, file, 2500) {
@@ -858,7 +861,7 @@ mod tests {
         assert!(c.contains("reproducer you are using"), "{c}");
         assert!(c.contains("compiles the kernel") && c.contains("fatal error xyz"));
         assert!(c.contains("dmesg from the serial port") && c.contains("KASAN"), "baseline fallback: {c}");
-        assert!(c.contains("ssh session") && c.contains("running repro"));
+        assert!(c.contains("orchestrator log") && c.contains("SSH") && c.contains("running repro"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
