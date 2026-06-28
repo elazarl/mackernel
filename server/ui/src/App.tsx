@@ -107,7 +107,7 @@ function Unlock({ onUnlock }: { onUnlock: () => void }) {
   return (
     <div className="wrap">
       <style>{CSS}</style>
-      <h1>mackernel — reproducer runner</h1>
+      <h1>Kernel Reproducer Runner</h1>
       <section className="card unlock">
         <h2>Unlock</h2>
         <p className="muted">Enter the commit hash of the <code>v7.1</code> tag to continue.</p>
@@ -197,7 +197,7 @@ function Dashboard() {
       <style>{CSS}</style>
       {hlCss && <style>{hlCss}</style>}
       <div className="topbar">
-        <h1>mackernel — reproducer runner</h1>
+        <h1 className="homelink" title="Home" onClick={() => selectJob(null)}>Kernel Reproducer Runner</h1>
         <button className="linkbtn" onClick={() => setShowSpec(true)}>Spec</button>
         <button className="linkbtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light" : "🌙 Dark"}</button>
         {summarizer && (
@@ -821,6 +821,7 @@ const CSS = `
   .tab { background: var(--subtle); color: var(--fg); margin: 0; } .tab.active { background: var(--tab-active); color: #fff; }
   .log { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; max-height: 360px; overflow: auto; white-space: pre-wrap; font-family: ui-monospace, monospace; font-size: 12px; }
   .topbar { display: flex; align-items: baseline; gap: 12px; }
+  .homelink { cursor: pointer; } .homelink:hover { color: var(--accent); }
   .cardhead { display: flex; align-items: center; justify-content: space-between; }
   .linkbtn { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; margin: 0; font-size: 13px; text-decoration: underline; }
   .preview { margin-bottom: 8px; }

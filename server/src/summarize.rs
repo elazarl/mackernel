@@ -233,9 +233,10 @@ impl Summarizer {
         self.generate(b, SYS_RESULT, &user, 96, false, on_tok)
     }
 
-    /// Markdown "why it failed", reading the bundle plus all labeled logs (job end).
-    /// Returns GitHub-flavored Markdown (a `## Summary` / `## Root cause` /
-    /// `## Evidence` document) as a string; the DB stores it verbatim.
+    /// Markdown analysis of the run (job end). The user message is the reproducer
+    /// spec plus the key logs, each prefixed with a plain-language explanation of
+    /// what it is (see `curate_end_context`). Returns GitHub-flavored Markdown; the
+    /// DB stores it verbatim.
     pub fn detail(
         &self,
         b: &Backend,
@@ -243,7 +244,7 @@ impl Summarizer {
         logs_dir: &Path,
         on_tok: &dyn Fn(u32),
     ) -> Result<(String, GenStats)> {
-        let user = format!("{}\n\n{}", curate_bundle(bundle_md), curate_logs(logs_dir));
+        let user = curate_end_context(bundle_md, logs_dir);
         self.generate(b, SYS_DETAIL, &user, 400, false, on_tok)
     }
 
@@ -656,36 +657,46 @@ fn rss_of(pid: u32) -> u64 {
         .unwrap_or(0)
 }
 
-/// Read each known log file, label it with context, and cap per-file + overall so the
-/// detail prompt stays bounded (model prefill cost scales with prompt length).
-/// ponytail: per-file ~2.5k chars, total ~10k; raise if detail JSON quality suffers.
-fn curate_logs(logs_dir: &Path) -> String {
-    const LOGS: &[(&str, &str)] = &[
-        (
-            "compile.log",
-            "This is the kernel compilation through podman:",
-        ),
-        ("dmesg.log", "This is the dmesg from the VM serial:"),
-        ("console.log", "This is the raw VM serial console:"),
-        ("exec.log", "This is the in-VM reproducer execution log:"),
-        ("run.log", "This is the orchestrator (run-kernel.py) log:"),
-        ("fetch.log", "This is the kernel source fetch log:"),
-    ];
-    let mut out = String::new();
-    for (file, label) in LOGS {
-        let Ok(content) = std::fs::read_to_string(logs_dir.join(file)) else {
-            continue;
-        };
-        let content = content.trim();
-        if content.is_empty() {
-            continue;
+/// Read `name` from the logs dir, or its `baseline/` subdir for compare jobs (whose
+/// per-variant logs nest there), trimmed and capped. None if absent/empty.
+fn read_log_capped(logs_dir: &Path, name: &str, cap: usize) -> Option<String> {
+    for cand in [logs_dir.join(name), logs_dir.join("baseline").join(name)] {
+        if let Ok(c) = std::fs::read_to_string(&cand) {
+            let c = c.trim();
+            if !c.is_empty() {
+                return Some(cap_chars(c, cap));
+            }
         }
-        out.push_str(label);
-        out.push('\n');
-        out.push_str(&cap_chars(content, 2500));
-        out.push_str("\n\n");
     }
-    cap_chars(out.trim(), 10000)
+    None
+}
+
+/// End-of-job analysis context: the reproducer spec plus the key logs, each prefixed
+/// with a plain-language explanation of what it is, so the model knows what each
+/// attachment is. Capped per file so the prompt stays bounded (prefill cost scales
+/// with length).
+fn curate_end_context(bundle_md: &str, logs_dir: &Path) -> String {
+    let mut out = String::new();
+    out.push_str("This is the reproducer you are using (the spec submitted to the runner):\n");
+    out.push_str(&curate_bundle(bundle_md));
+    out.push_str("\n\n");
+
+    const ATTACH: &[(&str, &str)] = &[
+        ("compile.log",
+         "This compiles the kernel, the out-of-tree module, and the userspace from the reproducer:"),
+        ("console.log", "This is the dmesg from the serial port:"),
+        ("run.log",
+         "This is the ssh session running the userspace program (or the kernel module, if one exists):"),
+    ];
+    for (file, label) in ATTACH {
+        if let Some(c) = read_log_capped(logs_dir, file, 2500) {
+            out.push_str(label);
+            out.push('\n');
+            out.push_str(&c);
+            out.push_str("\n\n");
+        }
+    }
+    out.trim().to_string()
 }
 
 /// Reproducer bundles are mostly C source inside code fences; for a short summary we
@@ -836,21 +847,18 @@ mod tests {
     }
 
     #[test]
-    fn curate_logs_labels_and_caps() {
-        let dir = std::env::temp_dir().join(format!("mk_curate_logs_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn end_context_labels_attachments_and_falls_back_to_baseline() {
+        let dir = std::env::temp_dir().join(format!("mk_end_ctx_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("baseline")).unwrap();
         std::fs::write(dir.join("compile.log"), "gcc: fatal error xyz").unwrap();
-        std::fs::write(dir.join("dmesg.log"), "d".repeat(9000)).unwrap();
-        std::fs::write(dir.join("console.log"), "   ").unwrap(); // blank → skipped
-        let c = curate_logs(&dir);
-        assert!(c.contains("kernel compilation through podman"), "{c}");
-        assert!(c.contains("dmesg from the VM serial"));
-        assert!(c.contains("fatal error xyz"));
-        assert!(
-            !c.contains("raw VM serial console"),
-            "blank log should be skipped"
-        );
-        assert!(c.chars().count() <= 10_001, "overall cap");
+        // console.log only exists per-variant (compare job) -> baseline fallback.
+        std::fs::write(dir.join("baseline").join("console.log"), "BUG: KASAN: slab-use-after-free").unwrap();
+        std::fs::write(dir.join("run.log"), "ssh: running repro").unwrap();
+        let c = curate_end_context("# bug\nProse only.\n", &dir);
+        assert!(c.contains("reproducer you are using"), "{c}");
+        assert!(c.contains("compiles the kernel") && c.contains("fatal error xyz"));
+        assert!(c.contains("dmesg from the serial port") && c.contains("KASAN"), "baseline fallback: {c}");
+        assert!(c.contains("ssh session") && c.contains("running repro"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
