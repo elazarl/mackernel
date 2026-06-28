@@ -17,10 +17,11 @@
 #   MK_BRANCH        branch to deploy                   (default: current branch)
 #   MK_REMOTE_PATH   PATH to use on the host (cargo)     (default: ~/.cargo/bin + system)
 #   MK_NO_PUSH=1     skip `git push` (deploy what the host can already pull)
-#   OPENROUTER_API_KEY  if set, adds an OpenRouter (free model) summary backend as
-#                       primary, written to a mode-600 systemd drop-in on the host.
+#   OPENROUTER_API_KEY  if set, adds OpenRouter summary backend(s) (the first is
+#                       primary), written to a mode-600 systemd drop-in on the host.
 #                       NEVER committed; e.g.  OPENROUTER_API_KEY=sk-or-... ./deploy.sh
-#   MK_OR_MODEL      OpenRouter model id              (default: openai/gpt-oss-20b:free)
+#   MK_OR_MODELS     space-separated OpenRouter model ids; first is primary
+#                    (default: "z-ai/glm-5.1 nvidia/nemotron-3-ultra-550b-a55b:free")
 #   MK_LLAMA_NICE    nice level for the local llama-server          (default: 19)
 set -euo pipefail
 
@@ -30,7 +31,7 @@ SERVICE="${MK_SERVICE:-mackernel-server.service}"
 BRANCH="${MK_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 REMOTE_PATH="${MK_REMOTE_PATH:-\$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin}"
 OR_KEY="${OPENROUTER_API_KEY:-}"
-OR_MODEL="${MK_OR_MODEL:-openai/gpt-oss-20b:free}"
+OR_MODELS="${MK_OR_MODELS:-z-ai/glm-5.1 nvidia/nemotron-3-ultra-550b-a55b:free}"
 LLAMA_NICE="${MK_LLAMA_NICE:-19}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -74,11 +75,20 @@ rsync -az --delete "$HERE/server/ui/dist/" "$HOST:$REMOTE_REPO/server/ui/dist/"
 DROPIN="[Service]
 Environment=MK_LLAMA_NICE=${LLAMA_NICE}"
 if [[ -n "$OR_KEY" ]]; then
-  SERVERS_SPEC="label=openrouter,base_url=https://openrouter.ai/api/v1,model=${OR_MODEL},api_key_env=OPENROUTER_API_KEY,primary=true"
+  # One backend per model (';'-separated entries); the first model is primary. Label
+  # is the model basename minus ':free' (full id shows in the UI tooltip).
+  read -ra _models <<< "$OR_MODELS"
+  SERVERS_SPEC=""; first=true
+  for m in "${_models[@]}"; do
+    label="${m##*/}"; label="${label%:free}"
+    if $first; then prim=true; first=false; else prim=false; fi
+    entry="label=${label},base_url=https://openrouter.ai/api/v1,model=${m},api_key_env=OPENROUTER_API_KEY,primary=${prim}"
+    SERVERS_SPEC="${SERVERS_SPEC:+$SERVERS_SPEC;}$entry"
+  done
   DROPIN+="
 Environment=MK_OPENAI_SERVERS=${SERVERS_SPEC}
 Environment=OPENROUTER_API_KEY=${OR_KEY}"
-  log "configure backends on $HOST: local phi3.5 (nice ${LLAMA_NICE}) + OpenRouter primary (${OR_MODEL})"
+  log "configure backends on $HOST: local phi3.5 (nice ${LLAMA_NICE}) + OpenRouter [${OR_MODELS}] (first=primary)"
 else
   log "configure backends on $HOST: local phi3.5 only (nice ${LLAMA_NICE}); set OPENROUTER_API_KEY to add OpenRouter"
 fi
