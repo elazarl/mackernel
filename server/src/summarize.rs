@@ -37,12 +37,15 @@ const SYS_TITLE: &str =
     "Reply with exactly two words — a terse title — and nothing else. No punctuation, no preamble.";
 const SYS_REPRO: &str = "The job has only just started and has no results yet. Reply with exactly one short sentence describing what the reproducer tests. No preamble.";
 const SYS_RESULT: &str = r#"Reply with exactly one short sentence and no preamble describing what actually happened on this run — whether it reproduced and the outcome."#;
-const SYS_DETAIL: &str = r#"Reply ONLY with concise GitHub-flavored Markdown and no preamble.
-Reply with GitHub-flavored. Analyze why this run failed and what it did.
+const SYS_DETAIL: &str = r#"You are analyzing a Linux kernel bug reproducer run. You are given the reproducer's source code and the run logs.
 
-Include evidence excerpts from the log for each analysis line.
-Explain where this log came from (serial port dmesg, compilation of kernel, userspace run, etc)
-"#;
+Read the reproducer code and the logs, then explain:
+1. What the reproducer does and how it tries to trigger the bug.
+2. What actually happened on this run (did it reproduce, and the outcome).
+
+Support your explanation with evidence: quote the most relevant lines of the reproducer code AND the most relevant dmesg/console lines. Use fenced code blocks for quotes.
+
+Reply ONLY in concise GitHub-flavored Markdown, no preamble."#;
 
 const REPEAT_PENALTY: f32 = 1.1;
 const REPEAT_LAST_N: usize = 64;
@@ -799,8 +802,9 @@ fn read_log_capped(logs_dir: &Path, name: &str, cap: usize) -> Option<String> {
 /// with length).
 fn curate_end_context(bundle_md: &str, logs_dir: &Path, log_cap: usize) -> String {
     let mut out = String::new();
-    out.push_str("This is the reproducer you are using (the spec submitted to the runner):\n");
-    out.push_str(&curate_bundle(bundle_md));
+    // Raw bundle (NOT code-stripped) so the model can quote the reproducer's source.
+    out.push_str("This is the reproducer you are using — its full source (code, config, run script) as submitted to the runner. Quote the relevant code in your analysis:\n");
+    out.push_str(&cap_chars(bundle_md.trim(), log_cap));
     out.push_str("\n\n");
 
     const ATTACH: &[(&str, &str)] = &[
