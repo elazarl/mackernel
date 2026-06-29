@@ -12,9 +12,11 @@ FROM ${BASE}
 
 # opencode talks HTTPS to its model gateway and curl fetches lore patches, so the
 # image needs a CA bundle. The official installer drops a prebuilt binary (per-arch)
-# into ~/.opencode/bin -- no node/bun runtime needed. Pin OPENCODE_VERSION for a
-# reproducible image (empty = latest at build time).
-ARG OPENCODE_VERSION=
+# into ~/.opencode/bin -- no node/bun runtime needed. Pinned (not empty): an empty
+# value makes the installer query the unauthenticated api.github.com for "latest",
+# which is rate-limited per-IP and flakes on CI runners ("Failed to fetch version
+# information"). A pinned version downloads the release asset directly, no API call.
+ARG OPENCODE_VERSION=1.17.11
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
       curl ca-certificates unzip \
  && VERSION="${OPENCODE_VERSION}" curl -fsSL https://opencode.ai/install | bash \
