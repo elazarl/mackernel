@@ -71,6 +71,17 @@ export function setToken(t: string) {
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
+
+// A direct link can carry the bearer in the URL fragment as #rev=<commit>, so shared
+// links unlock without the password prompt (the server now accepts a >=8-char prefix
+// of the v7.1 commit). The fragment is never sent to the server. Runs at module load,
+// before App reads hasToken(); clear the hash afterward so the secret doesn't linger
+// in the address bar or get copied out of it.
+const rev = new URLSearchParams(location.hash.slice(1)).get("rev");
+if (rev) {
+  setToken(rev);
+  history.replaceState(null, "", location.pathname + location.search);
+}
 function headers(): HeadersInit {
   const t = token();
   return t ? { Authorization: `Bearer ${t}` } : {};

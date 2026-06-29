@@ -618,11 +618,20 @@ async fn require_auth(State(st): State<AppState>, req: Request, next: Next) -> R
                 q.split('&').find_map(|kv| kv.strip_prefix("token=").map(str::to_string))
             })
         });
-    if presented.as_deref() == Some(expected.as_str()) {
+    if presented.as_deref().is_some_and(|p| token_ok(p, expected)) {
         Ok(next.run(req).await)
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+/// Accept the full token, or any prefix of it that is at least 8 chars long. The
+/// token is the v7.1 commit hash, so this lets a short git SHA (e.g. `8cd9520d`)
+/// authenticate without pasting all 40 hex chars.
+// ponytail: an 8-char hex prefix is ~4B guesses, not a real secret; raise the floor
+// or drop prefix matching if this ever guards anything sensitive.
+fn token_ok(presented: &str, expected: &str) -> bool {
+    presented == expected || (presented.len() >= 8 && expected.starts_with(presented))
 }
 
 pub(crate) fn ise<E: std::fmt::Display>(e: E) -> StatusCode {
@@ -1050,5 +1059,16 @@ mod tests {
         let nv: serde_json::Value = serde_json::from_str(&none).unwrap();
         assert!(nv.as_array().unwrap().iter().all(|s| s["file"] != "console.log (watched)"), "{none}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn token_ok_accepts_full_and_six_char_prefix() {
+        let real = "8cd9520d35a6c38db6567e97dd93b1f11f185dc6";
+        assert!(token_ok(real, real), "exact match");
+        assert!(token_ok("8cd9520d3", real), "9-char prefix");
+        assert!(token_ok("8cd9520d", real), "exactly 8 chars");
+        assert!(!token_ok("8cd9520", real), "7 chars is too short");
+        assert!(!token_ok("deadbeef", real), "non-prefix is rejected");
+        assert!(!token_ok("", real), "empty is rejected");
     }
 }
