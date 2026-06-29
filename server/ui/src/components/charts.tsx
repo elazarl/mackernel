@@ -27,9 +27,9 @@ export function ResourceChart(
   { samples, t0, phaseTs }: { samples: Sample[]; t0: number; phaseTs: Record<string, number> },
 ) {
   const data = samples.map((s) => ({
-    t: Math.max(0, Math.round(((s.ts_ms ?? (s as any).ts_ms) - t0) / 1000)),
-    RAM: +mib(s.rss_bytes ?? (s as any).rss),
-    Disk: +mib(s.disk_bytes ?? (s as any).disk),
+    t: Math.max(0, Math.round((s.ts_ms - t0) / 1000)),
+    RAM: +mib(s.rss_bytes),
+    Disk: +mib(s.disk_bytes),
   }));
   const marks = Object.entries(phaseTs)
     .map(([phase, ts]) => ({ phase, t: Math.max(0, Math.round((ts - t0) / 1000)) }))

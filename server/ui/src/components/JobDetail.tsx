@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -35,14 +35,15 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit }:
   const primaryLabel = srv.find((s) => s.primary)?.label ?? srv[0]?.label ?? "";
   const isPrimary = !view || view === primaryLabel;
   const selModel = srv.find((s) => s.label === view)?.model ?? view;
-  const byServer = useMemo(() => {
+  // React Compiler memoizes this; it rebuilds only when `summaries` changes.
+  const byServer = (() => {
     const m = new Map<string, Map<string, JobSummary>>();
     for (const s of summaries) {
       if (!m.has(s.server)) m.set(s.server, new Map());
       m.get(s.server)!.set(s.field, s);
     }
     return m;
-  }, [summaries]);
+  })();
   const cell = (field: string) => byServer.get(view)?.get(field);
   // One-line summary for a non-primary backend (tooltip carries model · time · tokens).
   const serverLine = (field: string, icon: string) => {
@@ -53,8 +54,8 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit }:
   };
   const [phaseTs, setPhaseTs] = useState<Record<string, number>>({});
   const [progress, setProgress] = useState<Record<string, number>>({});
-  const bundle = useMemo(() => parseBundle(bundleText), [bundleText]);
-  const cmp = useMemo(() => compareMode(bundle), [bundle]);
+  const bundle = parseBundle(bundleText);
+  const cmp = compareMode(bundle);
   const t0 = useRef<number>(0);
   const userPicked = useRef(false);
 
@@ -81,7 +82,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit }:
       es.onmessage = (e) => {
         try {
           const v = JSON.parse(e.data);
-          if (v.kind === "metric") setSamples((s) => [...s, v as any].map(toSample));
+          if (v.kind === "metric") setSamples((s) => [...s, toSample(v)]);
           if (v.kind === "phase" && v.phase && v.ts_ms)
             setPhaseTs((p) => (p[v.phase] ? p : { ...p, [v.phase]: v.ts_ms }));
           if (v.kind === "summary_progress" && v.field)

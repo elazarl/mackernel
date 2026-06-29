@@ -36,8 +36,12 @@ export function jobSummaryTip(s: JobSummary): string {
     s.tokens != null ? `${s.tokens} tok` : null].filter(Boolean).join(" · ");
 }
 
-export function toSample(v: any): Sample {
-  return v.rss_bytes != null ? v : { ts_ms: v.ts_ms, rss_bytes: v.rss, disk_bytes: v.disk };
+// SSE metric frames arrive with compact keys (rss/disk); the REST /metrics endpoint
+// sends the Sample shape (rss_bytes/disk_bytes). Normalize both to Sample at the
+// boundary so everything downstream sees one shape.
+type MetricFrame = { ts_ms: number; rss: number; disk: number };
+export function toSample(v: Sample | MetricFrame): Sample {
+  return "rss_bytes" in v ? v : { ts_ms: v.ts_ms, rss_bytes: v.rss, disk_bytes: v.disk };
 }
 
 export function stepClass(job: Job | null, phase: string): string {
