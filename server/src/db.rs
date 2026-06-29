@@ -40,6 +40,9 @@ pub struct Job {
     /// Per-summary generation metadata as raw JSON ({"title":{"ms","tokens","model"},...}),
     /// merged field-by-field as summaries complete. NULL until the first summary lands.
     pub summary_meta: Option<String>,
+    /// The `submitter` column: "scaffold" for scaffold jobs (so the UI shows the extra
+    /// scaffold phase step), "lkml" for candidate runs, else NULL.
+    pub source: Option<String>,
 }
 
 /// A cover letter found on LKML whose frontmatter matches the reproducer spec, shown
@@ -333,7 +336,7 @@ impl Db {
     pub fn get_job(&self, id: i64) -> Result<Option<Job>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, repro_summary, result_summary, detail, source_url, title, short_title, summary_meta
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, repro_summary, result_summary, detail, source_url, title, short_title, summary_meta, submitter
              FROM jobs WHERE id=?",
         )?;
         let mut rows = stmt.query(duckdb::params![id])?;
@@ -347,7 +350,7 @@ impl Db {
     pub fn list_jobs(&self) -> Result<Vec<Job>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, repro_summary, result_summary, detail, source_url, title, short_title, summary_meta
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, repro_summary, result_summary, detail, source_url, title, short_title, summary_meta, submitter
              FROM jobs ORDER BY id DESC",
         )?;
         let mut rows = stmt.query([])?;
@@ -514,5 +517,6 @@ fn row_to_job(r: &duckdb::Row<'_>) -> Result<Job> {
         title: r.get(15)?,
         short_title: r.get(16)?,
         summary_meta: r.get(17)?,
+        source: r.get(18)?,
     })
 }

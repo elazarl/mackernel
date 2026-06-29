@@ -4,6 +4,11 @@ import type { Job, JobSummary, Sample } from "../api";
 
 export const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
 
+// Scaffold jobs prepend a "scaffold" stage (the opencode agent generating the bundle)
+// before the normal pipeline; other jobs use PHASES as-is.
+export const phaseList = (job: Job | null): string[] =>
+  job?.source === "scaffold" ? ["scaffold", ...PHASES] : PHASES;
+
 // Selected job is encoded in the path as /job/ID; null = nothing selected (root).
 export const jobFromPath = (): number | null => {
   const m = location.pathname.match(/^\/job\/(\d+)/);
@@ -46,8 +51,9 @@ export function toSample(v: Sample | MetricFrame): Sample {
 
 export function stepClass(job: Job | null, phase: string): string {
   if (!job) return "";
-  const cur = PHASES.indexOf(job.phase ?? "");
-  const idx = PHASES.indexOf(phase);
+  const list = phaseList(job);
+  const cur = list.indexOf(job.phase ?? "");
+  const idx = list.indexOf(phase);
   if (job.status === "failed" && idx === cur) return "fail";
   if (idx < cur || job.status === "done") return "done";
   if (idx === cur) return "cur";

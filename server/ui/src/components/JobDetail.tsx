@@ -6,7 +6,7 @@ import {
   Job, JobSummary, Sample, SummarizerInfo,
 } from "../api";
 import { compareMode, parseBundle } from "../bundle";
-import { jobSummaryTip, PHASES, statusColor, stepClass, summaryTip, toSample } from "../lib/format";
+import { jobSummaryTip, phaseList, statusColor, stepClass, summaryTip, toSample } from "../lib/format";
 import { ResourceChart } from "./charts";
 import { IssuesCard } from "./IssuesCard";
 import { LogPane } from "./LogPane";
@@ -122,7 +122,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit }:
         <h2>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
           {cmp && <span className="text-muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
         <div className="mb-2 flex flex-wrap gap-1.5">
-          {PHASES.map((p) => (
+          {phaseList(job).map((p) => (
             <span key={p} className={"step " + stepClass(job, p)}>{p}</span>
           ))}
         </div>

@@ -69,9 +69,10 @@ struct AppState {
     /// loading; flushed by the background loader once it's ready (instead of being
     /// silently dropped). See `spawn_summary`.
     summary_queue: Arc<std::sync::Mutex<Vec<(i64, &'static str)>>>,
-    /// In-memory store for "scaffold a reproducer" runs (the opencode agent). See
-    /// `scaffold.rs` — ephemeral, separate id space + SSE bus from jobs.
-    scaffold: Arc<scaffold::Store>,
+    /// OpenAI-compatible creds for queued scaffold jobs, keyed by job id. Kept in memory
+    /// (never on disk) from job creation until the scaffold stage consumes them; see
+    /// `scaffold.rs`. A restart drops these, so a still-queued scaffold job fails clearly.
+    scaffold_creds: Arc<std::sync::Mutex<HashMap<i64, scaffold::Creds>>>,
 }
 
 pub(crate) fn now_ms() -> i64 {
@@ -171,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
         db: database, work: work.clone(), repo: repo.clone(), tx,
         bus: Bus::default(), cfg: Cfg::from_env(), auth_token,
         summarizer: summarizer.clone(), summary_queue,
-        scaffold: Arc::new(scaffold::Store::default()),
+        scaffold_creds: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
 
     if summarize::Summarizer::enabled() {
@@ -220,10 +221,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/lkml/patches", get(list_lkml_patches))
         .route("/api/scaffold", post(scaffold::start))
         .route("/api/scaffold/models", post(scaffold::models))
-        .route("/api/scaffold/:id", get(scaffold::get))
-        .route("/api/scaffold/:id/bundle", get(scaffold::bundle))
-        .route("/api/scaffold/:id/log", get(scaffold::log))
-        .route("/api/scaffold/:id/events", get(scaffold::events))
         .route("/api/metrics/peaks", get(get_peaks))
         .route("/api/summarizer", get(get_summarizer))
         .route("/api/highlight.css", get(highlight_css))
@@ -821,6 +818,14 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
     st.db.set_running(id, now_ms())?;
     st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     info!("job {id}: starting");
+
+    // Scaffold stage (only for scaffold jobs): generate bundle.md with the opencode agent
+    // before the normal pipeline. Detected by scaffold.json present + no bundle yet.
+    if dir.join("scaffold.json").is_file() && !bundle.is_file() {
+        info!("job {id}: scaffold stage");
+        scaffold::run_scaffold_stage(st, id, &dir, &logs).await?;
+    }
+
     // Preliminary summary from the bundle alone (runs concurrently with the build).
     spawn_summary(st, id, "start");
 
@@ -859,8 +864,10 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
         })
     };
 
+    // Append (not truncate): the scaffold stage may already have written its agent
+    // output here, and the run-kernel.py output should follow it in the same log.
     let run_log = std::sync::Arc::new(std::sync::Mutex::new(
-        std::fs::File::create(logs.join("run.log"))?,
+        std::fs::OpenOptions::new().create(true).append(true).open(logs.join("run.log"))?,
     ));
 
     // Drain stderr into run.log.

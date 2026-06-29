@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Candidate, getPeaks, getSummarizer, gib, globalEventsUrl, highlightCss, Job, JobSummary,
-  listCandidates, listJobs, LkmlPatch, Peak, runCandidate, submit, SummarizerInfo,
+  listCandidates, listJobs, LkmlPatch, Peak, runCandidate, startScaffold, submit, SummarizerInfo,
 } from "../api";
 import { EXAMPLES, upsertMeta } from "../bundle";
 import { getTheme, setTheme as persistTheme, Theme } from "../lib/theme";
@@ -10,7 +10,6 @@ import { ModelSwitcher } from "./ModelSwitcher";
 import { BundleModal } from "./BundleModal";
 import { SpecModal } from "./SpecModal";
 import { LkmlBrowser } from "./LkmlBrowser";
-import { ScaffoldModal } from "./ScaffoldModal";
 import { OpenAISettings } from "./OpenAISettings";
 import { hasCreds } from "../lib/creds";
 import { PeaksChart } from "./charts";
@@ -44,8 +43,6 @@ export function Dashboard() {
   const [bundle, setBundle] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [lkmlOpen, setLkmlOpen] = useState(false);
-  // When set, the scaffold modal runs the opencode agent for this request.
-  const [scaffoldReq, setScaffoldReq] = useState<{ thread?: string; patch?: string } | null>(null);
   const [showSpec, setShowSpec] = useState(false);
   // Settings opens automatically when a scaffold is attempted without OpenAI creds.
   const [showSettings, setShowSettings] = useState(false);
@@ -90,16 +87,12 @@ export function Dashboard() {
     selectJob(id);
   };
 
-  // Scaffold from a detected LKML candidate: run the opencode agent on its thread,
-  // and (on success) drop the generated bundle into the edit/run modal.
-  const onScaffoldCandidate = (c: Candidate) => {
+  // Scaffold from a detected LKML candidate: create a background job whose first stage
+  // runs the opencode agent on its thread, then open the job. Needs OpenAI creds.
+  const onScaffoldCandidate = async (c: Candidate) => {
     if (!hasCreds()) { setShowSettings(true); return; }
-    setScaffoldReq({ thread: c.source_url });
-  };
-  const onScaffoldDone = (b: string) => {
-    setScaffoldReq(null);
-    setBundle(b);
-    setModalOpen(true);
+    const { id } = await startScaffold({ thread: c.source_url });
+    selectJob(id);
   };
 
   // Pick a patch in the LKML browser: open its cover letter as a reproducer. Inject a
@@ -110,11 +103,12 @@ export function Dashboard() {
     setLkmlOpen(false);
     setModalOpen(true);
   };
-  // Scaffold from a browsed patch: hand the lore thread to the opencode agent.
-  const onScaffoldPatch = (p: LkmlPatch) => {
+  // Scaffold from a browsed patch: create a background scaffold job for its lore thread.
+  const onScaffoldPatch = async (p: LkmlPatch) => {
     setLkmlOpen(false);
     if (!hasCreds()) { setShowSettings(true); return; }
-    setScaffoldReq({ thread: p.url });
+    const { id } = await startScaffold({ thread: p.url });
+    selectJob(id);
   };
 
   return (
@@ -145,7 +139,6 @@ export function Dashboard() {
         <BundleModal bundle={bundle} theme={theme} onChange={setBundle}
           onRun={onRun} onClose={() => setModalOpen(false)} />
       )}
-      {scaffoldReq && <ScaffoldModal req={scaffoldReq} onDone={onScaffoldDone} onClose={() => setScaffoldReq(null)} />}
       {lkmlOpen && <LkmlBrowser onPick={onPickPatch} onScaffold={onScaffoldPatch} onClose={() => setLkmlOpen(false)} />}
       <div className="grid grid-cols-[380px_1fr] gap-4 items-start">
         <div>

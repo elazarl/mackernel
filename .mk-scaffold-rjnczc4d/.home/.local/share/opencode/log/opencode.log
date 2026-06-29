@@ -1,0 +1,21 @@
+timestamp=2026-06-29T19:54:31.913Z level=INFO run=6b564964 message="creating instance" directory=/work
+timestamp=2026-06-29T19:54:31.914Z level=INFO run=6b564964 message=fromDirectory directory=/work
+timestamp=2026-06-29T19:54:31.921Z level=INFO run=6b564964 message=bootstrapping directory=/work
+timestamp=2026-06-29T19:54:31.931Z level=INFO run=6b564964 message=loading path=/work/.home/.config/opencode/config.json
+timestamp=2026-06-29T19:54:31.932Z level=INFO run=6b564964 message=loading path=/work/.home/.config/opencode/opencode.json
+timestamp=2026-06-29T19:54:31.932Z level=INFO run=6b564964 message=loading path=/work/.home/.config/opencode/opencode.jsonc
+timestamp=2026-06-29T19:54:31.936Z level=INFO run=6b564964 message=loading path=/work/opencode.json
+timestamp=2026-06-29T19:54:31.998Z level=INFO run=6b564964 message="all LSPs are disabled"
+timestamp=2026-06-29T19:54:31.999Z level=INFO run=6b564964 message="all formatters are disabled"
+timestamp=2026-06-29T19:54:31.999Z level=INFO run=6b564964 message=init
+timestamp=2026-06-29T19:54:32.222Z level=INFO run=6b564964 message=created id=ses_0eb0d6261ffeB4rqMIV04Oo97R slug=jolly-otter version=1.17.11 projectID=global directory=/work path=work workspaceID=undefined parentID=undefined title="New session - 2026-06-29T19:54:32.222Z" agent=undefined model=undefined metadata=undefined permission="[{\"permission\":\"question\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"plan_enter\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"plan_exit\",\"pattern\":\"*\",\"action\":\"deny\"}]" cost=0 tokens.input=0 tokens.output=0 tokens.reasoning=0 tokens.cache.read=0 tokens.cache.write=0 time.created=1782762872222 time.updated=1782762872222
+timestamp=2026-06-29T19:54:32.236Z level=INFO run=6b564964 message="event connected"
+timestamp=2026-06-29T19:54:32.523Z level=INFO run=6b564964 message=loop session.id=ses_0eb0d6261ffeB4rqMIV04Oo97R step=0
+timestamp=2026-06-29T19:54:32.535Z level=INFO run=6b564964 message="shell tool using shell" shell=/usr/bin/bash
+timestamp=2026-06-29T19:54:32.539Z level=INFO run=6b564964 message=init count=1
+timestamp=2026-06-29T19:54:32.540Z level=INFO run=6b564964 message="booting location services" directory=/work workspaceID=undefined
+timestamp=2026-06-29T19:54:32.616Z level=INFO run=6b564964 message=stream providerID=custom modelID=x/y session.id=ses_0eb0d6261ffeB4rqMIV04Oo97R small=true agent=title mode=primary
+timestamp=2026-06-29T19:54:32.629Z level=INFO run=6b564964 message="llm runtime selected" llm.runtime=ai-sdk llm.provider=custom llm.model=x/y
+timestamp=2026-06-29T19:54:32.649Z level=INFO run=6b564964 message="watcher backend" directory=/work platform=linux backend=inotify
+timestamp=2026-06-29T19:54:32.820Z level=INFO run=6b564964 message="project copy refresh started" projectID=global
+timestamp=2026-06-29T19:54:32.821Z level=INFO run=6b564964 message="project copy refresh done" projectID=global updated=[] removed=[]

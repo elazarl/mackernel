@@ -25,6 +25,9 @@ export interface Job {
   // Per-summary generation metadata as raw JSON: {field:{ms,tokens,model}}. Drives the
   // hover tooltip. NULL until the first summary lands.
   summary_meta: string | null;
+  // The job's origin ("scaffold" for scaffold jobs, "lkml" for candidate runs, else null).
+  // Scaffold jobs get an extra "scaffold" phase step (see lib/format phaseList).
+  source: string | null;
 }
 export interface SummarizerInfo {
   loaded: boolean;
@@ -112,13 +115,11 @@ export interface LkmlPage { patches: LkmlPatch[]; more: boolean; next: number; }
 export async function listLkmlPatches(list: string, skip = 0): Promise<LkmlPage> {
   return (await authed(`/api/lkml/patches?list=${encodeURIComponent(list)}&skip=${skip}`)).json();
 }
-// "Scaffold a reproducer": the opencode agent writes a bundle from a patch series.
-// start returns an id; progress streams over scaffoldEventsUrl; the finished bundle
-// is fetched once status is "done".
-export interface ScaffoldStatus { id: number; status: string; error: string | null; }
+// "Scaffold a reproducer": create a background JOB whose first stage runs the opencode
+// agent to write a bundle from a patch series, then runs it. Returns the new job id (open
+// it like any job). Auto-fills the OpenAI creds from settings; the backend requires them
+// (no free tier) and rejects with 400 if any is missing.
 export async function startScaffold(req: { thread?: string; patch?: string; commit?: string }): Promise<{ id: number }> {
-  // Auto-fill the OpenAI-compatible creds the user set in settings; the backend requires
-  // them (no free tier) and rejects the request with 400 if any is missing.
   return (await authed("/api/scaffold", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...req, ...getCreds() }),
@@ -133,21 +134,6 @@ export async function listModels(baseUrl: string, apiKey: string): Promise<strin
   });
   if (!r.ok) throw new Error(`couldn't list models (${r.status})`);
   return r.json();
-}
-export async function getScaffold(id: number): Promise<ScaffoldStatus> {
-  return (await authed(`/api/scaffold/${id}`)).json();
-}
-export async function getScaffoldBundle(id: number): Promise<string> {
-  const r = await authed(`/api/scaffold/${id}/bundle`);
-  return r.ok ? r.text() : "";
-}
-export async function getScaffoldLog(id: number): Promise<string> {
-  const r = await authed(`/api/scaffold/${id}/log`);
-  return r.ok ? r.text() : "";
-}
-export function scaffoldEventsUrl(id: number): string {
-  const t = token();
-  return `/api/scaffold/${id}/events${t ? `?token=${encodeURIComponent(t)}` : ""}`;
 }
 
 export async function getMetrics(id: number): Promise<Sample[]> {

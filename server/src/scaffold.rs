@@ -1,70 +1,35 @@
-//! "Scaffold a reproducer": run the opencode agent (scaffold-repro.py) in a
-//! container to write a reproducer bundle from a patch series, then hand the bundle
-//! back to the normal submit/run pipeline.
-//!
-//! Ephemeral by design: scaffolding is an interactive generate step, not a tracked
-//! job, so state lives in memory (a counter + a map), lost on restart. Progress
-//! streams over a dedicated `Bus`; the generated bundle and the merged agent log are
-//! fetched by id. Runs are serialized (`lock`) — one heavyweight opencode CLI agent
-//! at a time, matching the free zen tier's no-concurrency rule (see summarize.rs).
+//! "Scaffold a reproducer": the opencode agent (scaffold-repro.py) writes a reproducer
+//! bundle from a patch series. This is the FIRST stage of a normal tracked job — clicking
+//! Scaffold creates a job whose `scaffold` phase generates `bundle.md`, after which the
+//! usual run-kernel.py pipeline runs it (see run_job in main.rs). There is no separate
+//! ephemeral run anymore; progress, logs, and metrics come from the normal job machinery.
 
-use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    response::sse::{Event, KeepAlive, Sse},
-    Json,
-};
-use futures::stream::{Stream, StreamExt};
-use serde::Deserialize;
+use axum::{extract::State, http::StatusCode, Json};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::convert::Infallible;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tracing::{error, info};
+use tracing::info;
 
-use crate::bus::Bus;
 use crate::{now_ms, AppState};
 
-/// One scaffold run's terminal-or-in-flight state.
+/// The user's OpenAI-compatible creds for a scaffold job. Kept in an in-memory map in
+/// AppState (never on disk) from job creation until the scaffold stage consumes them; a
+/// server restart drops them, so a still-queued scaffold job fails with a clear message.
 #[derive(Clone)]
-pub struct Scaffold {
-    pub status: String, // "running" | "done" | "failed"
-    pub bundle: Option<String>,
-    pub error: Option<String>,
+pub struct Creds {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
 }
 
-/// In-memory store for scaffold runs. Its `bus` is separate from the job bus so the
-/// scaffold id space never collides with job ids.
-pub struct Store {
-    next_id: AtomicI64,
-    map: Mutex<HashMap<i64, Scaffold>>,
-    pub bus: Bus,
-    /// Serializes agent runs (one opencode CLI at a time).
-    lock: tokio::sync::Mutex<()>,
-}
-
-impl Default for Store {
-    fn default() -> Self {
-        Store {
-            next_id: AtomicI64::new(1),
-            map: Mutex::new(HashMap::new()),
-            bus: Bus::default(),
-            lock: tokio::sync::Mutex::new(()),
-        }
-    }
-}
-
-impl Store {
-    fn get(&self, id: i64) -> Option<Scaffold> {
-        self.map.lock().unwrap().get(&id).cloned()
-    }
-    fn set(&self, id: i64, s: Scaffold) {
-        self.map.lock().unwrap().insert(id, s);
-    }
+/// The non-secret scaffold inputs, persisted as `<job>/scaffold.json` so run_job knows the
+/// job needs scaffolding (and what from) even across a restart.
+#[derive(Serialize, Deserialize)]
+pub struct Spec {
+    pub thread: Option<String>,
+    pub patch_file: Option<String>,
+    pub commit: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -83,8 +48,8 @@ pub struct ScaffoldReq {
     model: Option<String>,
 }
 
-/// POST /api/scaffold — start a scaffold run; returns its id immediately. The agent
-/// runs in the background and streams progress over GET /api/scaffold/:id/events.
+/// POST /api/scaffold — create a tracked job whose first stage scaffolds a bundle. Returns
+/// the job id immediately (mirrors `submit`/`run_candidate`); the UI opens it like any job.
 pub async fn start(
     State(st): State<AppState>,
     Json(req): Json<ScaffoldReq>,
@@ -102,156 +67,91 @@ pub async fn start(
         _ => return Err(StatusCode::BAD_REQUEST),
     };
 
-    let store = st.scaffold.clone();
-    let id = store.next_id.fetch_add(1, Ordering::Relaxed);
-    store.set(id, Scaffold { status: "running".into(), bundle: None, error: None });
-
-    let dir = st.work.join("scaffold").join(id.to_string());
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(crate::ise)?;
-    // Inline patch goes to a file the script reads with --patch-file.
+    let commit = req.commit.filter(|s| !s.trim().is_empty());
+    let id = st.db
+        .create_job_full(now_ms(), Some("scaffold"), thread.as_deref(), None)
+        .map_err(crate::ise)?;
+    let dir = st.work.join(id.to_string());
+    let _ = std::fs::remove_dir_all(&dir); // clear any stale dir from a recycled id
+    std::fs::create_dir_all(dir.join("logs")).map_err(crate::ise)?;
+    // Inline patch goes to a file the scaffold stage reads with --patch-file.
     let patch_file = if let Some(p) = &patch {
         let pf = dir.join("input.patch");
         std::fs::write(&pf, p).map_err(crate::ise)?;
-        Some(pf)
+        Some(pf.to_string_lossy().into_owned())
     } else {
         None
     };
+    // Persist the non-secret spec; keep the creds in memory only.
+    let spec = Spec { thread, patch_file, commit };
+    std::fs::write(dir.join("scaffold.json"), serde_json::to_vec(&spec).map_err(crate::ise)?)
+        .map_err(crate::ise)?;
+    st.scaffold_creds.lock().unwrap().insert(id, Creds { base_url, api_key, model });
 
-    info!("scaffold {id}: queued");
-    tokio::spawn(run(st.clone(), id, dir, thread, patch_file, req.commit, base_url, api_key, model));
+    st.tx.send(crate::SchedMsg::New(id)).map_err(crate::ise)?;
+    info!("queued scaffold job {id}");
+    st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     Ok(Json(json!({ "id": id })))
 }
 
-/// Drive scaffold-repro.py: stream its stdout (MKPROGRESS -> phase events; all lines
-/// -> scaffold.log), then record the produced bundle (or the failure).
-async fn run(
-    st: AppState,
+/// The scaffold stage: run scaffold-repro.py to generate `<dir>/bundle.md`. Called by
+/// run_job before the run-kernel.py pipeline when `<dir>/scaffold.json` is present and no
+/// bundle exists yet. Output (stdout+stderr) is appended to the job's run.log.
+pub async fn run_scaffold_stage(
+    st: &AppState,
     id: i64,
-    dir: std::path::PathBuf,
-    thread: Option<String>,
-    patch_file: Option<std::path::PathBuf>,
-    commit: Option<String>,
-    base_url: String,
-    api_key: String,
-    model: String,
-) {
-    let store = st.scaffold.clone();
-    let _guard = store.lock.lock().await; // one agent at a time
+    dir: &std::path::Path,
+    logs: &std::path::Path,
+) -> anyhow::Result<()> {
+    st.db.set_phase(id, "scaffold")?;
+    st.db.add_event(id, now_ms(), "scaffold", "")?;
+    st.bus.publish(id, json!({ "kind": "phase", "phase": "scaffold", "ts_ms": now_ms() }).to_string());
+    st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
 
-    let out = dir.join("repro.md");
+    let spec: Spec = serde_json::from_slice(&std::fs::read(dir.join("scaffold.json"))?)?;
+    let creds = st.scaffold_creds.lock().unwrap().remove(&id)
+        .ok_or_else(|| anyhow::anyhow!("scaffold credentials lost (server restart?) — resubmit"))?;
+
+    let bundle = dir.join("bundle.md");
     let mut cmd = tokio::process::Command::new("python3");
     cmd.arg(st.repo.join("scaffold-repro.py"));
-    if let Some(t) = &thread {
+    if let Some(t) = &spec.thread {
         cmd.arg("--thread").arg(t);
     }
-    if let Some(pf) = &patch_file {
+    if let Some(pf) = &spec.patch_file {
         cmd.arg("--patch-file").arg(pf);
     }
-    if let Some(c) = commit.as_deref().filter(|s| !s.trim().is_empty()) {
+    if let Some(c) = &spec.commit {
         cmd.arg("--commit").arg(c);
     }
-    cmd.arg("--out").arg(&out)
-        .arg("--log-dir").arg(&dir)
-        .arg("--progress")
+    // No --progress: run_job owns the single "scaffold" phase. scaffold-repro.py's stdout
+    // and stderr both append to run.log (run_job opens it append-mode, so the run-kernel
+    // output that follows lands after this).
+    let logf = std::fs::OpenOptions::new().create(true).append(true).open(logs.join("run.log"))?;
+    let logf2 = logf.try_clone()?;
+    let status = cmd
+        .arg("--out").arg(&bundle)
+        .arg("--log-dir").arg(logs)
         .current_dir(&st.repo)
         .env("MK_SANDBOX", "auto")
         .env("MK_WT_ROOT", dir.join("wt"))
         // Creds ride as env, not argv, so the API key never appears in `ps`.
-        .env("MK_OPENAI_BASE_URL", &base_url)
-        .env("MK_OPENAI_API_KEY", &api_key)
-        .env("MK_OPENCODE_MODEL", &model)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let res = drive(&store, id, &dir, cmd).await;
-    match res {
-        Ok(()) => match tokio::fs::read_to_string(&out).await {
-            Ok(b) if !b.trim().is_empty() => {
-                store.set(id, Scaffold { status: "done".into(), bundle: Some(b), error: None });
-                store.bus.publish(id, json!({ "kind": "done", "status": "done" }).to_string());
-                info!("scaffold {id}: done");
-            }
-            _ => fail(&store, id, "agent produced no bundle"),
-        },
-        Err(e) => fail(&store, id, &e),
+        .env("MK_OPENAI_BASE_URL", &creds.base_url)
+        .env("MK_OPENAI_API_KEY", &creds.api_key)
+        .env("MK_OPENCODE_MODEL", &creds.model)
+        .stdout(Stdio::from(logf))
+        .stderr(Stdio::from(logf2))
+        .status()
+        .await?;
+    if !status.success() {
+        anyhow::bail!("scaffold stage: scaffold-repro.py exited with {status}");
     }
-    store.bus.close(id);
-}
-
-fn fail(store: &Store, id: i64, msg: &str) {
-    error!("scaffold {id}: {msg}");
-    store.set(id, Scaffold { status: "failed".into(), bundle: None, error: Some(msg.into()) });
-    store.bus.publish(id, json!({ "kind": "done", "status": "failed", "error": msg }).to_string());
-}
-
-/// Spawn the child, tee stdout to scaffold.log + emit phase events, drain stderr to
-/// the same log. Returns Err(message) if the process fails to spawn or exits nonzero.
-async fn drive(
-    store: &Store,
-    id: i64,
-    dir: &std::path::Path,
-    mut cmd: tokio::process::Command,
-) -> Result<(), String> {
-    let mut child = cmd.spawn().map_err(|e| format!("spawn scaffold-repro.py: {e}"))?;
-    let log = Arc::new(std::sync::Mutex::new(
-        std::fs::File::create(dir.join("scaffold.log")).map_err(|e| e.to_string())?,
-    ));
-
-    if let Some(err) = child.stderr.take() {
-        let log = log.clone();
-        tokio::spawn(async move {
-            let mut buf = Vec::new();
-            let mut err = err;
-            let _ = err.read_to_end(&mut buf).await;
-            use std::io::Write;
-            let _ = log.lock().unwrap().write_all(&buf);
-        });
+    if !bundle.is_file() || tokio::fs::read_to_string(&bundle).await.map(|b| b.trim().is_empty()).unwrap_or(true) {
+        anyhow::bail!("scaffold stage: agent produced no bundle");
     }
-
-    if let Some(o) = child.stdout.take() {
-        let mut lines = BufReader::new(o).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            {
-                use std::io::Write;
-                let _ = writeln!(log.lock().unwrap(), "{line}");
-            }
-            if let Some(rest) = line.strip_prefix("MKPROGRESS ") {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(rest) {
-                    if let Some(p) = v.get("phase").and_then(|p| p.as_str()) {
-                        store.bus.publish(id, json!({ "kind": "phase", "phase": p, "ts_ms": now_ms() }).to_string());
-                    }
-                }
-            } else {
-                // A log line landed; ping so the UI refetches scaffold.log.
-                store.bus.publish(id, json!({ "kind": "log" }).to_string());
-            }
-        }
-    }
-
-    let status = child.wait().await.map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("scaffold-repro.py exited with {status}"))
-    }
-}
-
-/// GET /api/scaffold/:id — current status (+ error if failed).
-pub async fn get(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let s = st.scaffold.get(id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(json!({ "id": id, "status": s.status, "error": s.error })))
-}
-
-/// GET /api/scaffold/:id/bundle — the generated bundle (404 until done).
-pub async fn bundle(State(st): State<AppState>, Path(id): Path<i64>) -> Result<String, StatusCode> {
-    st.scaffold.get(id).and_then(|s| s.bundle).ok_or(StatusCode::NOT_FOUND)
-}
-
-/// GET /api/scaffold/:id/log — the merged agent log so far.
-pub async fn log(State(st): State<AppState>, Path(id): Path<i64>) -> Result<String, StatusCode> {
-    let p = st.work.join("scaffold").join(id.to_string()).join("scaffold.log");
-    tokio::fs::read_to_string(p).await.map_err(|_| StatusCode::NOT_FOUND)
+    // Done scaffolding — drop the marker so a rerun won't re-scaffold over the bundle.
+    let _ = std::fs::remove_file(dir.join("scaffold.json"));
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -298,15 +198,4 @@ pub async fn models(Json(req): Json<ModelsReq>) -> Result<Json<Vec<String>>, Sta
     .map_err(crate::ise)?
     .map_err(|_| StatusCode::BAD_GATEWAY)?;
     Ok(Json(ids))
-}
-
-/// GET /api/scaffold/:id/events — SSE phase/log/done stream (mirrors job events).
-pub async fn events(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = tokio_stream::wrappers::BroadcastStream::new(st.scaffold.bus.subscribe(id))
-        .filter_map(|r| async move { r.ok() })
-        .map(|s| Ok(Event::default().data(s)));
-    Sse::new(stream).keep_alive(KeepAlive::default())
 }
