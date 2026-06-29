@@ -28,6 +28,7 @@ import gzip
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -292,26 +293,31 @@ def main() -> int:
     else:
         patches = Path(args.patch_file).read_text(errors="replace")
 
-    # 3. Work dir, mounted rw at /work; the worktree is mounted ro at /linux.
+    # 3. Work dir, mounted rw at /work; the worktree is mounted ro at /linux. Created
+    #    under HERE (podman needs a host-shared path) and removed on exit so these
+    #    scratch dirs don't pile up in the repo / on the server.
     work = Path(tempfile.mkdtemp(prefix=".mk-scaffold-", dir=HERE))
-    spec = (HERE / "docs" / "reproducer-spec.md").read_text()
-    (work / "PROMPT.md").write_text(build_prompt_md(spec, patches))
-    # Seed the patch as a file too, so the agent can drop it straight into a fence.
-    (work / "fix.patch").write_text(patches)
+    try:
+        spec = (HERE / "docs" / "reproducer-spec.md").read_text()
+        (work / "PROMPT.md").write_text(build_prompt_md(spec, patches))
+        # Seed the patch as a file too, so the agent can drop it straight into a fence.
+        (work / "fix.patch").write_text(patches)
 
-    # 4. Run the agent.
-    progress("agent")
-    run_opencode(work, wt, arch, image, is_local)
+        # 4. Run the agent.
+        progress("agent")
+        run_opencode(work, wt, arch, image, is_local)
 
-    # 5. Collect the bundle the agent wrote.
-    produced = work / "repro.md"
-    if not produced.is_file() or not produced.read_text().strip():
-        die("opencode did not produce a repro.md")
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(produced.read_text())
-    log(f"wrote bundle to {out}")
-    progress("done")
+        # 5. Collect the bundle the agent wrote.
+        produced = work / "repro.md"
+        if not produced.is_file() or not produced.read_text().strip():
+            die("opencode did not produce a repro.md")
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(produced.read_text())
+        log(f"wrote bundle to {out}")
+        progress("done")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     return 0
 
 
