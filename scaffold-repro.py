@@ -59,8 +59,10 @@ rk = _load_run_kernel()
 
 PROGRESS_SENTINEL = "MKPROGRESS"
 _PROGRESS = False
-# opencode agent runs are long; cap generously (override via MK_SCAFFOLD_TIMEOUT).
-TIMEOUT = int(os.environ.get("MK_SCAFFOLD_TIMEOUT", "900"))
+# opencode agent runs are long — the free zen model explores the kernel tree at length
+# and 900s wasn't enough to finish even after it had written repro.md. Cap generously
+# (override via MK_SCAFFOLD_TIMEOUT).
+TIMEOUT = int(os.environ.get("MK_SCAFFOLD_TIMEOUT", "1800"))
 DEFAULT_MODEL = os.environ.get("MK_OPENCODE_MODEL", "opencode/deepseek-v4-flash-free")
 
 # The fixed instruction the agent must follow (verbatim from the feature request).
