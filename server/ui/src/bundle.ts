@@ -8,7 +8,7 @@ export interface ParsedBundle { meta: BundleMeta[]; files: BundleFile[]; }
 
 // Recognized metadata keys and the canonical tab order (per the spec). Roles not in
 // this list still get a tab, ordered after the known ones.
-const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch", "patch-compare", "thread-compare"];
+const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch", "patch-compare", "thread-compare", "search-dmesg", "regex-dmesg"];
 export const ROLE_ORDER = ["user", "module", "kconf", "patch", "init"];
 
 const FENCE_OPEN = /^(`{3,})(.*)$/;     // ```role:filename  (or any info string)
@@ -296,6 +296,48 @@ int main(void) {
     printf("kernel: %s %s\\n", u.sysname, u.release);
     return 0;
 }
+\`\`\`
+`,
+  },
+  {
+    label: "watch-dmesg",
+    blurb: "flag a custom log line like a BUG; pinned to v6.19",
+    bundle: `---
+commit: v6.19
+search-dmesg: MK_SENTINEL_HIT
+regex-dmesg: beacon: ready #\\d+
+---
+
+# watch-dmesg — surface your own log lines like a BUG
+
+Loads a module that prints distinctive lines to the kernel log, then asks the
+runner to watch for them. Matches show up at the top of the Issues view — handy
+when "the bug fired" is signalled by your own \`pr_info\`, not a \`BUG:\`. Watching
+does not change pass/fail; the run status still follows the start script.
+
+\`\`\`module:beacon.c
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+
+static int __init beacon_init(void)
+{
+    pr_info("MK_SENTINEL_HIT: beacon module loaded\\n");
+    pr_info("beacon: ready #1\\n");
+    return 0;
+}
+
+static void __exit beacon_exit(void) { }
+
+module_init(beacon_init);
+module_exit(beacon_exit);
+MODULE_LICENSE("GPL");
+\`\`\`
+
+\`\`\`init:init.sh
+#!/bin/bash
+set -e
+sudo dmesg | grep -i 'sentinel\\|beacon' || true
 \`\`\`
 `,
   },

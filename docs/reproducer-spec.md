@@ -32,9 +32,16 @@ A `---`-delimited block, at column 0 and outside any code fence, holding
 | `arch`           | target arch (`x86_64` / `arm64`); overrides `ARCH` env and host  |
 | `patch-compare`  | `true` to run twice — with and without `patch:` — in parallel    |
 | `thread-compare` | lore thread URL; run baseline vs the thread's series, in parallel|
+| `search-dmesg`   | literal string to hunt for in the serial console (`console.log`); matches are flagged like a `BUG:` and shown at the top of the Issues view. Repeatable; does **not** change the run's pass/fail. |
+| `regex-dmesg`    | same as `search-dmesg`, but the value is a regular expression. Repeatable. |
 
 With no metadata block, the kernel at `LINUX_SRC` (default `~/linux`) is built
 as-is. Arch precedence: frontmatter `arch:` > `ARCH` env > host arch.
+
+`search-dmesg` / `regex-dmesg` are scanned against the captured serial console
+*after* the run; they only surface matching lines (so you can spot a custom
+`pr_info`, a known error string, or a sanitizer line the built-in `BUG:`/oops
+detection misses) — they never affect the exit status.
 
 ```
 ---

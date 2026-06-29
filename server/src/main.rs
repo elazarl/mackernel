@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
                     println!("REPRO:  {}", s.summarize_repro(b, &md, &noop)?.0);
                     if let Some(logs) = &logs_arg {
                         let logs = std::path::Path::new(logs);
-                        let issues = collect_issues(logs);
+                        let issues = collect_issues(logs, &watched_patterns(&md));
                         println!("RESULT: {}", s.summarize_result(b, &md, &issues, Some(1), "done", &noop)?.0);
                         println!("DETAIL: {}", s.detail(b, &md, logs, &noop)?.0);
                     }
@@ -311,7 +311,11 @@ async fn get_log(
         _ => logs.clone(),
     };
     if kind == "issues" {
-        return Ok(collect_issues(&vdir));
+        // The bundle's `search-dmesg:`/`regex-dmesg:` patterns are read fresh from the
+        // stored bundle.md; compare variants reuse the same (single) bundle.
+        let watched = std::fs::read_to_string(jobdir.join("bundle.md"))
+            .map(|md| watched_patterns(&md)).unwrap_or_default();
+        return Ok(collect_issues(&vdir, &watched));
     }
     let file = match kind.as_str() {
         "fetch" => "fetch.log",
@@ -373,23 +377,74 @@ fn dmesg_reports(content: &str) -> Vec<serde_json::Value> {
 /// can show each source in its own tab and fold call traces. The dmesg log is
 /// parsed into BUG reports (head + foldable call trace); other logs become a single
 /// block of matching lines.
-fn collect_issues(logs: &std::path::Path) -> String {
+fn collect_issues(logs: &std::path::Path, watched: &Watched) -> String {
     // Scan the dir's own logs, plus any per-variant subdirs (compare jobs) so the
     // top-level call (used by the end-of-job summary) isn't blind. A `?variant=` call
     // passes logs/<variant> directly, whose subdirs don't exist — so it stays clean.
-    let mut sections = scan_issue_dir(logs, "");
+    let mut sections = scan_issue_dir(logs, "", watched);
     for variant in ["baseline", "patched"] {
         let sub = logs.join(variant);
         if sub.is_dir() {
-            sections.extend(scan_issue_dir(&sub, &format!("{variant}/")));
+            sections.extend(scan_issue_dir(&sub, &format!("{variant}/"), watched));
         }
     }
     json!(sections).to_string()
 }
 
+/// Bundle-declared extra patterns (`search-dmesg:` literals, `regex-dmesg:` regexes)
+/// to surface from console.log like a BUG. Empty when the bundle declares none.
+#[derive(Default)]
+struct Watched {
+    literals: Vec<String>,
+    regexes: Vec<regex::Regex>,
+}
+
+impl Watched {
+    fn is_empty(&self) -> bool { self.literals.is_empty() && self.regexes.is_empty() }
+    fn matches(&self, line: &str) -> bool {
+        self.literals.iter().any(|s| line.contains(s.as_str()))
+            || self.regexes.iter().any(|re| re.is_match(line))
+    }
+}
+
+/// Parse `search-dmesg:`/`regex-dmesg:` from a bundle's frontmatter — the first
+/// `---`…`---` block outside any code fence (mirrors the reproducer spec). Both keys
+/// may repeat; each line is one pattern. Invalid regexes are logged and skipped.
+fn watched_patterns(bundle_md: &str) -> Watched {
+    let mut w = Watched::default();
+    let mut in_block = false;
+    let mut opened = false;
+    let mut fence: Option<usize> = None; // backtick run length of the open fence
+    for line in bundle_md.lines() {
+        if let Some(n) = fence {
+            if line.trim().len() >= n && line.trim().chars().all(|c| c == '`') { fence = None; }
+            continue;
+        }
+        let ticks = line.trim_start().chars().take_while(|&c| c == '`').count();
+        if ticks >= 3 { fence = Some(ticks); continue; }
+        if line == "---" {
+            if !opened { in_block = true; opened = true; continue; }
+            if in_block { break; } // closing the first block
+        }
+        if in_block {
+            if let Some(v) = line.strip_prefix("search-dmesg:") {
+                let v = v.trim();
+                if !v.is_empty() { w.literals.push(v.to_string()); }
+            } else if let Some(v) = line.strip_prefix("regex-dmesg:") {
+                let v = v.trim();
+                match regex::Regex::new(v) {
+                    Ok(re) => w.regexes.push(re),
+                    Err(e) => tracing::warn!("ignoring invalid regex-dmesg {v:?}: {e}"),
+                }
+            }
+        }
+    }
+    w
+}
+
 /// Scan one log dir's files for problem markers; `prefix` labels the `file` field
 /// (e.g. "baseline/") so variant sources stay distinguishable in the merged result.
-fn scan_issue_dir(logs: &std::path::Path, prefix: &str) -> Vec<serde_json::Value> {
+fn scan_issue_dir(logs: &std::path::Path, prefix: &str, watched: &Watched) -> Vec<serde_json::Value> {
     // General crash markers. `BUG:` already catches sanitizer splats (KASAN/UBSAN/…
     // reports are printed as "BUG: KASAN: …"), so we don't search for sanitizer names
     // separately — that only produced false hits on build logs that mention the
@@ -400,6 +455,18 @@ fn scan_issue_dir(logs: &std::path::Path, prefix: &str) -> Vec<serde_json::Value
         "WARNING:", "FATAL", "fatal", "Call Trace", "segfault", "error:", "Error",
     ];
     let mut sections = Vec::new();
+    // Bundle-declared watched patterns come first so they're the default Issues tab.
+    if !watched.is_empty() {
+        if let Ok(content) = std::fs::read_to_string(logs.join("console.log")) {
+            let hits: Vec<&str> = content.lines().filter(|l| watched.matches(l)).collect();
+            if !hits.is_empty() {
+                sections.push(json!({
+                    "file": format!("{prefix}console.log (watched)"),
+                    "blocks": [json!({ "head": hits, "trace": [] })],
+                }));
+            }
+        }
+    }
     for file in ["console.log", "dmesg.log", "exec.log", "compile.log", "fetch.log", "run.log"] {
         let Ok(content) = std::fs::read_to_string(logs.join(file)) else { continue };
         let blocks = if file == "dmesg.log" {
@@ -631,7 +698,7 @@ fn spawn_summary(st: &AppState, id: i64, stage: &'static str) -> Vec<tokio::task
             let (s, bb, o) = (sumz.clone(), b.clone(), outcome.clone());
             handles.push(spawn_one(st, id, "result", b.clone(), dir.clone(),
                 move |bundle, logs, on_tok| {
-                    let issues = collect_issues(&logs);
+                    let issues = collect_issues(&logs, &watched_patterns(&bundle));
                     s.summarize_result(&bb, &bundle, &issues, exit, &o, on_tok)
                 }));
             let (s, bb) = (sumz.clone(), b.clone());
@@ -900,5 +967,48 @@ async fn sweep(st: &AppState) {
             .output().await;
         info!("cleanup: reaped {reaped} job dir(s) finished >{} days ago", st.cfg.retention_days);
         st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watched_patterns_extracts_literals_and_regexes() {
+        let md = "---\ncommit: v6.12\nsearch-dmesg: MK_SENTINEL_HIT\nsearch-dmesg: other\nregex-dmesg: MK_SENTINEL_\\w+\nregex-dmesg: ([unclosed\n---\n\n# prose\n";
+        let w = watched_patterns(md);
+        assert_eq!(w.literals, vec!["MK_SENTINEL_HIT", "other"]);
+        assert_eq!(w.regexes.len(), 1, "the unclosed regex must be skipped");
+        assert!(w.matches("[ 1.2] MK_SENTINEL_HIT now"));
+        assert!(w.matches("MK_SENTINEL_42"), "regex matches");
+        assert!(!w.matches("nothing here"));
+    }
+
+    #[test]
+    fn watched_patterns_ignores_keys_inside_code_fences() {
+        // A `search-dmesg:` line inside a fenced block (or after the block) is not meta.
+        let md = "---\nsearch-dmesg: real\n---\n\n```init:init.sh\nsearch-dmesg: notmeta\n```\n";
+        let w = watched_patterns(md);
+        assert_eq!(w.literals, vec!["real"]);
+    }
+
+    #[test]
+    fn watched_section_is_first_and_only_on_match() {
+        let dir = std::env::temp_dir().join(format!("mk-watch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("console.log"), "boot ok\nMK_SENTINEL_HIT fired\nmore\n").unwrap();
+        let w = watched_patterns("---\nsearch-dmesg: MK_SENTINEL_HIT\n---\n");
+        let out = collect_issues(&dir, &w);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let first = &v[0];
+        assert_eq!(first["file"], "console.log (watched)", "watched section is first: {out}");
+        assert_eq!(first["blocks"][0]["head"][0], "MK_SENTINEL_HIT fired");
+
+        // No patterns -> no watched section (unchanged behavior).
+        let none = collect_issues(&dir, &Watched::default());
+        let nv: serde_json::Value = serde_json::from_str(&none).unwrap();
+        assert!(nv.as_array().unwrap().iter().all(|s| s["file"] != "console.log (watched)"), "{none}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -26,6 +26,8 @@ axum = "0.7"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Compiles bundle-declared `regex-dmesg:` patterns scanned against console.log.
+regex = "1"
 duckdb = { version = "1", features = ["bundled"] }
 anyhow = "1"
 tracing = "0.1"
