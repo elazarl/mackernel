@@ -266,8 +266,11 @@ MODULE_LICENSE("GPL");
 
 \`\`\`init:init.sh
 #!/bin/bash
-set -e
-sudo dmesg | grep -i -A20 'BUG\\|oops\\|null pointer' || true
+# Reproduced (exit non-zero) if the module's NULL deref left an oops in dmesg.
+if sudo dmesg | grep -i -A20 'BUG:\\|Oops:\\|null pointer'; then
+    echo "oops detected — reproduced"; exit 1
+fi
+echo "no oops found"; exit 0
 \`\`\`
 `,
   },
@@ -298,43 +301,58 @@ int main(void) {
   },
   {
     label: "patch-compare",
-    blurb: "run v6.12 with & without a patch, side by side",
+    blurb: "v6.12 baseline vs an inline patch, side by side",
     bundle: `---
 commit: v6.12
-patch: https://example.com/fix.patch
 patch-compare: true
 ---
 
 # patch-compare — baseline vs patched, in parallel
 
-Builds and runs v6.12 twice: **baseline** (this patch stripped) and **patched**
-(the patch applied). The two runs appear side by side. Swap \`patch:\` for the
-patch you want to evaluate.
+Builds and runs v6.12 twice: **baseline** (patch stripped) and **patched** (patch
+applied), side by side. The patch is inline and self-contained — it bumps
+\`EXTRAVERSION\`, so \`uname -r\` differs between the two runs. Edit the fence to try
+your own change, or swap it for a \`patch:\` URL.
+
+\`\`\`patch:extraversion.patch
+--- a/Makefile
++++ b/Makefile
+@@ -2,5 +2,5 @@
+ VERSION = 6
+ PATCHLEVEL = 12
+ SUBLEVEL = 0
+-EXTRAVERSION =
++EXTRAVERSION = -patched
+ NAME = Baby Opossum Posse
+\`\`\`
 
 \`\`\`init:init.sh
 #!/bin/bash
 set -e
-sudo dmesg | tail -n 20
+echo "kernel release: $(uname -r)"   # baseline: 6.12.0 · patched: 6.12.0-patched
 \`\`\`
 `,
   },
   {
     label: "thread-compare",
-    blurb: "run v6.12 with & without an LKML series, side by side",
+    blurb: "v6.18 baseline vs a real LKML series, side by side",
     bundle: `---
-commit: v6.12
-thread-compare: https://lore.kernel.org/lkml/example-thread@mail/
+commit: v6.18
+thread-compare: https://lore.kernel.org/r/20260116111906.3413346-2-Qing-wu.Li@leica-geosystems.com.cn
 ---
 
 # thread-compare — baseline vs an LKML series, in parallel
 
-Downloads the whole patch series from the lore thread (mbox) and \`git am\`s it on
-top of v6.12 for the **patched** run; **baseline** is plain v6.12. Replace the
-\`thread-compare:\` URL with the lore thread you want to evaluate.
+Downloads the patch series from a real lore thread (a two-patch i2c-imx
+block-read fix) as an mbox and \`git am\`s it onto v6.18 for the **patched** run;
+**baseline** is plain v6.18 — so the two source trees differ by exactly that
+series. Replace the \`thread-compare:\` URL with the lore thread you want to
+evaluate.
 
 \`\`\`init:init.sh
 #!/bin/bash
 set -e
+echo "kernel release: $(uname -r)"
 sudo dmesg | tail -n 20
 \`\`\`
 `,
