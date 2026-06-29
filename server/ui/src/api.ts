@@ -1,3 +1,5 @@
+import { getCreds } from "./lib/creds";
+
 export interface Job {
   id: number;
   created_ms: number;
@@ -115,9 +117,22 @@ export async function listLkmlPatches(list: string, skip = 0): Promise<LkmlPage>
 // is fetched once status is "done".
 export interface ScaffoldStatus { id: number; status: string; error: string | null; }
 export async function startScaffold(req: { thread?: string; patch?: string; commit?: string }): Promise<{ id: number }> {
+  // Auto-fill the OpenAI-compatible creds the user set in settings; the backend requires
+  // them (no free tier) and rejects the request with 400 if any is missing.
   return (await authed("/api/scaffold", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req),
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...req, ...getCreds() }),
   })).json();
+}
+// List the models a provider exposes, via the backend (which proxies the provider's
+// /v1/models — a direct browser call would be blocked by CORS and would leak the key).
+export async function listModels(baseUrl: string, apiKey: string): Promise<string[]> {
+  const r = await authed("/api/scaffold/models", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ baseUrl, apiKey }),
+  });
+  if (!r.ok) throw new Error(`couldn't list models (${r.status})`);
+  return r.json();
 }
 export async function getScaffold(id: number): Promise<ScaffoldStatus> {
   return (await authed(`/api/scaffold/${id}`)).json();

@@ -11,6 +11,8 @@ import { BundleModal } from "./BundleModal";
 import { SpecModal } from "./SpecModal";
 import { LkmlBrowser } from "./LkmlBrowser";
 import { ScaffoldModal } from "./ScaffoldModal";
+import { OpenAISettings } from "./OpenAISettings";
+import { hasCreds } from "../lib/creds";
 import { PeaksChart } from "./charts";
 import { JobDetail } from "./JobDetail";
 
@@ -45,6 +47,8 @@ export function Dashboard() {
   // When set, the scaffold modal runs the opencode agent for this request.
   const [scaffoldReq, setScaffoldReq] = useState<{ thread?: string; patch?: string } | null>(null);
   const [showSpec, setShowSpec] = useState(false);
+  // Settings opens automatically when a scaffold is attempted without OpenAI creds.
+  const [showSettings, setShowSettings] = useState(false);
   const [theme, setTheme] = useState<Theme>(getTheme());
   const toggleTheme = () => {
     const t = theme === "dark" ? "light" : "dark";
@@ -89,6 +93,7 @@ export function Dashboard() {
   // Scaffold from a detected LKML candidate: run the opencode agent on its thread,
   // and (on success) drop the generated bundle into the edit/run modal.
   const onScaffoldCandidate = (c: Candidate) => {
+    if (!hasCreds()) { setShowSettings(true); return; }
     setScaffoldReq({ thread: c.source_url });
   };
   const onScaffoldDone = (b: string) => {
@@ -108,6 +113,7 @@ export function Dashboard() {
   // Scaffold from a browsed patch: hand the lore thread to the opencode agent.
   const onScaffoldPatch = (p: LkmlPatch) => {
     setLkmlOpen(false);
+    if (!hasCreds()) { setShowSettings(true); return; }
     setScaffoldReq({ thread: p.url });
   };
 
@@ -118,6 +124,7 @@ export function Dashboard() {
         <h1 className="cursor-pointer hover:text-accent" title="Home" onClick={() => selectJob(null)}>Kernel Reproducer Runner</h1>
         <button className="linkbtn" onClick={() => setShowSpec(true)}>Spec</button>
         <button className="linkbtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light" : "🌙 Dark"}</button>
+        <button className="linkbtn" title="Scaffold model settings (OpenAI endpoint + key)" onClick={() => setShowSettings(true)}>⚙ Settings</button>
         {!connected && <span className="text-fail text-[.85em]" title="lost the live stream — reconnecting…">⚠ offline</span>}
         {summarizer && (
           <span className="ml-auto flex items-center gap-1.5 text-[.85em] text-muted">
@@ -133,6 +140,7 @@ export function Dashboard() {
         )}
       </div>
       {showSpec && <SpecModal onClose={() => setShowSpec(false)} />}
+      {showSettings && <OpenAISettings onClose={() => setShowSettings(false)} />}
       {modalOpen && (
         <BundleModal bundle={bundle} theme={theme} onChange={setBundle}
           onRun={onRun} onClose={() => setModalOpen(false)} />

@@ -8,9 +8,11 @@ podman options considered and the mechanism we use.
 
 ## What opencode connects to
 
-`opencode` (the `opencode/...` "zen" free models) talks HTTPS to the opencode
-gateway (`opencode.ai` / its API host). It is a Node/undici client, so it honors
-the `HTTPS_PROXY` / `HTTP_PROXY` environment variables.
+Scaffolding runs against the user's own OpenAI-compatible endpoint (no free tier):
+`opencode` talks HTTPS to whichever provider the user picked (its base URL, e.g.
+`api.inference.crusoecloud.com`). It is a Node/undici client, so it honors the
+`HTTPS_PROXY` / `HTTP_PROXY` environment variables. The allowlist below must therefore
+permit every provider host the UI offers (and any "Custom" host an operator allows).
 
 ## Options considered (podman)
 
@@ -44,8 +46,18 @@ Reach the host from a rootless container via `host.containers.internal`, e.g.:
     FilterDefaultDeny Yes
     FilterExtended On
 
-    # /etc/tinyproxy/allow.txt
-    (^|\.)opencode\.ai$
+    # /etc/tinyproxy/allow.txt -- the OpenAI-compatible provider hosts the UI offers
+    # (server/ui/src/lib/providers.ts). Add a "Custom" provider's host here too.
+    (^|\.)api\.openai\.com$
+    (^|\.)api\.inference\.crusoecloud\.com$
+    (^|\.)api\.inference\.crusoecloud\.xyz$
+    (^|\.)openrouter\.inference\.crusoecloud\.com$
+    (^|\.)openrouter\.ai$
+    (^|\.)api\.groq\.com$
+    (^|\.)api\.fireworks\.ai$
+    (^|\.)api\.together\.xyz$
+    (^|\.)api\.deepinfra\.com$
+    (^|\.)api\.hyperbolic\.xyz$
 
 Start it on the host (or as a sibling systemd unit beside `mackernel-server`) and
 set `MK_OPENCODE_PROXY` in the server's environment / systemd drop-in (see

@@ -219,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/candidates/:msgid/run", post(run_candidate))
         .route("/api/lkml/patches", get(list_lkml_patches))
         .route("/api/scaffold", post(scaffold::start))
+        .route("/api/scaffold/models", post(scaffold::models))
         .route("/api/scaffold/:id", get(scaffold::get))
         .route("/api/scaffold/:id/bundle", get(scaffold::bundle))
         .route("/api/scaffold/:id/log", get(scaffold::log))

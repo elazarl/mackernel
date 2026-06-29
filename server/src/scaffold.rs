@@ -68,6 +68,7 @@ impl Store {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ScaffoldReq {
     /// A lore.kernel.org thread URL whose [PATCH] series the agent reproduces.
     thread: Option<String>,
@@ -75,6 +76,11 @@ pub struct ScaffoldReq {
     patch: Option<String>,
     /// Base commit/tag to explore (optional; defaults to the server's kernel HEAD).
     commit: Option<String>,
+    /// The user's OpenAI-compatible endpoint + key + model (no free tier). All three are
+    /// required; the agent runs opencode against this provider (see scaffold-repro.py).
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
 }
 
 /// POST /api/scaffold — start a scaffold run; returns its id immediately. The agent
@@ -88,6 +94,13 @@ pub async fn start(
     if thread.is_none() && patch.is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }
+    // No free tier: scaffolding requires the user's own OpenAI-compatible creds. Reject
+    // unless all three are present (the UI gates the buttons on the same condition).
+    let nonblank = |o: Option<String>| o.filter(|s| !s.trim().is_empty());
+    let (base_url, api_key, model) = match (nonblank(req.base_url), nonblank(req.api_key), nonblank(req.model)) {
+        (Some(b), Some(k), Some(m)) => (b, k, m),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
 
     let store = st.scaffold.clone();
     let id = store.next_id.fetch_add(1, Ordering::Relaxed);
@@ -106,7 +119,7 @@ pub async fn start(
     };
 
     info!("scaffold {id}: queued");
-    tokio::spawn(run(st.clone(), id, dir, thread, patch_file, req.commit));
+    tokio::spawn(run(st.clone(), id, dir, thread, patch_file, req.commit, base_url, api_key, model));
     Ok(Json(json!({ "id": id })))
 }
 
@@ -119,6 +132,9 @@ async fn run(
     thread: Option<String>,
     patch_file: Option<std::path::PathBuf>,
     commit: Option<String>,
+    base_url: String,
+    api_key: String,
+    model: String,
 ) {
     let store = st.scaffold.clone();
     let _guard = store.lock.lock().await; // one agent at a time
@@ -141,6 +157,10 @@ async fn run(
         .current_dir(&st.repo)
         .env("MK_SANDBOX", "auto")
         .env("MK_WT_ROOT", dir.join("wt"))
+        // Creds ride as env, not argv, so the API key never appears in `ps`.
+        .env("MK_OPENAI_BASE_URL", &base_url)
+        .env("MK_OPENAI_API_KEY", &api_key)
+        .env("MK_OPENCODE_MODEL", &model)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -232,6 +252,52 @@ pub async fn bundle(State(st): State<AppState>, Path(id): Path<i64>) -> Result<S
 pub async fn log(State(st): State<AppState>, Path(id): Path<i64>) -> Result<String, StatusCode> {
     let p = st.work.join("scaffold").join(id.to_string()).join("scaffold.log");
     tokio::fs::read_to_string(p).await.map_err(|_| StatusCode::NOT_FOUND)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelsReq {
+    base_url: String,
+    api_key: String,
+}
+
+/// POST /api/scaffold/models — proxy the provider's `GET {baseUrl}/models` with the
+/// user's key and return the model ids. The browser can't call the provider directly
+/// (CORS), and proxying keeps the key off the page. Runs from the trusted server host,
+/// not through the opencode container's egress proxy.
+pub async fn models(Json(req): Json<ModelsReq>) -> Result<Json<Vec<String>>, StatusCode> {
+    let base = req.base_url.trim().trim_end_matches('/').to_string();
+    let key = req.api_key.trim().to_string();
+    if base.is_empty() || key.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let ids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, ()> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|_| ())?;
+        let resp = client
+            .get(format!("{base}/models"))
+            .bearer_auth(&key)
+            .send()
+            .map_err(|_| ())?
+            .error_for_status()
+            .map_err(|_| ())?;
+        let v: serde_json::Value = resp.json().map_err(|_| ())?;
+        // OpenAI shape: { "data": [ { "id": "..." }, ... ] }.
+        Ok(v.get("data")
+            .and_then(|d| d.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default())
+    })
+    .await
+    .map_err(crate::ise)?
+    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    Ok(Json(ids))
 }
 
 /// GET /api/scaffold/:id/events — SSE phase/log/done stream (mirrors job events).

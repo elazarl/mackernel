@@ -59,11 +59,20 @@ rk = _load_run_kernel()
 
 PROGRESS_SENTINEL = "MKPROGRESS"
 _PROGRESS = False
-# opencode agent runs are long — the free zen model explores the kernel tree at length
-# and 900s wasn't enough to finish even after it had written repro.md. Cap generously
-# (override via MK_SCAFFOLD_TIMEOUT).
+# opencode agent runs are long — the model explores the kernel tree at length and 900s
+# wasn't enough to finish even after it had written repro.md. Cap generously (override
+# via MK_SCAFFOLD_TIMEOUT).
 TIMEOUT = int(os.environ.get("MK_SCAFFOLD_TIMEOUT", "1800"))
-DEFAULT_MODEL = os.environ.get("MK_OPENCODE_MODEL", "opencode/deepseek-v4-flash-free")
+
+# The agent runs against the user's own OpenAI-compatible endpoint (no free tier): base
+# URL + API key + model, supplied by the service from the request. opencode reads the
+# key from this env var via a `{env:...}` reference in the opencode.json we write.
+OPENAI_BASE_URL = os.environ.get("MK_OPENAI_BASE_URL", "").strip()
+OPENAI_API_KEY = os.environ.get("MK_OPENAI_API_KEY", "").strip()
+MODEL = os.environ.get("MK_OPENCODE_MODEL", "").strip()
+# opencode provider id we register in opencode.json; -m <PROVIDER>/<model> selects it.
+PROVIDER = "custom"
+API_KEY_ENV = "MK_OPENAI_API_KEY"
 
 # The fixed instruction the agent must follow (verbatim from the feature request).
 INSTRUCTION = """\
@@ -155,22 +164,32 @@ When done, the bundle MUST be written to `./repro.md` and nothing else is needed
 """
 
 
+def write_opencode_config(work: Path) -> None:
+    """Register the user's endpoint as an opencode custom provider in /work/opencode.json
+    (cwd is /work, which opencode searches). `@ai-sdk/openai-compatible` is bundled in
+    the opencode binary, so no npm fetch happens. The API key stays a `{env:...}` ref so
+    it never lands on disk; the base URL and model name are not secret."""
+    cfg = {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {
+            PROVIDER: {
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {"baseURL": OPENAI_BASE_URL, "apiKey": f"{{env:{API_KEY_ENV}}}"},
+                "models": {MODEL: {}},
+            }
+        },
+    }
+    (work / "opencode.json").write_text(json.dumps(cfg, indent=2))
+
+
 def run_opencode(work: Path, wt: Path, arch: str, image: str, is_local: bool) -> None:
     """podman run opencode (agent mode) in `work` (mounted at /work) with the
-    worktree at /linux:ro and egress restricted to opencode's servers. Streams its
+    worktree at /linux:ro and egress restricted to the provider's servers. Streams its
     output to stdout (the service tees it to a log); kills it after TIMEOUT."""
     mklib.ensure_pulled(image, is_local, mklib.platform_args(arch))
-    auth = os.environ.get("MK_OPENCODE_AUTH", os.path.expanduser("~/.local/share/opencode"))
+    write_opencode_config(work)
     mounts = ["-v", mklib.volume(wt, "/linux", ro=True),
               "-v", mklib.volume(work, "/work")]
-    # opencode refreshes its token, so the auth dir is mounted read-write (a bind
-    # mount overrides --read-only for just this path). HOME=/work/.home (see
-    # scaffold_args), so opencode reads auth from $HOME/.local/share/opencode.
-    # Skipped if absent -- opencode then errors clearly at run time.
-    if Path(auth).is_dir():
-        mounts += ["-v", mklib.volume(Path(auth), "/work/.home/.local/share/opencode")]
-    else:
-        log(f"no opencode auth dir at {auth} (set MK_OPENCODE_AUTH); the run may fail to authenticate")
 
     # The long prompt lives in /work/PROMPT.md; the argv prompt just points the agent
     # at it (keeps us well under ARG_MAX and lets the agent read it with its tools).
@@ -186,10 +205,12 @@ def run_opencode(work: Path, wt: Path, arch: str, image: str, is_local: bool) ->
     # podman client, leaving the container running under conmon (an orphan that also
     # holds the free-tier's single concurrency slot).
     name = f"mk-scaffold-{os.getpid()}"
+    # Pass the API key through to the container by name (no `=value`), so it stays out of
+    # podman's argv (visible in `ps`); the value is in our env, set by the service.
     cmd = [
         "podman", "run", "--rm", "--name", name, *mklib.platform_args(arch),
-        *mklib.scaffold_args(arch), *mounts, "-w", "/work", image,
-        "opencode", "run", "--dangerously-skip-permissions", "-m", DEFAULT_MODEL, argv_prompt,
+        *mklib.scaffold_args(arch), "-e", API_KEY_ENV, *mounts, "-w", "/work", image,
+        "opencode", "run", "--dangerously-skip-permissions", "-m", f"{PROVIDER}/{MODEL}", argv_prompt,
     ]
     log("running opencode agent ...")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -237,6 +258,14 @@ def main() -> int:
     global _PROGRESS
     _PROGRESS = args.progress
     os.chdir(HERE)
+
+    # No free tier: the user's OpenAI-compatible endpoint + key + model are required
+    # (the service forwards them as env from the request). Fail clearly if any is unset.
+    missing = [n for n, v in (("MK_OPENAI_BASE_URL", OPENAI_BASE_URL),
+                              ("MK_OPENAI_API_KEY", OPENAI_API_KEY),
+                              ("MK_OPENCODE_MODEL", MODEL)) if not v]
+    if missing:
+        die(f"missing OpenAI credentials: {', '.join(missing)}")
 
     arch = mklib.target_arch()
     image, is_local = mklib.resolve_image(arch, opencode=True)
