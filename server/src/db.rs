@@ -414,9 +414,37 @@ impl Db {
         Ok(())
     }
 
-    // --- LKML candidates (dormant: polling was removed in favor of on-demand browse;
-    // these read paths back the still-mounted /api/candidates endpoints, which now
-    // always return empty) ----------------------------------------------------
+    // --- LKML monitor: seen-set + candidates ---------------------------------
+
+    /// True if the monitor has already evaluated this message id (any prior poll).
+    pub fn lkml_seen(&self, msgid: &str) -> Result<bool> {
+        let c = self.lock();
+        let n: i64 = c.query_row(
+            "SELECT count(*) FROM lkml_seen WHERE msgid=?",
+            duckdb::params![msgid], |r| r.get(0))?;
+        Ok(n > 0)
+    }
+
+    /// Mark a message id as evaluated so it is never re-fetched. Idempotent.
+    pub fn lkml_mark_seen(&self, msgid: &str, list: &str, now_ms: i64) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO lkml_seen (msgid, list, seen_ms) VALUES (?, ?, ?)
+             ON CONFLICT (msgid) DO NOTHING",
+            duckdb::params![msgid, list, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Record a qualifying cover letter as a runnable candidate. Idempotent on msgid.
+    pub fn add_candidate(&self, msgid: &str, list: &str, title: &str,
+                         source_url: &str, bundle: &str, now_ms: i64) -> Result<()> {
+        self.lock().execute(
+            "INSERT INTO candidates (msgid, list, title, source_url, bundle, detected_ms)
+             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (msgid) DO NOTHING",
+            duckdb::params![msgid, list, title, source_url, bundle, now_ms],
+        )?;
+        Ok(())
+    }
 
     /// Candidates for the site, newest first (without the bundle text).
     pub fn list_candidates(&self) -> Result<Vec<Candidate>> {

@@ -18,9 +18,8 @@ README for the bundle format.
 from __future__ import annotations
 
 import argparse
-import email.message
+import gzip
 import hashlib
-import html
 import json
 import mailbox
 import os
@@ -360,64 +359,14 @@ def _message_text(msg) -> str:
 
 _PATCH_IDX_RE = re.compile(r"\[PATCH[^\]]*?\b(\d+)\s*/\s*\d+\]", re.IGNORECASE)
 
-# lore.kernel.org sits behind Anubis bot-protection: raw/t.mbox.gz/search are blocked
-# outright, so we fetch the thread as Atom and rebuild the mails from it. Anubis inverts
-# the usual UA rule -- it challenges browser-looking UAs (Mozilla/...) and lets bot UAs
-# through -- so we send a git-style UA (curl's own default UA is rejected).
-LORE_UA = "git/2.43"
 
-
-def _xhtml_to_text(xhtml: str) -> str:
-    """public-inbox `<content type="xhtml">` body -> plain text: drop every tag (anchor
-    text is the URL itself, so links survive), then unescape entities last so an
-    entity-escaped `&lt;` in the body isn't mistaken for a tag."""
-    out = []
-    in_tag = False
-    for c in xhtml:
-        if c == "<":
-            in_tag = True
-        elif c == ">":
-            in_tag = False
-        elif not in_tag:
-            out.append(c)
-    return html.unescape("".join(out))
-
-
-def _atom_field(entry: str, tag: str) -> str:
-    """Unescaped text of the first <tag>…</tag> in an Atom entry (for title/name/…)."""
-    m = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", entry, re.S)
-    return html.unescape(m.group(1).strip()) if m else ""
-
-
-def atom_to_messages(atom: str) -> list:
-    """Reconstruct one email per <entry> in a public-inbox thread Atom feed: subject
-    from <title>, author from <author>, date from <updated>, and the body from the
-    (entity-escaped) <content> XHTML. Enough for `git am` -- it needs the subject and
-    the diff body, both of which the feed carries verbatim."""
-    msgs = []
-    for chunk in atom.split("<entry")[1:]:
-        entry = chunk.split("</entry>")[0]
-        cm = re.search(r"<content[^>]*>(.*?)</content>", entry, re.S)
-        body = _xhtml_to_text(cm.group(1)) if cm else ""
-        name, addr = _atom_field(entry, "name"), _atom_field(entry, "email")
-        m = email.message.EmailMessage()
-        m["Subject"] = _atom_field(entry, "title")
-        m["From"] = f"{name} <{addr}>" if addr else (name or "unknown")
-        date = _atom_field(entry, "updated")
-        if date:
-            m["Date"] = date
-        m.set_content(body.rstrip("\n") + "\n")
-        msgs.append(m)
-    return msgs
-
-
-def _select_patches(messages) -> list:
-    """From thread messages, return the ones to `git am`, in series order. Keep only
-    `[PATCH ...]` mails that actually carry a diff -- this drops the `0/N` cover letter
-    (no diff) and plain replies/acks -- ordered by the n/m in the subject (so 1/3, 2/3,
-    3/3 apply in order; ties keep feed order)."""
-    selected = []  # (series_index, order, message)
-    for order, msg in enumerate(messages):
+def select_thread_patches(mbox_path: Path) -> list:
+    """From a public-inbox thread mbox, return the messages to `git am`, in series
+    order. Keep only `[PATCH ...]` mails that actually carry a diff -- this drops the
+    `0/N` cover letter (no diff) and plain replies/acks -- and order them by the n/m
+    in the subject (so 1/3, 2/3, 3/3 apply in order; ties keep mbox order)."""
+    selected = []  # (series_index, mbox_order, message)
+    for order, msg in enumerate(mailbox.mbox(str(mbox_path))):
         subject = " ".join((msg.get("Subject") or "").split())
         if "[patch" not in subject.lower():
             continue
@@ -429,32 +378,31 @@ def _select_patches(messages) -> list:
     return [msg for _, _, msg in selected]
 
 
-def select_thread_patches(mbox_path: Path) -> list:
-    """`_select_patches` over a public-inbox thread mbox file."""
-    return _select_patches(mailbox.mbox(str(mbox_path)))
-
-
 def apply_thread(wt: Path, thread: str, flog, cap) -> None:
-    """Fetch the lore thread as Atom (the only endpoint past lore's bot-protection --
-    raw/t.mbox.gz are blocked), reconstruct each mail, keep the `[PATCH n/m]` ones that
-    carry a diff (dropping the `0/N` cover letter and non-patch replies), order them by
-    series index, and `git am` them onto the worktree.
+    """Fetch the lore thread mbox for `thread`, keep the `[PATCH n/m]` mails that
+    carry a diff (dropping the `0/N` cover letter and non-patch replies), order them
+    by series index, and `git am` them onto the worktree.
 
-    Known limitations: a thread carrying multiple revisions (v1 + v2) is not
-    de-duplicated -- every patch mail with a diff is applied (`b4 am` is the upgrade
-    path). The patch text is rebuilt from the Atom `<content>` body; if `git am` ever
-    fails, suspect reconstruction fidelity rather than series selection."""
+    Known limitation: a thread carrying multiple revisions (v1 + v2) is not
+    de-duplicated -- every patch mail with a diff is applied. `b4 am` would be the
+    upgrade path if that becomes a problem in practice."""
     base = thread.rstrip("/")
     if base.endswith("/raw"):
         base = base[: -len("/raw")]
-    atom_url = base + "/t.atom"
+    mbox_url = base + "/t.mbox.gz"
 
-    atom_file = wt / ".mk-thread.atom"
-    flog(f"downloading thread atom {atom_url} ...")
-    if run(["curl", "-LfsS", "-A", LORE_UA, "-o", str(atom_file), atom_url], **cap).returncode != 0:
-        die("thread atom download failed")
+    gz = wt / ".mk-thread.mbox.gz"
+    flog(f"downloading thread mbox {mbox_url} ...")
+    if run(["curl", "-LfsS", "-o", str(gz), mbox_url], **cap).returncode != 0:
+        die("thread mbox download failed")
+    raw = wt / ".mk-thread.mbox"
+    try:
+        with gzip.open(gz, "rb") as f:
+            raw.write_bytes(f.read())
+    except OSError as e:
+        die(f"thread mbox decompress failed: {e}")
 
-    patches = _select_patches(atom_to_messages(atom_file.read_text(errors="replace")))
+    patches = select_thread_patches(raw)
     if not patches:
         die("thread contained no applicable [PATCH] mails with diffs")
 

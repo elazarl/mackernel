@@ -60,53 +60,6 @@ def test_no_compare():
     assert rk.compare_variants(meta) is None
 
 
-# A minimal public-inbox thread Atom feed: a 0/2 cover (no diff) + two patch mails,
-# one of which carries a diff with entity-escaped chars and a tab-indented line.
-_THREAD_ATOM = """<feed>
-<entry><title>[PATCH 0/2] fix the thing</title>
-<author><name>Pat Submitter</name><email>pat@example.com</email></author>
-<updated>2026-06-25T12:00:00Z</updated>
-<content type="xhtml"><div><pre>This series fixes a thing.
-See &lt;https://example.com&gt; for context.</pre></div></content></entry>
-<entry><title>[PATCH 1/2] core: fix off-by-one</title>
-<author><name>Pat Submitter</name><email>pat@example.com</email></author>
-<updated>2026-06-25T12:00:01Z</updated>
-<content type="xhtml"><div><pre>Signed-off-by: Pat Submitter &lt;pat@example.com&gt;
----
-diff --git a/core.c b/core.c
---- a/core.c
-+++ b/core.c
-@@ -1,3 +1,3 @@ int main(void)
--\tint x = len;
-+\tint x = len - 1;
-</pre></div></content></entry>
-<entry><title>[PATCH 2/2] docs: note the fix</title>
-<author><name>Pat Submitter</name><email>pat@example.com</email></author>
-<updated>2026-06-25T12:00:02Z</updated>
-<content type="xhtml"><div><pre>no diff here, just prose</pre></div></content></entry>
-</feed>""".replace("\\t", "\t")
-
-
-def test_atom_to_messages_reconstructs_subject_and_body():
-    msgs = rk.atom_to_messages(_THREAD_ATOM)
-    assert len(msgs) == 3
-    assert msgs[0]["Subject"] == "[PATCH 0/2] fix the thing"
-    assert msgs[0]["From"] == "Pat Submitter <pat@example.com>"
-    body0 = rk._message_text(msgs[0])
-    # entity-escaped angle brackets come back literal
-    assert "<https://example.com>" in body0
-
-
-def test_select_patches_keeps_diffs_in_order():
-    patches = rk._select_patches(rk.atom_to_messages(_THREAD_ATOM))
-    # cover (0/2, no diff) and the prose 2/2 (no diff) are dropped; only 1/2 remains.
-    assert len(patches) == 1
-    assert patches[0]["Subject"] == "[PATCH 1/2] core: fix off-by-one"
-    body = rk._message_text(patches[0])
-    assert "diff --git a/core.c b/core.c" in body
-    assert "\tint x = len - 1;" in body          # tab indentation preserved
-
-
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

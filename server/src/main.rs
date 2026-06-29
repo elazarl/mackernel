@@ -195,7 +195,12 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(scheduler_loop(state.clone(), rx));
     tokio::spawn(cleanup_loop(state.clone()));
-    // No LKML polling: the UI browses lists on demand via GET /api/lkml/patches.
+    // LKML monitor: only runs when MK_LKML_LISTS names at least one list (otherwise we
+    // never poll lore.kernel.org). Detected reproducer cover letters become candidates
+    // shown on the site; nothing builds until a human clicks Run.
+    if !state.cfg.lkml_lists.is_empty() {
+        tokio::spawn(lkml::monitor_loop(state.clone()));
+    }
 
     // /api/* requires the bearer token (when configured); the embedded UI is
     // served unauthenticated so it can load and prompt for the token.
@@ -210,7 +215,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/jobs/:id/logs/:kind", get(get_log))
         .route("/api/candidates", get(list_candidates))
         .route("/api/candidates/:msgid/run", post(run_candidate))
-        .route("/api/lkml/patches", get(list_lkml_patches))
         .route("/api/metrics/peaks", get(get_peaks))
         .route("/api/summarizer", get(get_summarizer))
         .route("/api/highlight.css", get(highlight_css))
@@ -263,30 +267,6 @@ async fn get_job_summaries(State(st): State<AppState>, Path(id): Path<i64>) -> R
 
 async fn list_candidates(State(st): State<AppState>) -> Result<Json<Vec<db::Candidate>>, StatusCode> {
     Ok(Json(st.db.list_candidates().map_err(ise)?))
-}
-
-/// A page of recent patch cover letters on a public-inbox list, for the on-demand LKML
-/// browser. `?list=` is a lore path segment, whitelisted to `[a-z0-9._-]`; `?skip=` pages
-/// through the list's git mirror. Returns the helper's JSON (`{patches,more,next,epoch}`)
-/// verbatim. A fetch failure (lore unreachable / Anubis) is a 502, not a 500.
-async fn list_lkml_patches(
-    State(st): State<AppState>,
-    Query(q): Query<HashMap<String, String>>,
-) -> Result<Response, StatusCode> {
-    let list = q.get("list").map(String::as_str).unwrap_or("");
-    if list.is_empty()
-        || !list.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-    {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    let skip: u32 = q.get("skip").and_then(|s| s.parse().ok()).unwrap_or(0);
-    match lkml::list_patches(&st.repo, list, skip).await {
-        Ok(json) => Ok(([(CONTENT_TYPE, "application/json")], json).into_response()),
-        Err(e) => {
-            warn!("lkml: list_patches({list}, skip={skip}) failed: {e:#}");
-            Err(StatusCode::BAD_GATEWAY)
-        }
-    }
 }
 
 /// Run an LKML candidate: create a job from its stored bundle (which already carries
