@@ -5,6 +5,7 @@ mod db;
 mod embed;
 mod lkml;
 mod metrics;
+mod scaffold;
 mod sched;
 mod summarize;
 
@@ -68,9 +69,12 @@ struct AppState {
     /// loading; flushed by the background loader once it's ready (instead of being
     /// silently dropped). See `spawn_summary`.
     summary_queue: Arc<std::sync::Mutex<Vec<(i64, &'static str)>>>,
+    /// In-memory store for "scaffold a reproducer" runs (the opencode agent). See
+    /// `scaffold.rs` — ephemeral, separate id space + SSE bus from jobs.
+    scaffold: Arc<scaffold::Store>,
 }
 
-fn now_ms() -> i64 {
+pub(crate) fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
 }
 
@@ -167,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
         db: database, work: work.clone(), repo: repo.clone(), tx,
         bus: Bus::default(), cfg: Cfg::from_env(), auth_token,
         summarizer: summarizer.clone(), summary_queue,
+        scaffold: Arc::new(scaffold::Store::default()),
     };
 
     if summarize::Summarizer::enabled() {
@@ -215,6 +220,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/jobs/:id/logs/:kind", get(get_log))
         .route("/api/candidates", get(list_candidates))
         .route("/api/candidates/:msgid/run", post(run_candidate))
+        .route("/api/scaffold", post(scaffold::start))
+        .route("/api/scaffold/:id", get(scaffold::get))
+        .route("/api/scaffold/:id/bundle", get(scaffold::bundle))
+        .route("/api/scaffold/:id/log", get(scaffold::log))
+        .route("/api/scaffold/:id/events", get(scaffold::events))
         .route("/api/metrics/peaks", get(get_peaks))
         .route("/api/summarizer", get(get_summarizer))
         .route("/api/highlight.css", get(highlight_css))
@@ -595,7 +605,7 @@ async fn require_auth(State(st): State<AppState>, req: Request, next: Next) -> R
     }
 }
 
-fn ise<E: std::fmt::Display>(e: E) -> StatusCode {
+pub(crate) fn ise<E: std::fmt::Display>(e: E) -> StatusCode {
     error!("internal error: {e}");
     StatusCode::INTERNAL_SERVER_ERROR
 }

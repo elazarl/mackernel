@@ -25,7 +25,8 @@ HERE = Path(__file__).resolve().parent
 
 # --- build image -----------------------------------------------------------
 
-def resolve_image(want_arch: str | None = None, gcc: str = "15") -> tuple[str, bool]:
+def resolve_image(want_arch: str | None = None, gcc: str = "15",
+                  opencode: bool = False) -> tuple[str, bool]:
     """Return (image_ref, is_local): prefer the locally-built image, otherwise
     fall back to the multi-arch GHCR image (podman pulls it automatically on
     first use). When want_arch is given and the local image is built for a
@@ -35,13 +36,20 @@ def resolve_image(want_arch: str | None = None, gcc: str = "15") -> tuple[str, b
     `gcc` selects the compiler image (from a bundle's `compiler:` key, default
     gcc-14). gcc-15 keeps the unsuffixed tag for back-compat; every other version
     (including the default 14) uses the `-gcc<N>` image published per gcc version
-    by CI / build-container.sh."""
+    by CI / build-container.sh.
+
+    `opencode=True` selects the scaffolding image (the gcc-15 build image + the
+    opencode CLI), tagged `-opencode` (local `mackernel-build-opencode`, remote
+    `:<version>-opencode`). It is gcc-version-independent, so it ignores `gcc`."""
     try:
         version = (HERE / "VERSION").read_text().strip()
     except OSError:
         version = "latest"
 
-    suffix = "" if str(gcc) == "15" else f"-gcc{gcc}"
+    if opencode:
+        suffix = "-opencode"
+    else:
+        suffix = "" if str(gcc) == "15" else f"-gcc{gcc}"
     # Locally-built image tag (produced by build-container.sh).
     local_image = os.environ.get("IMAGE", "mackernel-build") + suffix
     # Prebuilt multi-arch image published to GHCR by CI. Override REMOTE_IMAGE
@@ -253,6 +261,43 @@ def hardening_args(arch: str) -> list[str]:
     ]
     # Only genuinely emulated (qemu-user) foreign-arch runs need the MCS label
     # dropped; a native cross-compile container keeps full SELinux confinement.
+    if selinux_enforcing() and normalize_arch(arch) != host_arch() and not cross_compile(arch):
+        args += ["--security-opt", "label=disable"]
+    return args
+
+
+def scaffold_args(arch: str) -> list[str]:
+    """podman flags for the opencode scaffolding container. Same least-privilege
+    posture as `hardening_args` (read-only root, dropped caps, no-new-privileges,
+    tmpfs scratch) EXCEPT it needs network: the agent reaches its model gateway.
+
+    Egress is restricted to opencode's servers by an MK_OPENCODE_PROXY allowlisting
+    HTTPS proxy on the host (see docs/opencode-egress.md): the container gets normal
+    rootless networking plus HTTP(S)_PROXY pointing at it, so all traffic tunnels
+    through the proxy and its allowlist is the enforcement point. With no proxy set
+    (dev), the container falls back to plain egress -- the agent still works, but the
+    allowlist isn't enforced.
+
+    ponytail: env-proxy is honored by opencode (undici), not enforced at L3 -- a
+    determined process could open a direct socket. Add an nftables egress-drop rule
+    if hard enforcement is needed (see docs/opencode-egress.md)."""
+    args = [
+        "--cap-drop=all",
+        "--cap-add=dac_override",
+        "--security-opt", "no-new-privileges",
+        "--read-only",
+        "--tmpfs", "/tmp:rw,exec",
+        "--tmpfs", "/run:rw",
+        # opencode (Bun) writes its state/cache/config under $HOME; the root fs is
+        # read-only, so point HOME at the writable /work mount (run_opencode mounts
+        # the auth dir under it at $HOME/.local/share/opencode).
+        "-e", "HOME=/work/.home",
+    ]
+    proxy = os.environ.get("MK_OPENCODE_PROXY")
+    if proxy:
+        for var in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy"):
+            args += ["-e", f"{var}={proxy}"]
+    # Same emulated-arch SELinux MCS caveat as hardening_args.
     if selinux_enforcing() and normalize_arch(arch) != host_arch() and not cross_compile(arch):
         args += ["--security-opt", "label=disable"]
     return args

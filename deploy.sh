@@ -22,8 +22,10 @@
 #                       NEVER committed; e.g.  OPENROUTER_API_KEY=sk-or-... ./deploy.sh
 #   MK_OR_MODELS     space-separated OpenRouter model ids (non-primary)
 #                    (default: "poolside/laguna-xs.2:free nvidia/nemotron-3-ultra-550b-a55b:free")
-#   MK_OPENCODE_MODEL  opencode (CLI) free model, the PRIMARY backend
-#                    (default: opencode/deepseek-v4-flash-free)
+#   MK_OPENCODE_MODEL  opencode (CLI) free model, the PRIMARY backend + the model
+#                    the scaffolder uses (default: opencode/deepseek-v4-flash-free)
+#   MK_OPENCODE_PROXY  if set, the scaffold agent container routes egress through this
+#                    allowlisting HTTPS proxy (see docs/opencode-egress.md)
 #   MK_LLAMA_NICE    nice level for the local llama-server          (default: 19)
 set -euo pipefail
 
@@ -77,7 +79,15 @@ rsync -az --delete "$HERE/server/ui/dist/" "$HOST:$REMOTE_REPO/server/ui/dist/"
 # travels over ssh *stdin* (never argv, never the repo).
 DROPIN="[Service]
 Environment=MK_LLAMA_NICE=${LLAMA_NICE}
-Environment=MK_OPENCODE_BIN=%h/.opencode/bin/opencode"
+Environment=MK_OPENCODE_BIN=%h/.opencode/bin/opencode
+Environment=MK_OPENCODE_MODEL=${OPENCODE_MODEL}"
+# Scaffolding (the opencode agent in a container) restricts egress to opencode's
+# servers via an allowlisting proxy; pass MK_OPENCODE_PROXY through if set (see
+# docs/opencode-egress.md). Unset = unrestricted egress for the agent container.
+if [[ -n "${MK_OPENCODE_PROXY:-}" ]]; then
+  DROPIN+="
+Environment=MK_OPENCODE_PROXY=${MK_OPENCODE_PROXY}"
+fi
 # opencode (free zen model via the opencode CLI) is the PRIMARY backend; the
 # OpenRouter HTTP models (if a key is set) are added as non-primary. Label is the
 # model basename minus ':free' (full id shows in the UI tooltip). %h = user home.

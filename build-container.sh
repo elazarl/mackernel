@@ -30,3 +30,19 @@ for v in $GCC_VERSIONS; do
     fi
   fi
 done
+
+# (2) The scaffolding image: the gcc-15 build image + the opencode CLI. BASE points
+# at the local gcc-15 image just built above, so this needs no network. Keeps the
+# plain `-opencode` suffix that mklib.resolve_image(opencode=True) looks for.
+OC_TAG="${IMAGE}-opencode"
+echo "=== building $OC_TAG (opencode + mackernel ${MACKERNEL_VERSION}) ==="
+podman build --build-arg "BASE=${IMAGE}" \
+  -t "$OC_TAG" -t "${OC_TAG}:${MACKERNEL_VERSION}" -f Containerfile.opencode .
+podman run --rm "$OC_TAG" opencode --version | head -1
+
+if [ "${PUSH:-0}" = "1" ]; then
+  rtag="${REMOTE}:${MACKERNEL_VERSION}-opencode"
+  echo "=== pushing $rtag ==="
+  podman tag "$OC_TAG" "$rtag" && podman push "$rtag"
+  podman tag "$OC_TAG" "${REMOTE}:latest-opencode" && podman push "${REMOTE}:latest-opencode"
+fi

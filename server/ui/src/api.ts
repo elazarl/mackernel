@@ -101,6 +101,31 @@ export async function listCandidates(): Promise<Candidate[]> {
 export async function runCandidate(msgid: string): Promise<{ id: number }> {
   return (await authed(`/api/candidates/${encodeURIComponent(msgid)}/run`, { method: "POST" })).json();
 }
+// "Scaffold a reproducer": the opencode agent writes a bundle from a patch series.
+// start returns an id; progress streams over scaffoldEventsUrl; the finished bundle
+// is fetched once status is "done".
+export interface ScaffoldStatus { id: number; status: string; error: string | null; }
+export async function startScaffold(req: { thread?: string; patch?: string; commit?: string }): Promise<{ id: number }> {
+  return (await authed("/api/scaffold", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req),
+  })).json();
+}
+export async function getScaffold(id: number): Promise<ScaffoldStatus> {
+  return (await authed(`/api/scaffold/${id}`)).json();
+}
+export async function getScaffoldBundle(id: number): Promise<string> {
+  const r = await authed(`/api/scaffold/${id}/bundle`);
+  return r.ok ? r.text() : "";
+}
+export async function getScaffoldLog(id: number): Promise<string> {
+  const r = await authed(`/api/scaffold/${id}/log`);
+  return r.ok ? r.text() : "";
+}
+export function scaffoldEventsUrl(id: number): string {
+  const t = token();
+  return `/api/scaffold/${id}/events${t ? `?token=${encodeURIComponent(t)}` : ""}`;
+}
+
 export async function getMetrics(id: number): Promise<Sample[]> {
   return (await authed(`/api/jobs/${id}/metrics`)).json();
 }

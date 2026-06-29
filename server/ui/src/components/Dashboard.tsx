@@ -9,6 +9,7 @@ import { jobFromPath, statusColor, summaryTip } from "../lib/format";
 import { ModelSwitcher } from "./ModelSwitcher";
 import { BundleModal } from "./BundleModal";
 import { SpecModal } from "./SpecModal";
+import { ScaffoldModal } from "./ScaffoldModal";
 import { PeaksChart } from "./charts";
 import { JobDetail } from "./JobDetail";
 
@@ -39,6 +40,8 @@ export function Dashboard() {
   }, []);
   const [bundle, setBundle] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  // When set, the scaffold modal runs the opencode agent for this request.
+  const [scaffoldReq, setScaffoldReq] = useState<{ thread?: string; patch?: string } | null>(null);
   const [showSpec, setShowSpec] = useState(false);
   const [theme, setTheme] = useState<Theme>(getTheme());
   const toggleTheme = () => {
@@ -81,6 +84,17 @@ export function Dashboard() {
     selectJob(id);
   };
 
+  // Scaffold from a detected LKML candidate: run the opencode agent on its thread,
+  // and (on success) drop the generated bundle into the edit/run modal.
+  const onScaffoldCandidate = (c: Candidate) => {
+    setScaffoldReq({ thread: c.source_url });
+  };
+  const onScaffoldDone = (b: string) => {
+    setScaffoldReq(null);
+    setBundle(b);
+    setModalOpen(true);
+  };
+
   return (
     <div className="mx-auto max-w-[1200px] px-6 py-4">
       {hlCss && <style>{hlCss}</style>}
@@ -107,6 +121,7 @@ export function Dashboard() {
         <BundleModal bundle={bundle} theme={theme} onChange={setBundle}
           onRun={onRun} onClose={() => setModalOpen(false)} />
       )}
+      {scaffoldReq && <ScaffoldModal req={scaffoldReq} onDone={onScaffoldDone} onClose={() => setScaffoldReq(null)} />}
       <div className="grid grid-cols-[380px_1fr] gap-4 items-start">
         <div>
           <section className="card">
@@ -142,10 +157,13 @@ export function Dashboard() {
                         onClick={(e) => e.stopPropagation()}>{c.title || c.msgid}</a>
                       {c.list && <span className="text-muted"> · {c.list}</span>}
                     </div>
-                    <div className="pl-3.5">
+                    <div className="pl-3.5 flex flex-wrap gap-1.5">
                       {c.job_id != null
                         ? <button className="chip mt-1" onClick={() => selectJob(c.job_id!)}>view job #{c.job_id}</button>
                         : <button className="chip mt-1" onClick={() => onRunCandidate(c)}>Run</button>}
+                      {/* Scaffold: let opencode write a reproducer from this series. */}
+                      <button className="chip mt-1" title="Let opencode write a reproducer for this series"
+                        onClick={() => onScaffoldCandidate(c)}>Scaffold ✨</button>
                     </div>
                   </li>
                 ))}

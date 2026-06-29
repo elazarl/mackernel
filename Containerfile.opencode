@@ -1,0 +1,23 @@
+# The kernel-build image plus the `opencode` CLI, for the "scaffold a reproducer"
+# feature: an AI agent that explores the (mounted, read-only) kernel source and
+# writes a reproducer bundle. Layered on the gcc-15 build image so the agent can
+# also build/inspect with the same toolchain. Published per VERSION as
+# :<version>-opencode (+ :latest-opencode); see build-container.sh / CI.
+#
+# BASE is the image to layer on. CI leaves the default (the GHCR multi-arch build
+# image); a local `build-container.sh` run passes the just-built local tag
+# (BASE=mackernel-build) so it needs no network.
+ARG BASE=ghcr.io/elazarl/mackernel:latest
+FROM ${BASE}
+
+# opencode talks HTTPS to its model gateway and curl fetches lore patches, so the
+# image needs a CA bundle. The official installer drops a prebuilt binary (per-arch)
+# into ~/.opencode/bin -- no node/bun runtime needed. Pin OPENCODE_VERSION for a
+# reproducible image (empty = latest at build time).
+ARG OPENCODE_VERSION=
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      curl ca-certificates unzip \
+ && VERSION="${OPENCODE_VERSION}" curl -fsSL https://opencode.ai/install | bash \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.opencode/bin:${PATH}"
