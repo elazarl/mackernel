@@ -22,3 +22,6 @@ server/work/
 # react ui build + deps
 server/ui/node_modules/
 server/ui/dist/
+
+# scaffold-repro.py scratch dirs (PROMPT.md + opencode HOME), created under the repo root
+.mk-scaffold-*/
