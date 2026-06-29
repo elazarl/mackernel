@@ -377,18 +377,19 @@ echo "kernel release: $(uname -r)"   # baseline: 6.12.0 · patched: 6.12.0-patch
   },
   {
     label: "thread-compare",
-    blurb: "v6.18 baseline vs a real LKML series, side by side",
+    blurb: "v6.17 baseline vs a real LKML fix, side by side",
     bundle: `---
-commit: v6.18
-thread-compare: https://lore.kernel.org/r/20260116111906.3413346-2-Qing-wu.Li@leica-geosystems.com.cn
+commit: v6.17
+thread-compare: https://lore.kernel.org/all/20251023125532.182262-1-daniel@iogearbox.net
 ---
 
-# thread-compare — baseline vs an LKML series, in parallel
+# thread-compare — baseline vs an LKML fix, in parallel
 
-Downloads the patch series from a real lore thread (a two-patch i2c-imx
-block-read fix) as an mbox and \`git am\`s it onto v6.18 for the **patched** run;
-**baseline** is plain v6.18 — so the two source trees differ by exactly that
-series. Replace the \`thread-compare:\` URL with the lore thread you want to
+Downloads a real lore patch (a one-line BPF fix: reject a negative \`head_room\`
+in \`__bpf_skb_change_head\`, which the BPF test-run path could otherwise drive
+into a \`BUG_ON\`) as an mbox and \`git am\`s it onto v6.17 for the **patched** run;
+**baseline** is plain v6.17 — so the two source trees differ by exactly that
+fix. Replace the \`thread-compare:\` URL with the lore thread you want to
 evaluate.
 
 \`\`\`init:init.sh
