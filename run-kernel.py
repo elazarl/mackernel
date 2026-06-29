@@ -70,6 +70,11 @@ ROLES = ("user", "module", "kconf", "patch", "init")
 # build LINUX_SRC as-is (no fetch).
 KERNEL_URL = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
 
+# lore.kernel.org sits behind Anubis bot-protection, which serves a JS challenge to
+# browser User-Agents but lets bot UAs (git/curl) through. Use a git-like UA for all
+# lore fetches (thread mbox, atom) so they aren't challenged. Mirrors lkml-browse.py.
+LORE_UA = "git/2.43"
+
 
 def enforce_hardened(meta: dict) -> dict:
     """Force the kernel source to KERNEL_URL whenever the bundle requests a remote
@@ -393,7 +398,7 @@ def apply_thread(wt: Path, thread: str, flog, cap) -> None:
 
     gz = wt / ".mk-thread.mbox.gz"
     flog(f"downloading thread mbox {mbox_url} ...")
-    if run(["curl", "-LfsS", "-o", str(gz), mbox_url], **cap).returncode != 0:
+    if run(["curl", "-LfsS", "-A", LORE_UA, "-o", str(gz), mbox_url], **cap).returncode != 0:
         die("thread mbox download failed")
     raw = wt / ".mk-thread.mbox"
     try:

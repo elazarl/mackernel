@@ -24,6 +24,7 @@ stdout for the service layer; opencode's own output is streamed too.
 from __future__ import annotations
 
 import argparse
+import gzip
 import importlib.util
 import json
 import os
@@ -86,18 +87,24 @@ def progress(phase: str, **extra) -> None:
 
 
 def patches_from_thread(thread: str) -> str:
-    """Fetch a lore thread's patch series as text (reusing run-kernel.py's Atom
-    reconstruction), without applying it. Returns the concatenated patch mails."""
+    """Fetch a lore thread's patch series as text (reusing run-kernel.py's mbox
+    selection), without applying it. Returns the concatenated patch mails."""
     base = thread.rstrip("/")
     if base.endswith("/raw"):
         base = base[: -len("/raw")]
-    atom_url = base + "/t.atom"
-    with tempfile.NamedTemporaryFile("w+", suffix=".atom", delete=False) as f:
-        atom_file = Path(f.name)
-    log(f"downloading thread atom {atom_url} ...")
-    if run(["curl", "-LfsS", "-A", rk.LORE_UA, "-o", str(atom_file), atom_url]).returncode != 0:
-        die("thread atom download failed")
-    msgs = rk._select_patches(rk.atom_to_messages(atom_file.read_text(errors="replace")))
+    mbox_url = base + "/t.mbox.gz"
+    tmp = Path(tempfile.mkdtemp(prefix="mk-scaffold-thread-"))
+    gz = tmp / "t.mbox.gz"
+    log(f"downloading thread mbox {mbox_url} ...")
+    if run(["curl", "-LfsS", "-A", rk.LORE_UA, "-o", str(gz), mbox_url]).returncode != 0:
+        die("thread mbox download failed")
+    mbox = tmp / "t.mbox"
+    try:
+        with gzip.open(gz, "rb") as f:
+            mbox.write_bytes(f.read())
+    except OSError as e:
+        die(f"thread mbox decompress failed: {e}")
+    msgs = rk.select_thread_patches(mbox)
     if not msgs:
         die("thread contained no applicable [PATCH] mails with diffs")
     parts = []
