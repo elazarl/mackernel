@@ -200,12 +200,9 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(scheduler_loop(state.clone(), rx));
     tokio::spawn(cleanup_loop(state.clone()));
-    // LKML monitor: only runs when MK_LKML_LISTS names at least one list (otherwise we
-    // never poll lore.kernel.org). Detected reproducer cover letters become candidates
-    // shown on the site; nothing builds until a human clicks Run.
-    if !state.cfg.lkml_lists.is_empty() {
-        tokio::spawn(lkml::monitor_loop(state.clone()));
-    }
+    // No LKML polling: the UI browses lists on demand via GET /api/lkml/patches
+    // (lore's git mirror, behind Anubis bot-protection) and opens a cover letter as a
+    // reproducer, or hands it to the scaffold agent.
 
     // /api/* requires the bearer token (when configured); the embedded UI is
     // served unauthenticated so it can load and prompt for the token.
@@ -220,6 +217,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/jobs/:id/logs/:kind", get(get_log))
         .route("/api/candidates", get(list_candidates))
         .route("/api/candidates/:msgid/run", post(run_candidate))
+        .route("/api/lkml/patches", get(list_lkml_patches))
         .route("/api/scaffold", post(scaffold::start))
         .route("/api/scaffold/:id", get(scaffold::get))
         .route("/api/scaffold/:id/bundle", get(scaffold::bundle))
@@ -300,6 +298,30 @@ async fn run_candidate(State(st): State<AppState>, Path(msgid): Path<String>)
     st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     st.bus.publish_global(json!({ "kind": "candidates" }).to_string());
     Ok(Json(json!({ "id": id })))
+}
+
+/// A page of recent patch cover letters on a public-inbox list, for the on-demand LKML
+/// browser. `?list=` is a lore path segment, whitelisted to `[a-z0-9._-]`; `?skip=` pages
+/// through the list's git mirror. Returns the helper's JSON (`{patches,more,next,epoch}`)
+/// verbatim. A fetch failure (lore unreachable / Anubis) is a 502, not a 500.
+async fn list_lkml_patches(
+    State(st): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Result<Response, StatusCode> {
+    let list = q.get("list").map(String::as_str).unwrap_or("");
+    if list.is_empty()
+        || !list.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let skip: u32 = q.get("skip").and_then(|s| s.parse().ok()).unwrap_or(0);
+    match lkml::list_patches(&st.repo, list, skip).await {
+        Ok(json) => Ok(([(CONTENT_TYPE, "application/json")], json).into_response()),
+        Err(e) => {
+            warn!("lkml: list_patches({list}, skip={skip}) failed: {e:#}");
+            Err(StatusCode::BAD_GATEWAY)
+        }
+    }
 }
 
 async fn get_log(

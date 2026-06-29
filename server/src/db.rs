@@ -415,7 +415,11 @@ impl Db {
     }
 
     // --- LKML monitor: seen-set + candidates ---------------------------------
-
+    // The auto-poll monitor was dropped in favor of on-demand browse, so the write
+    // side (seen-set + add_candidate) is currently unused; kept so the monitor can be
+    // re-enabled without re-deriving the schema. The read side (list_candidates /
+    // get_candidate_bundle) still backs the dormant "From LKML" panel + Run endpoint.
+    #[allow(dead_code)]
     /// True if the monitor has already evaluated this message id (any prior poll).
     pub fn lkml_seen(&self, msgid: &str) -> Result<bool> {
         let c = self.lock();
@@ -425,6 +429,7 @@ impl Db {
         Ok(n > 0)
     }
 
+    #[allow(dead_code)]
     /// Mark a message id as evaluated so it is never re-fetched. Idempotent.
     pub fn lkml_mark_seen(&self, msgid: &str, list: &str, now_ms: i64) -> Result<()> {
         self.lock().execute(
@@ -435,6 +440,7 @@ impl Db {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Record a qualifying cover letter as a runnable candidate. Idempotent on msgid.
     pub fn add_candidate(&self, msgid: &str, list: &str, title: &str,
                          source_url: &str, bundle: &str, now_ms: i64) -> Result<()> {

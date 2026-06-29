@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
 import {
   Candidate, getPeaks, getSummarizer, gib, globalEventsUrl, highlightCss, Job, JobSummary,
-  listCandidates, listJobs, Peak, runCandidate, submit, SummarizerInfo,
+  listCandidates, listJobs, LkmlPatch, Peak, runCandidate, submit, SummarizerInfo,
 } from "../api";
-import { EXAMPLES } from "../bundle";
+import { EXAMPLES, upsertMeta } from "../bundle";
 import { getTheme, setTheme as persistTheme, Theme } from "../lib/theme";
 import { jobFromPath, statusColor, summaryTip } from "../lib/format";
 import { ModelSwitcher } from "./ModelSwitcher";
 import { BundleModal } from "./BundleModal";
 import { SpecModal } from "./SpecModal";
+import { LkmlBrowser } from "./LkmlBrowser";
 import { ScaffoldModal } from "./ScaffoldModal";
 import { PeaksChart } from "./charts";
 import { JobDetail } from "./JobDetail";
@@ -40,6 +41,7 @@ export function Dashboard() {
   }, []);
   const [bundle, setBundle] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [lkmlOpen, setLkmlOpen] = useState(false);
   // When set, the scaffold modal runs the opencode agent for this request.
   const [scaffoldReq, setScaffoldReq] = useState<{ thread?: string; patch?: string } | null>(null);
   const [showSpec, setShowSpec] = useState(false);
@@ -95,6 +97,20 @@ export function Dashboard() {
     setModalOpen(true);
   };
 
+  // Pick a patch in the LKML browser: open its cover letter as a reproducer. Inject a
+  // `thread:` key pointing at the lore thread (upsertMeta keeps any existing
+  // frontmatter), then open the edit/preview/run modal.
+  const onPickPatch = (p: LkmlPatch) => {
+    setBundle(upsertMeta(p.body, "thread", p.url));
+    setLkmlOpen(false);
+    setModalOpen(true);
+  };
+  // Scaffold from a browsed patch: hand the lore thread to the opencode agent.
+  const onScaffoldPatch = (p: LkmlPatch) => {
+    setLkmlOpen(false);
+    setScaffoldReq({ thread: p.url });
+  };
+
   return (
     <div className="mx-auto max-w-[1200px] px-6 py-4">
       {hlCss && <style>{hlCss}</style>}
@@ -122,10 +138,16 @@ export function Dashboard() {
           onRun={onRun} onClose={() => setModalOpen(false)} />
       )}
       {scaffoldReq && <ScaffoldModal req={scaffoldReq} onDone={onScaffoldDone} onClose={() => setScaffoldReq(null)} />}
+      {lkmlOpen && <LkmlBrowser onPick={onPickPatch} onScaffold={onScaffoldPatch} onClose={() => setLkmlOpen(false)} />}
       <div className="grid grid-cols-[380px_1fr] gap-4 items-start">
         <div>
           <section className="card">
-            <h2>Submit a bundle</h2>
+            <div className="flex items-center justify-between">
+              <h2>Submit a bundle</h2>
+              {/* Browse lore.kernel.org on demand: pick a list, pick a patch, open its
+                  cover letter as a reproducer (or Scaffold it) — no polling. */}
+              <button className="chip" onClick={() => setLkmlOpen(true)}>Browse LKML</button>
+            </div>
             {/* Pasting a bundle opens the modal — the one place you edit / preview / run. */}
             <input
               className="mb-2.5 w-full box-border rounded-md border border-border bg-bg p-[9px] font-mono text-fg outline-none focus:border-accent"
