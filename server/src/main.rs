@@ -265,23 +265,25 @@ async fn list_candidates(State(st): State<AppState>) -> Result<Json<Vec<db::Cand
     Ok(Json(st.db.list_candidates().map_err(ise)?))
 }
 
-/// Recent patch cover letters on a public-inbox list, for the on-demand LKML browser.
-/// `?list=` is a lore path segment, so it's whitelisted to `[a-z0-9._-]` before use. A
-/// fetch failure (lore unreachable / Anubis) is a 502, not a 500.
+/// A page of recent patch cover letters on a public-inbox list, for the on-demand LKML
+/// browser. `?list=` is a lore path segment, whitelisted to `[a-z0-9._-]`; `?skip=` pages
+/// through the list's git mirror. Returns the helper's JSON (`{patches,more,next,epoch}`)
+/// verbatim. A fetch failure (lore unreachable / Anubis) is a 502, not a 500.
 async fn list_lkml_patches(
     State(st): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<lkml::Patch>>, StatusCode> {
+) -> Result<Response, StatusCode> {
     let list = q.get("list").map(String::as_str).unwrap_or("");
     if list.is_empty()
         || !list.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
     {
         return Err(StatusCode::BAD_REQUEST);
     }
-    match lkml::list_patches(&st.cfg.lkml_base, list).await {
-        Ok(patches) => Ok(Json(patches)),
+    let skip: u32 = q.get("skip").and_then(|s| s.parse().ok()).unwrap_or(0);
+    match lkml::list_patches(&st.repo, list, skip).await {
+        Ok(json) => Ok(([(CONTENT_TYPE, "application/json")], json).into_response()),
         Err(e) => {
-            warn!("lkml: list_patches({list}) failed: {e:#}");
+            warn!("lkml: list_patches({list}, skip={skip}) failed: {e:#}");
             Err(StatusCode::BAD_GATEWAY)
         }
     }

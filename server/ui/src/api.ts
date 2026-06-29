@@ -104,8 +104,11 @@ export async function runCandidate(msgid: string): Promise<{ id: number }> {
 // A patch-series cover letter (or standalone patch) on a lore list, from the on-demand
 // LKML browser. `body` is the cover-letter text — the reproducer-to-be.
 export interface LkmlPatch { title: string; url: string; body: string; }
-export async function listLkmlPatches(list: string): Promise<LkmlPatch[]> {
-  return (await authed(`/api/lkml/patches?list=${encodeURIComponent(list)}`)).json();
+// One page of cover letters from a list's git mirror. `more` => another page exists;
+// `next` is the skip to pass to fetch it.
+export interface LkmlPage { patches: LkmlPatch[]; more: boolean; next: number; }
+export async function listLkmlPatches(list: string, skip = 0): Promise<LkmlPage> {
+  return (await authed(`/api/lkml/patches?list=${encodeURIComponent(list)}&skip=${skip}`)).json();
 }
 export async function getMetrics(id: number): Promise<Sample[]> {
   return (await authed(`/api/jobs/${id}/metrics`)).json();
