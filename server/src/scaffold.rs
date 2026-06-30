@@ -30,14 +30,16 @@ pub struct Spec {
     pub thread: Option<String>,
     pub patch_file: Option<String>,
     pub commit: Option<String>,
-    /// A "refine" job: regenerate the bundle from a parent job's failed reproducer + its
-    /// run logs (copied into this job's dir as prev-repro.md / prev-logs/) instead of from
-    /// scratch. `#[serde(default)]` so old scaffold.json files still deserialize.
+    /// A "refine" job derived from a parent job (its reproducer + run logs are copied in as
+    /// prev-repro.md / prev-logs/). Informational/provenance; the scaffold stage detects
+    /// refine by prev-repro.md being present (text-refine has no parent). `#[serde(default)]`
+    /// so old scaffold.json files still deserialize.
     #[serde(default)]
     pub refine_parent: Option<i64>,
-    /// Optional free-text context the user typed when refining, woven into the agent prompt.
+    /// Optional free-text prompt/context the user added, woven into the agent prompt (both
+    /// fresh scaffold and refine).
     #[serde(default)]
-    pub refine_note: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +56,8 @@ pub struct ScaffoldReq {
     base_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
+    /// Optional free-text prompt/context woven into the agent's scaffold prompt.
+    note: Option<String>,
 }
 
 /// POST /api/scaffold — create a tracked job whose first stage scaffolds a bundle. Returns
@@ -91,7 +95,8 @@ pub async fn start(
         None
     };
     // Persist the non-secret spec; keep the creds in memory only.
-    let spec = Spec { thread, patch_file, commit, refine_parent: None, refine_note: None };
+    let note = req.note.filter(|s| !s.trim().is_empty());
+    let spec = Spec { thread, patch_file, commit, refine_parent: None, note };
     std::fs::write(dir.join("scaffold.json"), serde_json::to_vec(&spec).map_err(crate::ise)?)
         .map_err(crate::ise)?;
     st.scaffold_creds.lock().unwrap().insert(id, Creds { base_url, api_key, model });
@@ -172,7 +177,7 @@ pub async fn refine(
         patch_file: None,
         commit: None,
         refine_parent: Some(parent_id),
-        refine_note: req.note.filter(|s| !s.trim().is_empty()),
+        note: req.note.filter(|s| !s.trim().is_empty()),
     };
     std::fs::write(dir.join("scaffold.json"), serde_json::to_vec(&spec).map_err(crate::ise)?)
         .map_err(crate::ise)?;
@@ -180,6 +185,58 @@ pub async fn refine(
 
     st.tx.send(crate::SchedMsg::New(id)).map_err(crate::ise)?;
     info!("queued refine job {id} (from job {parent_id})");
+    st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
+    Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefineTextReq {
+    /// The reproducer bundle text to improve (from the editor).
+    bundle: Option<String>,
+    /// Optional free-text prompt guiding the improvement.
+    note: Option<String>,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+}
+
+/// POST /api/scaffold/refine-text — create a scaffold job that hands the agent an existing
+/// reproducer bundle (the editor's current text) plus an optional prompt and asks it to
+/// improve it. Like `refine` but with no parent job and no run logs.
+pub async fn refine_text(
+    State(st): State<AppState>,
+    Json(req): Json<RefineTextReq>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let bundle = req.bundle.filter(|s| !s.trim().is_empty()).ok_or(StatusCode::BAD_REQUEST)?;
+    let nonblank = |o: Option<String>| o.filter(|s| !s.trim().is_empty());
+    let (base_url, api_key, model) = match (nonblank(req.base_url), nonblank(req.api_key), nonblank(req.model)) {
+        (Some(b), Some(k), Some(m)) => (b, k, m),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    let id = st.db
+        .create_job_full(now_ms(), Some("scaffold"), None, None)
+        .map_err(crate::ise)?;
+    let dir = st.work.join(id.to_string());
+    let _ = std::fs::remove_dir_all(&dir); // clear any stale dir from a recycled id
+    std::fs::create_dir_all(dir.join("logs")).map_err(crate::ise)?;
+
+    // The bundle to improve is the agent's prev-repro.md; no prev-logs (it hasn't run).
+    std::fs::write(dir.join("prev-repro.md"), &bundle).map_err(crate::ise)?;
+    let spec = Spec {
+        thread: None,
+        patch_file: None,
+        commit: None,
+        refine_parent: None,
+        note: nonblank(req.note),
+    };
+    std::fs::write(dir.join("scaffold.json"), serde_json::to_vec(&spec).map_err(crate::ise)?)
+        .map_err(crate::ise)?;
+    st.scaffold_creds.lock().unwrap().insert(id, Creds { base_url, api_key, model });
+
+    st.tx.send(crate::SchedMsg::New(id)).map_err(crate::ise)?;
+    info!("queued refine-text job {id}");
     st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     Ok(Json(json!({ "id": id })))
 }
@@ -214,15 +271,20 @@ pub async fn run_scaffold_stage(
     if let Some(c) = &spec.commit {
         cmd.arg("--commit").arg(c);
     }
-    // Refine job: point the agent at the parent's prior reproducer + logs (copied into
-    // this dir by the refine handler) so it fixes the failed repro rather than writing one.
-    if spec.refine_parent.is_some() {
-        cmd.arg("--refine")
-            .arg("--prev-repro").arg(dir.join("prev-repro.md"))
-            .arg("--prev-logs").arg(dir.join("prev-logs"));
-        if let Some(note) = &spec.refine_note {
-            cmd.arg("--refine-note").arg(note);
+    // Refine: a prior reproducer was seeded as prev-repro.md (by `refine` from a parent job,
+    // or by `refine_text` from the editor). Point the agent at it; include prev-logs/ only
+    // when present (text-refine has none) so the agent fixes/improves rather than writes new.
+    let prev_repro = dir.join("prev-repro.md");
+    if prev_repro.is_file() {
+        cmd.arg("--refine").arg("--prev-repro").arg(&prev_repro);
+        let prev_logs = dir.join("prev-logs");
+        if prev_logs.is_dir() {
+            cmd.arg("--prev-logs").arg(&prev_logs);
         }
+    }
+    // Optional user prompt/context (fresh scaffold and refine alike).
+    if let Some(note) = &spec.note {
+        cmd.arg("--note").arg(note);
     }
     // No --progress: run_job owns the single "scaffold" phase. scaffold-repro.py's stdout
     // and stderr both append to run.log (run_job opens it append-mode, so the run-kernel

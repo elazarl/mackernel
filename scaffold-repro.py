@@ -126,13 +126,26 @@ def patches_from_thread(thread: str) -> str:
     return "\n\n".join(parts)
 
 
-def build_prompt_md(has_example: bool) -> str:
+def _note_section(note: str) -> str:
+    """A '## Additional context from the user' block, or empty when there's no note."""
+    return f"""\
+
+## Additional context from the user
+
+The user added this guidance — treat it as important:
+
+{note.strip()}
+""" if note.strip() else ""
+
+
+def build_prompt_md(has_example: bool, note: str = "") -> str:
     """The instruction file the agent reads (PROMPT.md). The bulky reference material —
     the bundle spec, the fix's patch series, and an example reproducer — is written to
     files in the work dir (the agent reads them with its own tools) and described here, so
     the prompt itself stays small. The agent writes ./repro.md."""
     example_line = ("- `./example-repro.md` — a complete, working example reproducer "
                     "bundle; mirror its structure.\n") if has_example else ""
+    note_section = _note_section(note)
     return f"""\
 # Scaffold a kernel reproducer
 
@@ -159,14 +172,15 @@ Set `patch-compare: true` (or `thread-compare:`) in the bundle so the runner bui
 the kernel both without and with the fix and shows the difference. Put the fix's patch
 (from `./fix.patch`) into a `patch:` fence, or use `thread-compare:` with the thread
 URL, as the spec describes.
-
+{note_section}
 When done, the bundle MUST be written to `./repro.md` and nothing else is needed.
 """
 
 
-def build_refine_prompt_md(spec: str, patches: str | None, note: str = "") -> str:
-    """PROMPT.md for a refine run: the agent's PRIOR reproducer failed; it must read the
-    prior run's logs (mounted as files, not inlined — they can be huge) and fix it."""
+def build_refine_prompt_md(spec: str, patches: str | None, note: str = "", has_logs: bool = True) -> str:
+    """PROMPT.md for a refine run: the agent is given a PRIOR reproducer (./prev-repro.md) to
+    fix/improve. With has_logs, the prior run's logs are in ./prev-logs/ (a failed run to
+    diagnose); without, it's an editor refine — improve the bundle per the user's guidance."""
     patch_section = f"""\
 
 ## The patch series that fixes the bug
@@ -175,17 +189,9 @@ def build_refine_prompt_md(spec: str, patches: str | None, note: str = "") -> st
 {patches}
 ```
 """ if patches else ""
-    note_section = f"""\
-
-## Additional context from the user
-
-The user added this guidance for the fix — treat it as important:
-
-{note.strip()}
-""" if note.strip() else ""
-    return f"""\
-# Refine a kernel reproducer that failed
-
+    note_section = _note_section(note)
+    if has_logs:
+        intro = """\
 You previously wrote the reproducer bundle in `./prev-repro.md`. It was run through
 `run-kernel.py` and did **NOT** succeed.
 
@@ -193,22 +199,36 @@ The logs from that failed run are in `./prev-logs/` — read them with your own 
 - `run.log` — the orchestrator log; carries the failure reason even for early crashes.
 - `dmesg`, `console` — the guest kernel ring buffer and raw serial output.
 - `compile`, `fetch`, `exec` — the build/fetch/run stages.
-(Compare jobs nest these under `prev-logs/baseline/` and `prev-logs/patched/`.)
-
-## Your task
-
+(Compare jobs nest these under `prev-logs/baseline/` and `prev-logs/patched/`.)"""
+        task = """\
 Read `./prev-repro.md` and the logs in `./prev-logs/`, diagnose why the reproducer
 failed (didn't build, didn't boot, didn't trigger the bug, wrong patch fence, …), then
 write a **corrected** bundle to `./repro.md` following the spec below. Keep the
 `patch-compare:`/`thread-compare:` setup the prior bundle used so the runner still builds
-without and with the fix.
+without and with the fix."""
+    else:
+        intro = """\
+You are given an existing reproducer bundle in `./prev-repro.md` to improve. It has not
+necessarily been run, so there are no prior logs."""
+        task = """\
+Read `./prev-repro.md` and improve it, following the user's guidance below and the spec,
+then write the improved bundle to `./repro.md`. Keep the `patch-compare:`/`thread-compare:`
+setup so the runner builds the kernel both without and with the fix."""
+    return f"""\
+# Refine a kernel reproducer
+
+{intro}
+
+## Your task
+
+{task}
 {note_section}
 ## Constraints
 
 Work as a single agent: do NOT spawn sub-agents or use a task/explore delegation tool.
 Do all source exploration yourself. The kernel source is mounted read-only at `/linux`.
 
-When done, the corrected bundle MUST be written to `./repro.md` and nothing else is needed.
+When done, the improved bundle MUST be written to `./repro.md` and nothing else is needed.
 
 ## Reproducer bundle spec
 
@@ -311,7 +331,7 @@ def main() -> int:
     ap.add_argument("--refine", action="store_true", help="refine a prior reproducer (see --prev-repro/--prev-logs)")
     ap.add_argument("--prev-repro", help="the prior reproducer bundle to fix (refine mode)")
     ap.add_argument("--prev-logs", help="dir of the prior run's logs the agent reads (refine mode)")
-    ap.add_argument("--refine-note", default="", help="free-text user context to weave into the refine prompt")
+    ap.add_argument("--note", default="", help="free-text user prompt/context woven into the prompt (scaffold or refine)")
     args = ap.parse_args()
 
     if args.refine:
@@ -368,11 +388,14 @@ def main() -> int:
     try:
         spec = (HERE / "docs" / "reproducer-spec.md").read_text()
         if args.refine:
-            # Bring the prior reproducer + its logs into /work so the agent reads them.
+            # Bring the prior reproducer (and its logs, if any) into /work so the agent reads
+            # them. Editor refine has no logs — the prompt then drops the failure framing.
             shutil.copyfile(args.prev_repro, work / "prev-repro.md")
-            if args.prev_logs and Path(args.prev_logs).is_dir():
+            has_logs = bool(args.prev_logs and Path(args.prev_logs).is_dir())
+            if has_logs:
                 shutil.copytree(args.prev_logs, work / "prev-logs")
-            (work / "PROMPT.md").write_text(build_refine_prompt_md(spec, patches, args.refine_note))
+            (work / "PROMPT.md").write_text(
+                build_refine_prompt_md(spec, patches, args.note, has_logs=has_logs))
         else:
             # Seed the bulky reference material as files and point the agent at them (keeps
             # PROMPT.md small; the agent reads them with its own tools, like refine's logs).
@@ -380,7 +403,7 @@ def main() -> int:
             example = HERE / "docs" / "em_uaf_repro.md"
             if example.is_file():
                 shutil.copyfile(example, work / "example-repro.md")
-            (work / "PROMPT.md").write_text(build_prompt_md(example.is_file()))
+            (work / "PROMPT.md").write_text(build_prompt_md(example.is_file(), args.note))
         # Seed the patch as a file too (described in the prompt; the agent drops it into a
         # `patch:` fence). Always present for a fresh scaffold; optional under --refine.
         if patches:

@@ -130,10 +130,18 @@ export async function listLkmlPatches(list: string, skip = 0): Promise<LkmlPage>
 // agent to write a bundle from a patch series, then runs it. Returns the new job id (open
 // it like any job). Auto-fills the OpenAI creds from settings; the backend requires them
 // (no free tier) and rejects with 400 if any is missing.
-export async function startScaffold(req: { thread?: string; patch?: string; commit?: string }): Promise<{ id: number }> {
+export async function startScaffold(req: { thread?: string; patch?: string; commit?: string; note?: string }): Promise<{ id: number }> {
   return (await authed("/api/scaffold", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...req, ...getCreds() }),
+  })).json();
+}
+// "Refine from text": send an edited reproducer bundle (plus an optional prompt) to the
+// agent to improve it — no parent job, no run logs. Returns the new (scaffold) job id.
+export async function refineText(bundle: string, note?: string): Promise<{ id: number }> {
+  return (await authed("/api/scaffold/refine-text", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bundle, note, ...getCreds() }),
   })).json();
 }
 // "Refine" a job: create a new scaffold job that hands this job's reproducer + all its

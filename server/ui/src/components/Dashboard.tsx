@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Candidate, getPeaks, getSummarizer, gib, globalEventsUrl, highlightCss, Job, JobSummary,
-  listCandidates, listJobs, LkmlPatch, Peak, refineJob, runCandidate, startScaffold, submit, SummarizerInfo,
+  listCandidates, listJobs, LkmlPatch, Peak, refineJob, refineText, runCandidate, startScaffold, submit, SummarizerInfo,
 } from "../api";
 import { EXAMPLES, upsertMeta } from "../bundle";
 import { getTheme, setTheme as persistTheme, Theme } from "../lib/theme";
@@ -11,6 +11,7 @@ import { BundleModal } from "./BundleModal";
 import { SpecModal } from "./SpecModal";
 import { LkmlBrowser } from "./LkmlBrowser";
 import { OpenAISettings } from "./OpenAISettings";
+import { Modal } from "./ui/Modal";
 import { hasCreds } from "../lib/creds";
 import { PeaksChart } from "./charts";
 import { JobDetail } from "./JobDetail";
@@ -46,6 +47,9 @@ export function Dashboard() {
   const [showSpec, setShowSpec] = useState(false);
   // Settings opens automatically when a scaffold is attempted without OpenAI creds.
   const [showSettings, setShowSettings] = useState(false);
+  // Scaffold prompt modal: holds the lore thread to scaffold + the user's optional prompt.
+  const [scaffoldThread, setScaffoldThread] = useState<string | null>(null);
+  const [scaffoldNote, setScaffoldNote] = useState("");
   const [theme, setTheme] = useState<Theme>(getTheme());
   const toggleTheme = () => {
     const t = theme === "dark" ? "light" : "dark";
@@ -80,6 +84,15 @@ export function Dashboard() {
     selectJob(id);
   };
 
+  // Refine from the editor: hand the current bundle text (+ optional prompt) to the agent
+  // to improve it (no parent job, no logs). Needs OpenAI creds.
+  const onRefineText = async (bundleText: string, note: string) => {
+    if (!hasCreds()) { setShowSettings(true); return; }
+    const { id } = await refineText(bundleText, note);
+    setModalOpen(false);
+    selectJob(id);
+  };
+
   // Run a detected LKML cover letter: the server creates a job from the stored bundle
   // (thread series applied at build time) and we jump to it.
   const onRunCandidate = async (c: Candidate) => {
@@ -87,13 +100,20 @@ export function Dashboard() {
     selectJob(id);
   };
 
-  // Scaffold from a detected LKML candidate: create a background job whose first stage
-  // runs the opencode agent on its thread, then open the job. Needs OpenAI creds.
-  const onScaffoldCandidate = async (c: Candidate) => {
+  // Scaffold a lore thread: open the prompt modal (where the user can add optional context),
+  // then create the background job. Needs OpenAI creds — bounce to settings if missing.
+  const openScaffold = (thread: string) => {
     if (!hasCreds()) { setShowSettings(true); return; }
-    const { id } = await startScaffold({ thread: c.source_url });
+    setScaffoldNote("");
+    setScaffoldThread(thread);
+  };
+  const doScaffold = async () => {
+    if (!scaffoldThread) return;
+    const { id } = await startScaffold({ thread: scaffoldThread, note: scaffoldNote });
+    setScaffoldThread(null);
     selectJob(id);
   };
+  const onScaffoldCandidate = (c: Candidate) => openScaffold(c.source_url);
 
   // Pick a patch in the LKML browser: open its cover letter as a reproducer. Inject a
   // `thread:` key pointing at the lore thread (upsertMeta keeps any existing
@@ -103,12 +123,10 @@ export function Dashboard() {
     setLkmlOpen(false);
     setModalOpen(true);
   };
-  // Scaffold from a browsed patch: create a background scaffold job for its lore thread.
-  const onScaffoldPatch = async (p: LkmlPatch) => {
+  // Scaffold from a browsed patch: close the browser, then open the scaffold prompt modal.
+  const onScaffoldPatch = (p: LkmlPatch) => {
     setLkmlOpen(false);
-    if (!hasCreds()) { setShowSettings(true); return; }
-    const { id } = await startScaffold({ thread: p.url });
-    selectJob(id);
+    openScaffold(p.url);
   };
 
   // Refine a job: hand its reproducer + logs (plus optional user context) back to the
@@ -143,9 +161,26 @@ export function Dashboard() {
       </div>
       {showSpec && <SpecModal onClose={() => setShowSpec(false)} />}
       {showSettings && <OpenAISettings onClose={() => setShowSettings(false)} />}
+      {scaffoldThread && (
+        <Modal onClose={() => setScaffoldThread(null)} label="Scaffold a reproducer">
+          <h2>Scaffold a reproducer ✨</h2>
+          <p className="text-muted mb-2">
+            The agent reads the patch series and the kernel source, writes a reproducer
+            bundle, then runs it. Add any context to guide it (optional) — e.g. which bug to
+            target, a subsystem to focus on, or how to trigger it.
+          </p>
+          <textarea
+            className="mb-3 w-full box-border rounded-md border border-border bg-bg p-[9px] font-mono text-fg outline-none focus:border-accent"
+            rows={5} autoFocus placeholder="optional context for the agent…"
+            value={scaffoldNote} onChange={(e) => setScaffoldNote(e.target.value)} />
+          <div className="flex justify-end">
+            <button className="btn" onClick={doScaffold}>Scaffold</button>
+          </div>
+        </Modal>
+      )}
       {modalOpen && (
         <BundleModal bundle={bundle} theme={theme} onChange={setBundle}
-          onRun={onRun} onClose={() => setModalOpen(false)} />
+          onRun={onRun} onRefine={onRefineText} onClose={() => setModalOpen(false)} />
       )}
       {lkmlOpen && <LkmlBrowser onPick={onPickPatch} onScaffold={onScaffoldPatch} onClose={() => setLkmlOpen(false)} />}
       <div className="grid grid-cols-[380px_1fr] gap-4 items-start">
