@@ -21,8 +21,8 @@ import { SegTabs } from "./ui/Tabs";
 const LOG_KINDS = ["fetch", "compile", "console", "dmesg", "exec", "run"] as const;
 type LogKind = (typeof LOG_KINDS)[number];
 
-export function JobDetail({ id, summarizerReady, servers, view, onEdit }:
-  { id: number; summarizerReady: boolean; servers: SummarizerInfo["servers"]; view: string; onEdit: (text: string) => void }) {
+export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine }:
+  { id: number; summarizerReady: boolean; servers: SummarizerInfo["servers"]; view: string; onEdit: (text: string) => void; onRefine: (id: number) => void }) {
   const [job, setJob] = useState<Job | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
@@ -173,6 +173,11 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit }:
               <button className="linkbtn" onClick={() => setMaxRepro(true)}>Maximize</button>
               {" · "}
               <button className="linkbtn" onClick={() => onEdit(bundleText)}>Edit reproducer</button>
+              {(job?.status === "done" || job?.status === "failed") && <>
+                {" · "}
+                <button className="linkbtn" title="Hand this reproducer + its run logs back to the agent to fix"
+                  onClick={() => onRefine(id)}>Refine ✨</button>
+              </>}
             </span>
           </div>
           {reproView}

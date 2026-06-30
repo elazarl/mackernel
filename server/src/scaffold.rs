@@ -6,7 +6,7 @@
 
 use std::process::Stdio;
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{extract::{Path, State}, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::info;
@@ -30,6 +30,11 @@ pub struct Spec {
     pub thread: Option<String>,
     pub patch_file: Option<String>,
     pub commit: Option<String>,
+    /// A "refine" job: regenerate the bundle from a parent job's failed reproducer + its
+    /// run logs (copied into this job's dir as prev-repro.md / prev-logs/) instead of from
+    /// scratch. `#[serde(default)]` so old scaffold.json files still deserialize.
+    #[serde(default)]
+    pub refine_parent: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -83,13 +88,92 @@ pub async fn start(
         None
     };
     // Persist the non-secret spec; keep the creds in memory only.
-    let spec = Spec { thread, patch_file, commit };
+    let spec = Spec { thread, patch_file, commit, refine_parent: None };
     std::fs::write(dir.join("scaffold.json"), serde_json::to_vec(&spec).map_err(crate::ise)?)
         .map_err(crate::ise)?;
     st.scaffold_creds.lock().unwrap().insert(id, Creds { base_url, api_key, model });
 
     st.tx.send(crate::SchedMsg::New(id)).map_err(crate::ise)?;
     info!("queued scaffold job {id}");
+    st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
+    Ok(Json(json!({ "id": id })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefineReq {
+    /// The user's OpenAI-compatible endpoint + key + model (no free tier), same as scaffold.
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+}
+
+/// Recursively copy a directory tree (used to bring a parent job's logs into a refine
+/// job's dir). Handles the compare-job `baseline/`+`patched/` subdirs.
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), to)?;
+        }
+    }
+    Ok(())
+}
+
+/// POST /api/jobs/:id/refine — create a new scaffold job that hands the parent job's
+/// reproducer + all of its run logs back to the opencode agent ("this failed, fix it").
+/// Mirrors `start`, but seeds the bundle/logs from the parent instead of a patch series.
+pub async fn refine(
+    State(st): State<AppState>,
+    Path(parent_id): Path<i64>,
+    Json(req): Json<RefineReq>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Same cred gate as `start` (no free tier).
+    let nonblank = |o: Option<String>| o.filter(|s| !s.trim().is_empty());
+    let (base_url, api_key, model) = match (nonblank(req.base_url), nonblank(req.api_key), nonblank(req.model)) {
+        (Some(b), Some(k), Some(m)) => (b, k, m),
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    // The parent must still have its reproducer and logs on disk (not reaped).
+    let parent = st.db.get_job(parent_id).map_err(crate::ise)?.ok_or(StatusCode::NOT_FOUND)?;
+    let pdir = st.work.join(parent_id.to_string());
+    let pbundle = pdir.join("bundle.md");
+    let plogs = pdir.join("logs");
+    if !pbundle.is_file() || !plogs.is_dir() {
+        return Err(StatusCode::BAD_REQUEST); // nothing to refine (no bundle / logs reaped)
+    }
+
+    // New child job; carry the parent's provenance (lore link + title) forward.
+    let id = st.db
+        .create_job_full(now_ms(), Some("scaffold"), parent.source_url.as_deref(), parent.title.as_deref())
+        .map_err(crate::ise)?;
+    let dir = st.work.join(id.to_string());
+    let _ = std::fs::remove_dir_all(&dir); // clear any stale dir from a recycled id
+    std::fs::create_dir_all(dir.join("logs")).map_err(crate::ise)?;
+
+    // Seed the agent's inputs: the prior reproducer and the full log tree.
+    std::fs::copy(&pbundle, dir.join("prev-repro.md")).map_err(crate::ise)?;
+    copy_dir_all(&plogs, &dir.join("prev-logs")).map_err(crate::ise)?;
+
+    // Persist the spec (refine). Carry the parent's thread (source_url) so the agent can
+    // re-anchor the worktree/patch context; the embedded patch in prev-repro.md is primary.
+    let spec = Spec {
+        thread: parent.source_url.clone(),
+        patch_file: None,
+        commit: None,
+        refine_parent: Some(parent_id),
+    };
+    std::fs::write(dir.join("scaffold.json"), serde_json::to_vec(&spec).map_err(crate::ise)?)
+        .map_err(crate::ise)?;
+    st.scaffold_creds.lock().unwrap().insert(id, Creds { base_url, api_key, model });
+
+    st.tx.send(crate::SchedMsg::New(id)).map_err(crate::ise)?;
+    info!("queued refine job {id} (from job {parent_id})");
     st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     Ok(Json(json!({ "id": id })))
 }
@@ -123,6 +207,13 @@ pub async fn run_scaffold_stage(
     }
     if let Some(c) = &spec.commit {
         cmd.arg("--commit").arg(c);
+    }
+    // Refine job: point the agent at the parent's prior reproducer + logs (copied into
+    // this dir by the refine handler) so it fixes the failed repro rather than writing one.
+    if spec.refine_parent.is_some() {
+        cmd.arg("--refine")
+            .arg("--prev-repro").arg(dir.join("prev-repro.md"))
+            .arg("--prev-logs").arg(dir.join("prev-logs"));
     }
     // No --progress: run_job owns the single "scaffold" phase. scaffold-repro.py's stdout
     // and stderr both append to run.log (run_job opens it append-mode, so the run-kernel

@@ -165,6 +165,50 @@ When done, the bundle MUST be written to `./repro.md` and nothing else is needed
 """
 
 
+def build_refine_prompt_md(spec: str, patches: str | None) -> str:
+    """PROMPT.md for a refine run: the agent's PRIOR reproducer failed; it must read the
+    prior run's logs (mounted as files, not inlined — they can be huge) and fix it."""
+    patch_section = f"""\
+
+## The patch series that fixes the bug
+
+```
+{patches}
+```
+""" if patches else ""
+    return f"""\
+# Refine a kernel reproducer that failed
+
+You previously wrote the reproducer bundle in `./prev-repro.md`. It was run through
+`run-kernel.py` and did **NOT** succeed.
+
+The logs from that failed run are in `./prev-logs/` — read them with your own tools:
+- `run.log` — the orchestrator log; carries the failure reason even for early crashes.
+- `dmesg`, `console` — the guest kernel ring buffer and raw serial output.
+- `compile`, `fetch`, `exec` — the build/fetch/run stages.
+(Compare jobs nest these under `prev-logs/baseline/` and `prev-logs/patched/`.)
+
+## Your task
+
+Read `./prev-repro.md` and the logs in `./prev-logs/`, diagnose why the reproducer
+failed (didn't build, didn't boot, didn't trigger the bug, wrong patch fence, …), then
+write a **corrected** bundle to `./repro.md` following the spec below. Keep the
+`patch-compare:`/`thread-compare:` setup the prior bundle used so the runner still builds
+without and with the fix.
+
+## Constraints
+
+Work as a single agent: do NOT spawn sub-agents or use a task/explore delegation tool.
+Do all source exploration yourself. The kernel source is mounted read-only at `/linux`.
+
+When done, the corrected bundle MUST be written to `./repro.md` and nothing else is needed.
+
+## Reproducer bundle spec
+
+{spec}
+{patch_section}"""
+
+
 def write_opencode_config(work: Path) -> None:
     """Register the user's endpoint as an opencode custom provider in /work/opencode.json
     (cwd is /work, which opencode searches). `@ai-sdk/openai-compatible` is bundled in
@@ -247,14 +291,27 @@ def run_opencode(work: Path, wt: Path, arch: str, image: str, is_local: bool) ->
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Scaffold a reproducer bundle via opencode.")
-    src = ap.add_mutually_exclusive_group(required=True)
+    # Source is required for a fresh scaffold but optional for --refine (the prior
+    # reproducer carries the patch); validated below.
+    src = ap.add_mutually_exclusive_group(required=False)
     src.add_argument("--thread", help="lore.kernel.org thread URL (its [PATCH] series)")
     src.add_argument("--patch-file", help="local unified-diff file to use as the patch")
     ap.add_argument("--commit", default="", help="base commit/tag to explore (default: tree HEAD)")
     ap.add_argument("--out", required=True, help="write the generated bundle here")
     ap.add_argument("--log-dir", help="write scaffold.log here (service mode)")
     ap.add_argument("--progress", action="store_true", help="emit MKPROGRESS phase lines")
+    # Refine: fix a prior failed reproducer using its run logs instead of writing one fresh.
+    ap.add_argument("--refine", action="store_true", help="refine a prior reproducer (see --prev-repro/--prev-logs)")
+    ap.add_argument("--prev-repro", help="the prior reproducer bundle to fix (refine mode)")
+    ap.add_argument("--prev-logs", help="dir of the prior run's logs the agent reads (refine mode)")
     args = ap.parse_args()
+
+    if args.refine:
+        if not args.prev_repro or not Path(args.prev_repro).is_file() \
+                or not Path(args.prev_repro).read_text(errors="replace").strip():
+            die("--refine needs a non-empty --prev-repro")
+    elif not args.thread and not args.patch_file:
+        die("one of --thread / --patch-file is required")
 
     global _PROGRESS
     _PROGRESS = args.progress
@@ -287,11 +344,14 @@ def main() -> int:
                                 log_path=(log_dir / "fetch.log") if log_dir else None)
     log(f"kernel tree for exploration: {wt}")
 
-    # 2. Patch text: from the thread (fetched, not applied) or the local file.
+    # 2. Patch text: from the thread (fetched, not applied) or the local file. Optional in
+    #    refine mode — there the patch already lives inside ./prev-repro.md.
     if args.thread:
         patches = patches_from_thread(args.thread)
-    else:
+    elif args.patch_file:
         patches = Path(args.patch_file).read_text(errors="replace")
+    else:
+        patches = None
 
     # 3. Work dir, mounted rw at /work; the worktree is mounted ro at /linux. Created
     #    under HERE (podman needs a host-shared path) and removed on exit so these
@@ -299,9 +359,17 @@ def main() -> int:
     work = Path(tempfile.mkdtemp(prefix=".mk-scaffold-", dir=HERE))
     try:
         spec = (HERE / "docs" / "reproducer-spec.md").read_text()
-        (work / "PROMPT.md").write_text(build_prompt_md(spec, patches))
+        if args.refine:
+            # Bring the prior reproducer + its logs into /work so the agent reads them.
+            shutil.copyfile(args.prev_repro, work / "prev-repro.md")
+            if args.prev_logs and Path(args.prev_logs).is_dir():
+                shutil.copytree(args.prev_logs, work / "prev-logs")
+            (work / "PROMPT.md").write_text(build_refine_prompt_md(spec, patches))
+        else:
+            (work / "PROMPT.md").write_text(build_prompt_md(spec, patches))
         # Seed the patch as a file too, so the agent can drop it straight into a fence.
-        (work / "fix.patch").write_text(patches)
+        if patches:
+            (work / "fix.patch").write_text(patches)
 
         # 4. Run the agent.
         progress("agent")

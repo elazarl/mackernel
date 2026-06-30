@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Candidate, getPeaks, getSummarizer, gib, globalEventsUrl, highlightCss, Job, JobSummary,
-  listCandidates, listJobs, LkmlPatch, Peak, runCandidate, startScaffold, submit, SummarizerInfo,
+  listCandidates, listJobs, LkmlPatch, Peak, refineJob, runCandidate, startScaffold, submit, SummarizerInfo,
 } from "../api";
 import { EXAMPLES, upsertMeta } from "../bundle";
 import { getTheme, setTheme as persistTheme, Theme } from "../lib/theme";
@@ -109,6 +109,13 @@ export function Dashboard() {
     if (!hasCreds()) { setShowSettings(true); return; }
     const { id } = await startScaffold({ thread: p.url });
     selectJob(id);
+  };
+
+  // Refine a job: hand its reproducer + logs back to the agent to fix, open the child job.
+  const onRefine = async (id: number) => {
+    if (!hasCreds()) { setShowSettings(true); return; }
+    const { id: child } = await refineJob(id);
+    selectJob(child);
   };
 
   return (
@@ -223,7 +230,7 @@ export function Dashboard() {
         <div>
           {sel == null ? <p className="text-muted">Select a job to see live progress, metrics, and logs.</p>
             : <JobDetail id={sel} summarizerReady={summarizer?.loaded ?? false}
-                servers={srv} view={view}
+                servers={srv} view={view} onRefine={onRefine}
                 onEdit={(text) => { setBundle(text); setModalOpen(true); }} />}
         </div>
       </div>
