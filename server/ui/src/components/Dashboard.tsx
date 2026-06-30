@@ -62,7 +62,7 @@ export function Dashboard() {
   useEffect(() => {
     if (tourSeen()) return;
     markTourSeen();
-    const t = setTimeout(startTour, 500); // let the first paint settle before spotlighting
+    const t = setTimeout(() => startTour({ selectJob }), 500); // let the first paint settle
     return () => clearTimeout(t);
   }, []);
 
@@ -153,7 +153,7 @@ export function Dashboard() {
         <button className="linkbtn" data-tour="spec" onClick={() => setShowSpec(true)}>Spec</button>
         <button className="linkbtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light" : "🌙 Dark"}</button>
         <button className="linkbtn" title="Scaffold model settings (OpenAI endpoint + key)" onClick={() => setShowSettings(true)}>⚙ Settings</button>
-        <button className="linkbtn" title="How to use this site" onClick={startTour}>❓ Tour</button>
+        <button className="linkbtn" title="How to use this site" onClick={() => startTour({ selectJob })}>❓ Tour</button>
         {!connected && <span className="text-fail text-[.85em]" title="lost the live stream — reconnecting…">⚠ offline</span>}
         {summarizer && (
           <span className="ml-auto flex items-center gap-1.5 text-[.85em] text-muted">

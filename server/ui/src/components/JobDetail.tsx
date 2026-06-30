@@ -121,7 +121,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
       ) : (
         <IssuesCard id={id} status={job?.status} />
       )}
-      <section className="card">
+      <section className="card" data-tour="jobsummary">
         <div className="flex items-start justify-between gap-2">
           <h2>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
             {cmp && <span className="text-muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
@@ -228,7 +228,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
         <h2>Resource usage</h2>
         <ResourceChart samples={samples} t0={t0.current} phaseTs={phaseTs} />
       </section>
-      <section className="card">
+      <section className="card" data-tour="joblogs">
         <SegTabs
           label="logs"
           value={logKind}

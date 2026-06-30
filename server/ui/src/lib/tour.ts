@@ -4,18 +4,35 @@ import "driver.js/dist/driver.css";
 // Guided product tour (driver.js — zero runtime deps). First-run autostart is gated on a
 // localStorage flag, same pattern as lib/theme.ts and lib/creds.ts; the header "❓ Tour"
 // button always restarts it. Steps target elements by `data-tour="…"` attributes (set in
-// Dashboard) so they survive Tailwind class churn; steps with no element are centered.
+// Dashboard / JobDetail) so they survive Tailwind class churn; steps with no element are
+// centered. `opts.selectJob` lets the tour open a real job (#1) so the logs/summary steps
+// have live content to point at.
 const SEEN_KEY = "mk_tour_seen";
 
 export const tourSeen = (): boolean => !!localStorage.getItem(SEEN_KEY);
 export const markTourSeen = (): void => localStorage.setItem(SEEN_KEY, "1");
 
-export function startTour(): void {
+export function startTour(opts: { selectJob?: (id: number) => void } = {}): void {
+  const openDemoJob = () => opts.selectJob?.(1); // the tour walks through job #1's logs
+
   driver({
     showProgress: true,
     nextBtnText: "Next",
     prevBtnText: "Back",
     doneBtnText: "Done",
+    // driver.js has no text for the footer "close" button, so inject our own "Skip tour"
+    // link (left side of the footer) on every step; it ends the tour immediately.
+    onPopoverRender: (popover, { driver: d }) => {
+      if (popover.footer.querySelector(".mk-skip")) return;
+      const skip = document.createElement("button");
+      skip.className = "mk-skip";
+      skip.textContent = "Skip tour";
+      skip.style.cssText =
+        "background:none;border:none;color:#8b949e;cursor:pointer;font-size:13px;" +
+        "text-decoration:underline;padding:0;margin-right:auto;";
+      skip.addEventListener("click", () => d.destroy());
+      popover.footer.insertBefore(skip, popover.footer.firstChild);
+    },
     steps: [
       {
         popover: {
@@ -52,21 +69,42 @@ export function startTour(): void {
         element: '[data-tour="jobs"]',
         popover: {
           title: "Every run is a job",
-          description: "Each run shows up here with its status. Click one to open it.",
+          description:
+            "Each run shows up here with its status. Let's open one — <b>#1</b> — and see what it tells you.",
           side: "right",
           align: "start",
         },
+        // Open job #1 so the next two steps have a real job to point at.
+        onHighlighted: openDemoJob,
       },
       {
-        element: '[data-tour="detail"]',
+        element: '[data-tour="jobsummary"]',
         popover: {
-          title: "Logs & summary",
+          title: "Live phases & summary",
           description:
-            "The job view tracks <b>live phases</b> (fetch → build → boot → run), an <b>AI summary</b> " +
-            "of what happened and why, and the full <b>logs</b> — build, dmesg, console, exec.",
+            "Up top, the <b>phases</b> (fetch → build → boot → run) light up as the job progresses, " +
+            "and an <b>AI summary</b> explains what the reproducer did and why it passed or failed.",
           side: "left",
           align: "start",
         },
+        onHighlightStarted: openDemoJob, // idempotent — keeps the job open if you jump here
+      },
+      {
+        element: '[data-tour="joblogs"]',
+        popover: {
+          title: "The logs — what they mean",
+          description:
+            "Every stage is captured here (click a tab):<br>" +
+            "• <b>fetch</b> — cloning the kernel source &amp; applying patches<br>" +
+            "• <b>compile</b> — the kernel build output (warnings/errors)<br>" +
+            "• <b>console</b> — the raw QEMU serial console (the full boot)<br>" +
+            "• <b>dmesg</b> — the guest kernel ring buffer (oops, panics, printk)<br>" +
+            "• <b>exec</b> — your reproducer's own output inside the guest<br>" +
+            "• <b>run</b> — the orchestrator log, with the top-level pass/fail reason",
+          side: "left",
+          align: "start",
+        },
+        onHighlightStarted: openDemoJob,
       },
       {
         element: '[data-tour="lkml"]',
