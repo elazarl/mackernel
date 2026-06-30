@@ -13,6 +13,7 @@ import { LkmlBrowser } from "./LkmlBrowser";
 import { OpenAISettings } from "./OpenAISettings";
 import { Modal } from "./ui/Modal";
 import { hasCreds } from "../lib/creds";
+import { startTour, tourSeen, markTourSeen } from "../lib/tour";
 import { PeaksChart } from "./charts";
 import { JobDetail } from "./JobDetail";
 
@@ -57,6 +58,13 @@ export function Dashboard() {
   };
   const [hlCss, setHlCss] = useState("");
   useEffect(() => { highlightCss().then(setHlCss).catch(() => {}); }, []);
+  // First visit: auto-start the guided tour once (Dashboard only mounts post-unlock).
+  useEffect(() => {
+    if (tourSeen()) return;
+    markTourSeen();
+    const t = setTimeout(startTour, 500); // let the first paint settle before spotlighting
+    return () => clearTimeout(t);
+  }, []);
 
   // Push, not poll: load once, then refetch only when the server pings that the job
   // list changed. Idle = no requests. `connected` tracks the SSE link for the header.
@@ -142,9 +150,10 @@ export function Dashboard() {
       {hlCss && <style>{hlCss}</style>}
       <div className="flex items-center gap-3">
         <h1 className="cursor-pointer hover:text-accent" title="Home" onClick={() => selectJob(null)}>Kernel Reproducer Runner</h1>
-        <button className="linkbtn" onClick={() => setShowSpec(true)}>Spec</button>
+        <button className="linkbtn" data-tour="spec" onClick={() => setShowSpec(true)}>Spec</button>
         <button className="linkbtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light" : "🌙 Dark"}</button>
         <button className="linkbtn" title="Scaffold model settings (OpenAI endpoint + key)" onClick={() => setShowSettings(true)}>⚙ Settings</button>
+        <button className="linkbtn" title="How to use this site" onClick={startTour}>❓ Tour</button>
         {!connected && <span className="text-fail text-[.85em]" title="lost the live stream — reconnecting…">⚠ offline</span>}
         {summarizer && (
           <span className="ml-auto flex items-center gap-1.5 text-[.85em] text-muted">
@@ -185,12 +194,12 @@ export function Dashboard() {
       {lkmlOpen && <LkmlBrowser onPick={onPickPatch} onScaffold={onScaffoldPatch} onClose={() => setLkmlOpen(false)} />}
       <div className="grid grid-cols-[380px_1fr] gap-4 items-start">
         <div>
-          <section className="card">
+          <section className="card" data-tour="submit">
             <div className="flex items-center justify-between">
               <h2>Submit a bundle</h2>
               {/* Browse lore.kernel.org on demand: pick a list, pick a patch, open its
                   cover letter as a reproducer (or Scaffold it) — no polling. */}
-              <button className="chip" onClick={() => setLkmlOpen(true)}>Browse LKML</button>
+              <button className="chip" data-tour="lkml" onClick={() => setLkmlOpen(true)}>Browse LKML</button>
             </div>
             {/* Pasting a bundle opens the modal — the one place you edit / preview / run. */}
             <input
@@ -202,7 +211,7 @@ export function Dashboard() {
               }}
               onChange={() => { /* controlled-but-ephemeral: real text lives in the modal */ }}
               value="" />
-            <div className="mb-2.5 flex flex-wrap items-center gap-1.5">
+            <div className="mb-2.5 flex flex-wrap items-center gap-1.5" data-tour="examples">
               <span className="text-xs text-muted">Examples:</span>
               {EXAMPLES.map((ex) => (
                 <button key={ex.label} className="chip" title={ex.blurb}
@@ -236,7 +245,7 @@ export function Dashboard() {
               </ul>
             </section>
           )}
-          <section className="card">
+          <section className="card" data-tour="jobs">
             <h2>Jobs{jobs.length > JOB_LIMIT && <span className="text-muted"> · newest {JOB_LIMIT} of {jobs.length}</span>}</h2>
             <ul className="m-0 max-h-70 list-none overflow-auto p-0">
               {[...jobs].sort((a, b) => b.id - a.id).slice(0, JOB_LIMIT).map((j) => (
@@ -263,7 +272,7 @@ export function Dashboard() {
             <PeaksChart peaks={peaks} />
           </section>
         </div>
-        <div>
+        <div data-tour="detail">
           {sel == null ? <p className="text-muted">Select a job to see live progress, metrics, and logs.</p>
             : <JobDetail id={sel} summarizerReady={summarizer?.loaded ?? false}
                 servers={srv} view={view} onRefine={onRefine}
