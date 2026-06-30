@@ -126,16 +126,25 @@ def patches_from_thread(thread: str) -> str:
     return "\n\n".join(parts)
 
 
-def build_prompt_md(spec: str, patches: str) -> str:
-    """The full instruction file the agent reads (PROMPT.md). Holds the bundle spec,
-    the patch series, and the fixed instruction; the agent writes ./repro.md."""
+def build_prompt_md(has_example: bool) -> str:
+    """The instruction file the agent reads (PROMPT.md). The bulky reference material —
+    the bundle spec, the fix's patch series, and an example reproducer — is written to
+    files in the work dir (the agent reads them with its own tools) and described here, so
+    the prompt itself stays small. The agent writes ./repro.md."""
+    example_line = ("- `./example-repro.md` — a complete, working example reproducer "
+                    "bundle; mirror its structure.\n") if has_example else ""
     return f"""\
 # Scaffold a kernel reproducer
 
-You are writing a **reproducer bundle**. Produce a single file `./repro.md` in the
-current directory that follows the bundle spec below exactly, so it can be run with
+You are writing a **reproducer bundle**: a single file `./repro.md` in the current
+directory that follows the bundle spec exactly, so it can be run with
 `run-kernel.py repro.md`.
 
+## Reference files (read these with your own tools)
+
+- `./reproducer-spec.md` — the bundle format you MUST follow.
+- `./fix.patch` — the patch series that fixes the bug you must reproduce.
+{example_line}
 ## Constraints
 
 Work as a single agent: do NOT spawn sub-agents or use a task/explore delegation
@@ -147,21 +156,11 @@ model backend allows only one request at a time, so a sub-agent would stall.)
 {INSTRUCTION}
 
 Set `patch-compare: true` (or `thread-compare:`) in the bundle so the runner builds
-the kernel both without and with the fix and shows the difference. Put the fix's
-patch into a `patch:` fence (or use `thread-compare:` with the thread URL) as the
-spec describes.
+the kernel both without and with the fix and shows the difference. Put the fix's patch
+(from `./fix.patch`) into a `patch:` fence, or use `thread-compare:` with the thread
+URL, as the spec describes.
 
 When done, the bundle MUST be written to `./repro.md` and nothing else is needed.
-
-## Reproducer bundle spec
-
-{spec}
-
-## The patch series that fixes the bug
-
-```
-{patches}
-```
 """
 
 
@@ -375,8 +374,15 @@ def main() -> int:
                 shutil.copytree(args.prev_logs, work / "prev-logs")
             (work / "PROMPT.md").write_text(build_refine_prompt_md(spec, patches, args.refine_note))
         else:
-            (work / "PROMPT.md").write_text(build_prompt_md(spec, patches))
-        # Seed the patch as a file too, so the agent can drop it straight into a fence.
+            # Seed the bulky reference material as files and point the agent at them (keeps
+            # PROMPT.md small; the agent reads them with its own tools, like refine's logs).
+            (work / "reproducer-spec.md").write_text(spec)
+            example = HERE / "docs" / "em_uaf_repro.md"
+            if example.is_file():
+                shutil.copyfile(example, work / "example-repro.md")
+            (work / "PROMPT.md").write_text(build_prompt_md(example.is_file()))
+        # Seed the patch as a file too (described in the prompt; the agent drops it into a
+        # `patch:` fence). Always present for a fresh scaffold; optional under --refine.
         if patches:
             (work / "fix.patch").write_text(patches)
 
