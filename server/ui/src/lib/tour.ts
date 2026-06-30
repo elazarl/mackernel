@@ -29,7 +29,7 @@ export function startTour(): void {
       {
         element: '[data-tour="examples"]',
         popover: {
-          title: "1 · Start from an example",
+          title: "Start from an example",
           description:
             "New here? Click an <b>example</b> to load a ready-made reproducer bundle into the editor.",
           side: "top",
@@ -39,7 +39,7 @@ export function startTour(): void {
       {
         element: '[data-tour="submit"]',
         popover: {
-          title: "2 · Run it",
+          title: "Run it",
           description:
             "Paste your own bundle or pick an example — the editor opens, then hit " +
             "<b>Run reproducer</b>. The runner fetches the source, builds the kernel, boots a VM, " +
@@ -51,7 +51,7 @@ export function startTour(): void {
       {
         element: '[data-tour="jobs"]',
         popover: {
-          title: "3 · Every run is a job",
+          title: "Every run is a job",
           description: "Each run shows up here with its status. Click one to open it.",
           side: "right",
           align: "start",
@@ -60,7 +60,7 @@ export function startTour(): void {
       {
         element: '[data-tour="detail"]',
         popover: {
-          title: "4 · Logs & summary",
+          title: "Logs & summary",
           description:
             "The job view tracks <b>live phases</b> (fetch → build → boot → run), an <b>AI summary</b> " +
             "of what happened and why, and the full <b>logs</b> — build, dmesg, console, exec.",
@@ -71,7 +71,7 @@ export function startTour(): void {
       {
         element: '[data-tour="lkml"]',
         popover: {
-          title: "5 · Scaffold from an LKML patch",
+          title: "Scaffold from an LKML patch",
           description:
             "<b>Browse LKML</b> to pick a patch series, then <b>Scaffold ✨</b>. An AI agent reads the " +
             "patch and the kernel source, writes a reproducer for the bug it fixes, and runs it.",
@@ -81,7 +81,7 @@ export function startTour(): void {
       },
       {
         popover: {
-          title: "6 · Refine a reproducer",
+          title: "Refine a reproducer",
           description:
             "On any finished job, <b>Refine ✨</b> hands the reproducer and its logs back to the agent " +
             "to fix — and you can add a prompt to steer it. You can also <b>Refine</b> straight from " +
@@ -91,7 +91,7 @@ export function startTour(): void {
       {
         element: '[data-tour="spec"]',
         popover: {
-          title: "7 · The bundle spec",
+          title: "The bundle spec",
           description: "The full reproducer-bundle format lives here — open <b>Spec</b> anytime.",
           side: "bottom",
           align: "start",
