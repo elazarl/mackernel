@@ -22,12 +22,15 @@ const LOG_KINDS = ["fetch", "compile", "console", "dmesg", "exec", "run"] as con
 type LogKind = (typeof LOG_KINDS)[number];
 
 export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine }:
-  { id: number; summarizerReady: boolean; servers: SummarizerInfo["servers"]; view: string; onEdit: (text: string) => void; onRefine: (id: number) => void }) {
+  { id: number; summarizerReady: boolean; servers: SummarizerInfo["servers"]; view: string; onEdit: (text: string) => void; onRefine: (id: number, note?: string) => void }) {
   const [job, setJob] = useState<Job | null>(null);
   const [samples, setSamples] = useState<Sample[]>([]);
   const [logKind, setLogKind] = useState<LogKind>("exec");
   const [bundleText, setBundleText] = useState("");
   const [maxRepro, setMaxRepro] = useState(false);
+  // Refine: optional free-text context the user adds to the agent's fix-it prompt.
+  const [refineOpen, setRefineOpen] = useState(false);
+  const [refineNote, setRefineNote] = useState("");
   // All backends' summaries; the model switcher picks which one the view shows. The
   // primary keeps the live-streamed columns from `job`.
   const [summaries, setSummaries] = useState<JobSummary[]>([]);
@@ -119,8 +122,20 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
         <IssuesCard id={id} status={job?.status} />
       )}
       <section className="card">
-        <h2>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
-          {cmp && <span className="text-muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
+        <div className="flex items-start justify-between gap-2">
+          <h2>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
+            {cmp && <span className="text-muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
+          {bundleText.trim() && (
+            <span className="shrink-0 whitespace-nowrap">
+              <button className="linkbtn" onClick={() => onEdit(bundleText)}>Edit reproducer</button>
+              {(job?.status === "done" || job?.status === "failed") && <>
+                {" · "}
+                <button className="linkbtn" title="Hand this reproducer + its run logs back to the agent to fix"
+                  onClick={() => setRefineOpen(true)}>Refine ✨</button>
+              </>}
+            </span>
+          )}
+        </div>
         <div className="mb-2 flex flex-wrap gap-1.5">
           {phaseList(job).map((p) => (
             <span key={p} className={"step " + stepClass(job, p)}>{p}</span>
@@ -176,7 +191,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
               {(job?.status === "done" || job?.status === "failed") && <>
                 {" · "}
                 <button className="linkbtn" title="Hand this reproducer + its run logs back to the agent to fix"
-                  onClick={() => onRefine(id)}>Refine ✨</button>
+                  onClick={() => setRefineOpen(true)}>Refine ✨</button>
               </>}
             </span>
           </div>
@@ -187,6 +202,26 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
         <Modal onClose={() => setMaxRepro(false)} label="Reproducer">
           <h2>Reproducer</h2>
           {reproView}
+        </Modal>
+      )}
+      {refineOpen && (
+        <Modal onClose={() => setRefineOpen(false)} label="Refine reproducer">
+          <h2>Refine reproducer ✨</h2>
+          <p className="text-muted mb-2">
+            The agent gets this reproducer and its run logs and is asked to fix it. Add any
+            context that should guide the fix (optional) — e.g. what actually failed, a config
+            to enable, or where to focus.
+          </p>
+          <textarea
+            className="mb-3 w-full box-border rounded-md border border-border bg-bg p-[9px] font-mono text-fg outline-none focus:border-accent"
+            rows={5} autoFocus placeholder="optional context for the agent…"
+            value={refineNote} onChange={(e) => setRefineNote(e.target.value)} />
+          <div className="flex justify-end">
+            <button className="btn"
+              onClick={() => { setRefineOpen(false); onRefine(id, refineNote); setRefineNote(""); }}>
+              Refine
+            </button>
+          </div>
         </Modal>
       )}
       <section className="card">

@@ -35,6 +35,9 @@ pub struct Spec {
     /// scratch. `#[serde(default)]` so old scaffold.json files still deserialize.
     #[serde(default)]
     pub refine_parent: Option<i64>,
+    /// Optional free-text context the user typed when refining, woven into the agent prompt.
+    #[serde(default)]
+    pub refine_note: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -88,7 +91,7 @@ pub async fn start(
         None
     };
     // Persist the non-secret spec; keep the creds in memory only.
-    let spec = Spec { thread, patch_file, commit, refine_parent: None };
+    let spec = Spec { thread, patch_file, commit, refine_parent: None, refine_note: None };
     std::fs::write(dir.join("scaffold.json"), serde_json::to_vec(&spec).map_err(crate::ise)?)
         .map_err(crate::ise)?;
     st.scaffold_creds.lock().unwrap().insert(id, Creds { base_url, api_key, model });
@@ -106,6 +109,8 @@ pub struct RefineReq {
     base_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
+    /// Optional free-text context to weave into the agent's fix-it prompt.
+    note: Option<String>,
 }
 
 /// Recursively copy a directory tree (used to bring a parent job's logs into a refine
@@ -167,6 +172,7 @@ pub async fn refine(
         patch_file: None,
         commit: None,
         refine_parent: Some(parent_id),
+        refine_note: req.note.filter(|s| !s.trim().is_empty()),
     };
     std::fs::write(dir.join("scaffold.json"), serde_json::to_vec(&spec).map_err(crate::ise)?)
         .map_err(crate::ise)?;
@@ -214,6 +220,9 @@ pub async fn run_scaffold_stage(
         cmd.arg("--refine")
             .arg("--prev-repro").arg(dir.join("prev-repro.md"))
             .arg("--prev-logs").arg(dir.join("prev-logs"));
+        if let Some(note) = &spec.refine_note {
+            cmd.arg("--refine-note").arg(note);
+        }
     }
     // No --progress: run_job owns the single "scaffold" phase. scaffold-repro.py's stdout
     // and stderr both append to run.log (run_job opens it append-mode, so the run-kernel

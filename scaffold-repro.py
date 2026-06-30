@@ -165,7 +165,7 @@ When done, the bundle MUST be written to `./repro.md` and nothing else is needed
 """
 
 
-def build_refine_prompt_md(spec: str, patches: str | None) -> str:
+def build_refine_prompt_md(spec: str, patches: str | None, note: str = "") -> str:
     """PROMPT.md for a refine run: the agent's PRIOR reproducer failed; it must read the
     prior run's logs (mounted as files, not inlined — they can be huge) and fix it."""
     patch_section = f"""\
@@ -176,6 +176,14 @@ def build_refine_prompt_md(spec: str, patches: str | None) -> str:
 {patches}
 ```
 """ if patches else ""
+    note_section = f"""\
+
+## Additional context from the user
+
+The user added this guidance for the fix — treat it as important:
+
+{note.strip()}
+""" if note.strip() else ""
     return f"""\
 # Refine a kernel reproducer that failed
 
@@ -195,7 +203,7 @@ failed (didn't build, didn't boot, didn't trigger the bug, wrong patch fence, �
 write a **corrected** bundle to `./repro.md` following the spec below. Keep the
 `patch-compare:`/`thread-compare:` setup the prior bundle used so the runner still builds
 without and with the fix.
-
+{note_section}
 ## Constraints
 
 Work as a single agent: do NOT spawn sub-agents or use a task/explore delegation tool.
@@ -304,6 +312,7 @@ def main() -> int:
     ap.add_argument("--refine", action="store_true", help="refine a prior reproducer (see --prev-repro/--prev-logs)")
     ap.add_argument("--prev-repro", help="the prior reproducer bundle to fix (refine mode)")
     ap.add_argument("--prev-logs", help="dir of the prior run's logs the agent reads (refine mode)")
+    ap.add_argument("--refine-note", default="", help="free-text user context to weave into the refine prompt")
     args = ap.parse_args()
 
     if args.refine:
@@ -364,7 +373,7 @@ def main() -> int:
             shutil.copyfile(args.prev_repro, work / "prev-repro.md")
             if args.prev_logs and Path(args.prev_logs).is_dir():
                 shutil.copytree(args.prev_logs, work / "prev-logs")
-            (work / "PROMPT.md").write_text(build_refine_prompt_md(spec, patches))
+            (work / "PROMPT.md").write_text(build_refine_prompt_md(spec, patches, args.refine_note))
         else:
             (work / "PROMPT.md").write_text(build_prompt_md(spec, patches))
         # Seed the patch as a file too, so the agent can drop it straight into a fence.

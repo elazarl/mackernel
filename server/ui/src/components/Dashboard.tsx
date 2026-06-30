@@ -111,10 +111,11 @@ export function Dashboard() {
     selectJob(id);
   };
 
-  // Refine a job: hand its reproducer + logs back to the agent to fix, open the child job.
-  const onRefine = async (id: number) => {
+  // Refine a job: hand its reproducer + logs (plus optional user context) back to the
+  // agent to fix, open the child job.
+  const onRefine = async (id: number, note?: string) => {
     if (!hasCreds()) { setShowSettings(true); return; }
-    const { id: child } = await refineJob(id);
+    const { id: child } = await refineJob(id, note);
     selectJob(child);
   };
 

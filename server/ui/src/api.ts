@@ -139,10 +139,10 @@ export async function startScaffold(req: { thread?: string; patch?: string; comm
 // "Refine" a job: create a new scaffold job that hands this job's reproducer + all its
 // run logs back to the opencode agent to fix ("this failed, fix it"), then runs the
 // corrected bundle. Returns the new (child) job id. Needs the same OpenAI creds as scaffold.
-export async function refineJob(id: number): Promise<{ id: number }> {
+export async function refineJob(id: number, note?: string): Promise<{ id: number }> {
   return (await authed(`/api/jobs/${id}/refine`, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...getCreds() }),
+    body: JSON.stringify({ ...getCreds(), note }),
   })).json();
 }
 // List the models a provider exposes, via the backend (which proxies the provider's
