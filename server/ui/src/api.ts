@@ -35,6 +35,9 @@ export interface SummarizerInfo {
   mem_bytes: number;
   // The configured summary backends; one is primary (its output is shown by default).
   servers?: { label: string; model: string; primary: boolean }[];
+  // The visible opencode run queue (serialized one-at-a-time): who's waiting/running,
+  // for which job + field, and how long they've waited. Absent on older servers.
+  queue?: { job_id: number; field: string; backend: string; running: boolean; waited_ms: number }[];
 }
 // One backend's summary for a job field (every backend's output, behind the
 // "see all models" expander). The default view uses the per-field columns on Job.

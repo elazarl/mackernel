@@ -5,7 +5,7 @@ import {
 } from "../api";
 import { EXAMPLES, upsertMeta } from "../bundle";
 import { getTheme, setTheme as persistTheme, Theme } from "../lib/theme";
-import { jobFromPath, statusColor, summaryTip } from "../lib/format";
+import { jobFromPath, queueTip, statusColor, summaryTip } from "../lib/format";
 import { ModelSwitcher } from "./ModelSwitcher";
 import { BundleModal } from "./BundleModal";
 import { SpecModal } from "./SpecModal";
@@ -163,7 +163,7 @@ export function Dashboard() {
         {!connected && <span className="text-fail text-[.85em]" title="lost the live stream — reconnecting…">⚠ offline</span>}
         {summarizer && (
           <span className="ml-auto flex items-center gap-1.5 text-[.85em] text-muted">
-            🧠
+            <span className="cursor-help" title={queueTip(summarizer.queue)}>🧠</span>
             {!summarizer.loaded ? "warming up…"
               : srv.length > 1 ? (
                 <>

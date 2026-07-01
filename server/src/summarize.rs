@@ -26,10 +26,12 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 use serde_json::json;
 use tracing::warn;
 
@@ -132,10 +134,112 @@ pub struct Summarizer {
     client: reqwest::blocking::Client,
     backends: Vec<Backend>,
     mem_bytes: u64,
-    /// Serializes `opencode` CLI runs: the free zen tier rejects concurrent
-    /// invocations (a job's result+detail fire at once), and two heavyweight CLI
-    /// agents also spike the host. One at a time keeps it reliable.
-    opencode_lock: Mutex<()>,
+    /// Serializes `opencode` CLI runs (the free zen tier rejects concurrent
+    /// invocations — a job's result+detail fire at once — and two heavyweight CLI
+    /// agents also spike the host) AND records who's waiting/running so the UI can
+    /// show it on hover. One run at a time, same as the old bare lock.
+    opencode_queue: OpencodeQueue,
+}
+
+/// A visible, serialized queue for `opencode` CLI summary runs. `run_lock` enforces
+/// one-at-a-time execution (unchanged from the old `Mutex<()>`); `entries` records the
+/// waiting + running set in arrival order so `/api/summarizer` can surface it and the
+/// 🧠 topbar tooltip can list who's waiting, for what, and how long.
+pub struct OpencodeQueue {
+    run_lock: Mutex<()>,
+    entries: Mutex<Vec<QueueEntry>>,
+    seq: AtomicU64,
+    /// Set once after load: pings the global SSE bus whenever the queue changes so the
+    /// UI refetches. `None` on the debug CLI path (no bus).
+    on_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+/// One opencode run's place in the queue. `since_ms` is enqueue time; `started_ms` is
+/// stamped when it flips to running (`None` while waiting). Queue-wait is derived from
+/// these by the API (see `get_summarizer`).
+#[derive(Serialize, Clone)]
+pub struct QueueEntry {
+    pub id: u64,
+    pub job_id: i64,
+    pub field: &'static str,
+    pub backend: String,
+    pub running: bool,
+    pub since_ms: i64,
+    pub started_ms: Option<i64>,
+}
+
+impl OpencodeQueue {
+    fn new() -> Self {
+        Self {
+            run_lock: Mutex::new(()),
+            entries: Mutex::new(Vec::new()),
+            seq: AtomicU64::new(0),
+            on_change: Mutex::new(None),
+        }
+    }
+
+    /// Install the change notifier (a closure that pings the global bus). Called once
+    /// after the model loads, before the summarizer is published.
+    pub fn set_notifier(&self, f: Arc<dyn Fn() + Send + Sync>) {
+        *self.on_change.lock().unwrap() = Some(f);
+    }
+
+    /// Current waiting + running entries, in arrival order.
+    pub fn snapshot(&self) -> Vec<QueueEntry> {
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn notify(&self) {
+        // Clone the callback out so we don't hold the lock while it runs.
+        let cb = self.on_change.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(cb) = cb {
+            cb();
+        }
+    }
+
+    /// Register a waiting entry and return a ticket. The entry lives until the ticket
+    /// drops; call `run` on it to block for a turn and execute.
+    fn enter(&self, job_id: i64, field: &'static str, backend: &str) -> QueueTicket<'_> {
+        let id = self.seq.fetch_add(1, Ordering::Relaxed);
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).push(QueueEntry {
+            id, job_id, field, backend: backend.to_string(),
+            running: false, since_ms: crate::now_ms(), started_ms: None,
+        });
+        self.notify();
+        QueueTicket { queue: self, id }
+    }
+}
+
+/// A registered queue entry. Blocks for the serialization lock in `run`, and removes
+/// its entry on drop.
+struct QueueTicket<'a> {
+    queue: &'a OpencodeQueue,
+    id: u64,
+}
+
+impl QueueTicket<'_> {
+    /// Block until it's our turn (holding the serialization lock), mark the entry
+    /// running, then execute `f` while still holding the lock.
+    fn run<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _guard = self.queue.run_lock.lock().unwrap_or_else(|e| e.into_inner());
+        {
+            let mut es = self.queue.entries.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(e) = es.iter_mut().find(|e| e.id == self.id) {
+                e.running = true;
+                e.started_ms = Some(crate::now_ms());
+            }
+        }
+        self.queue.notify();
+        f()
+    }
+}
+
+impl Drop for QueueTicket<'_> {
+    fn drop(&mut self) {
+        self.queue.entries.lock().unwrap_or_else(|e| e.into_inner())
+            .retain(|e| e.id != self.id);
+        self.queue.notify();
+    }
 }
 
 impl Drop for Summarizer {
@@ -206,11 +310,11 @@ impl Summarizer {
             client,
             backends,
             mem_bytes: 0,
-            opencode_lock: Mutex::new(()),
+            opencode_queue: OpencodeQueue::new(),
         };
         // Warm up the local server and measure its RSS for /api/summarizer.
         if let Some(local) = s.backends.iter().find(|b| b.label == LABEL).cloned() {
-            let _ = s.generate(&local, SYS_TITLE, "ping", 1, false, &|_| {});
+            let _ = s.generate(&local, SYS_TITLE, "ping", 1, false, &|_| {}, 0, "warmup");
             if let Some(child) = &s.child {
                 let pid = child.lock().unwrap().id();
                 s.mem_bytes = rss_of(pid);
@@ -230,15 +334,21 @@ impl Summarizer {
         self.mem_bytes
     }
 
+    /// The visible opencode run queue (backs `/api/summarizer`'s `queue` field).
+    pub fn opencode_queue(&self) -> &OpencodeQueue {
+        &self.opencode_queue
+    }
+
     /// Terse two-word title for the job, from the bundle alone (job start).
     pub fn title(
         &self,
         b: &Backend,
         bundle_md: &str,
         on_tok: &dyn Fn(u32),
+        job_id: i64,
     ) -> Result<(String, GenStats)> {
         let user = curate_bundle(bundle_md);
-        let (raw, stats) = self.generate(b, SYS_TITLE, &user, 8, false, on_tok)?;
+        let (raw, stats) = self.generate(b, SYS_TITLE, &user, 8, false, on_tok, job_id, "title")?;
         Ok((two_words(&raw), stats))
     }
 
@@ -248,9 +358,10 @@ impl Summarizer {
         b: &Backend,
         bundle_md: &str,
         on_tok: &dyn Fn(u32),
+        job_id: i64,
     ) -> Result<(String, GenStats)> {
         let user = curate_bundle(bundle_md);
-        self.generate(b, SYS_REPRO, &user, 64, false, on_tok)
+        self.generate(b, SYS_REPRO, &user, 64, false, on_tok, job_id, "repro")
     }
 
     /// One sentence on what happened on this run: bundle + curated issues + outcome
@@ -263,6 +374,7 @@ impl Summarizer {
         exit_code: Option<i64>,
         outcome: &str,
         on_tok: &dyn Fn(u32),
+        job_id: i64,
     ) -> Result<(String, GenStats)> {
         let exit = exit_code
             .map(|e| e.to_string())
@@ -272,7 +384,7 @@ impl Summarizer {
             curate_bundle(bundle_md),
             curate_issues(issues_json),
         );
-        self.generate(b, SYS_RESULT, &user, 96, false, on_tok)
+        self.generate(b, SYS_RESULT, &user, 96, false, on_tok, job_id, "result")
     }
 
     /// Markdown analysis of the run (job end). The user message is the reproducer
@@ -285,16 +397,19 @@ impl Summarizer {
         bundle_md: &str,
         logs_dir: &Path,
         on_tok: &dyn Fn(u32),
+        job_id: i64,
     ) -> Result<(String, GenStats)> {
         // Per-backend log cap: only the local llama-server is context-constrained;
         // remote HTTP backends and opencode have huge contexts and get near-full logs.
         let cap = if b.is_local() { LOCAL_LOG_CAP } else { REMOTE_LOG_CAP };
         let user = curate_end_context(bundle_md, logs_dir, cap);
-        self.generate(b, SYS_DETAIL, &user, 400, false, on_tok)
+        self.generate(b, SYS_DETAIL, &user, 400, false, on_tok, job_id, "detail")
     }
 
     /// One completion against a backend. Dispatches to the OpenAI HTTP path or the
-    /// `opencode` CLI depending on the backend kind.
+    /// `opencode` CLI depending on the backend kind. `job_id`/`field` label the opencode
+    /// queue entry (ignored for HTTP backends).
+    #[allow(clippy::too_many_arguments)]
     fn generate(
         &self,
         b: &Backend,
@@ -303,9 +418,11 @@ impl Summarizer {
         max_new: usize,
         json: bool,
         on_tok: &dyn Fn(u32),
+        job_id: i64,
+        field: &'static str,
     ) -> Result<(String, GenStats)> {
         if b.kind == BackendKind::Opencode {
-            return generate_opencode(&self.opencode_lock, b, sys, user, on_tok);
+            return generate_opencode(&self.opencode_queue, job_id, field, b, sys, user, on_tok);
         }
         self.generate_openai(b, sys, user, max_new, json, on_tok)
     }
@@ -407,48 +524,61 @@ impl Summarizer {
 /// without invoking tools. Binary from `$MK_OPENCODE_BIN`, else `opencode` on PATH.
 /// Runs in a neutral cwd so it doesn't scan a project, and is killed after a timeout.
 /// opencode emits no token usage, so `tokens` is a whitespace-word estimate.
-/// `lock` serializes runs — the free zen tier rejects concurrent invocations.
-fn generate_opencode(lock: &Mutex<()>, b: &Backend, sys: &str, user: &str, on_tok: &dyn Fn(u32)) -> Result<(String, GenStats)> {
-    // Held for the whole run so only one opencode CLI executes at a time.
-    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-    let bin = std::env::var("MK_OPENCODE_BIN").unwrap_or_else(|_| "opencode".to_string());
-    let prompt = format!("{sys}\n\n{user}");
-    let started = Instant::now();
-    let mut child = Command::new(&bin)
-        .args(["run", "--pure", "-m", &b.model, &prompt])
-        .current_dir(std::env::temp_dir())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("spawn {bin} run"))?;
+/// `queue` serializes runs — the free zen tier rejects concurrent invocations — and
+/// records this run's `job_id`/`field` as a waiting entry, flipped to running once it
+/// holds the serialization lock (see `OpencodeQueue`).
+fn generate_opencode(
+    queue: &OpencodeQueue,
+    job_id: i64,
+    field: &'static str,
+    b: &Backend,
+    sys: &str,
+    user: &str,
+    on_tok: &dyn Fn(u32),
+) -> Result<(String, GenStats)> {
+    // Registered as waiting; `run` blocks for a turn, marks it running, and removes the
+    // entry on drop. Only one opencode CLI executes at a time.
+    let ticket = queue.enter(job_id, field, &b.label);
+    ticket.run(|| {
+        let bin = std::env::var("MK_OPENCODE_BIN").unwrap_or_else(|_| "opencode".to_string());
+        let prompt = format!("{sys}\n\n{user}");
+        let started = Instant::now();
+        let mut child = Command::new(&bin)
+            .args(["run", "--pure", "-m", &b.model, &prompt])
+            .current_dir(std::env::temp_dir())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("spawn {bin} run"))?;
 
-    let deadline = Instant::now() + OPENCODE_TIMEOUT;
-    loop {
-        match child.try_wait()? {
-            Some(status) if status.success() => break,
-            Some(status) => bail!("opencode run exited with {status}"),
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    bail!("opencode run timed out after {OPENCODE_TIMEOUT:?}");
+        let deadline = Instant::now() + OPENCODE_TIMEOUT;
+        loop {
+            match child.try_wait()? {
+                Some(status) if status.success() => break,
+                Some(status) => bail!("opencode run exited with {status}"),
+                None => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        bail!("opencode run timed out after {OPENCODE_TIMEOUT:?}");
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
                 }
-                std::thread::sleep(Duration::from_millis(200));
             }
         }
-    }
 
-    // Summaries are small, so reading stdout after the child exits won't deadlock.
-    let mut text = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        out.read_to_string(&mut text).context("read opencode stdout")?;
-    }
-    let text = text.trim().to_string();
-    if text.is_empty() {
-        bail!("opencode produced no output");
-    }
-    let tokens = text.split_whitespace().count() as u32; // estimate; CLI has no usage
-    on_tok(tokens);
-    Ok((text, GenStats { ms: started.elapsed().as_millis() as u64, tokens }))
+        // Summaries are small, so reading stdout after the child exits won't deadlock.
+        let mut text = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            out.read_to_string(&mut text).context("read opencode stdout")?;
+        }
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            bail!("opencode produced no output");
+        }
+        let tokens = text.split_whitespace().count() as u32; // estimate; CLI has no usage
+        on_tok(tokens);
+        Ok((text, GenStats { ms: started.elapsed().as_millis() as u64, tokens }))
+    })
 }
 
 /// Spawn the local `llama-server` (optionally CPU-deprioritized via `MK_LLAMA_NICE`)
@@ -925,6 +1055,56 @@ fn cap_chars(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queue_tracks_waiting_running_and_dequeues_on_drop() {
+        let q = OpencodeQueue::new();
+        let t1 = q.enter(1, "detail", "oc");
+        let t2 = q.enter(2, "title", "oc");
+        // Both registered, both waiting, arrival order preserved.
+        let s = q.snapshot();
+        assert_eq!(s.len(), 2);
+        assert_eq!((s[0].job_id, s[1].job_id), (1, 2));
+        assert!(s.iter().all(|e| !e.running && e.started_ms.is_none()));
+        // Running the first flips only its entry and stamps started_ms.
+        t1.run(|| {
+            let s = q.snapshot();
+            let e1 = s.iter().find(|e| e.job_id == 1).unwrap();
+            let e2 = s.iter().find(|e| e.job_id == 2).unwrap();
+            assert!(e1.running && e1.started_ms.is_some());
+            assert!(!e2.running && e2.started_ms.is_none());
+        });
+        // Dropping a ticket removes exactly its entry.
+        drop(t1);
+        assert_eq!(q.snapshot().iter().map(|e| e.job_id).collect::<Vec<_>>(), vec![2]);
+        drop(t2);
+        assert!(q.snapshot().is_empty());
+    }
+
+    #[test]
+    fn queue_serializes_runs_one_at_a_time() {
+        use std::sync::atomic::AtomicUsize;
+        use std::thread;
+        let q = OpencodeQueue::new();
+        let live = AtomicUsize::new(0); // concurrent runs right now
+        let peak = AtomicUsize::new(0); // max ever seen
+        let (q, live, peak) = (&q, &live, &peak); // shared by reference across threads
+        thread::scope(|sc| {
+            for job in 0..4i64 {
+                sc.spawn(move || {
+                    let t = q.enter(job, "detail", "oc");
+                    t.run(|| {
+                        let c = live.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(c, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(20));
+                        live.fetch_sub(1, Ordering::SeqCst);
+                    });
+                });
+            }
+        });
+        assert_eq!(peak.load(Ordering::SeqCst), 1, "only one opencode run at a time");
+        assert!(q.snapshot().is_empty(), "all entries cleared after runs finish");
+    }
 
     #[test]
     fn parse_servers_resolves_key_env_and_skips_missing() {

@@ -116,13 +116,13 @@ async fn main() -> anyhow::Result<()> {
             for b in s.backends() {
                 println!("== backend: {} ({}){}", b.label, b.model, if b.primary { " [primary]" } else { "" });
                 let one = || -> anyhow::Result<()> {
-                    println!("TITLE:  {}", s.title(b, &md, &noop)?.0);
-                    println!("REPRO:  {}", s.summarize_repro(b, &md, &noop)?.0);
+                    println!("TITLE:  {}", s.title(b, &md, &noop, 0)?.0);
+                    println!("REPRO:  {}", s.summarize_repro(b, &md, &noop, 0)?.0);
                     if let Some(logs) = &logs_arg {
                         let logs = std::path::Path::new(logs);
                         let issues = collect_issues(logs, &watched_patterns(&md));
-                        println!("RESULT: {}", s.summarize_result(b, &md, &issues, Some(1), "done", &noop)?.0);
-                        println!("DETAIL: {}", s.detail(b, &md, logs, &noop)?.0);
+                        println!("RESULT: {}", s.summarize_result(b, &md, &issues, Some(1), "done", &noop, 0)?.0);
+                        println!("DETAIL: {}", s.detail(b, &md, logs, &noop, 0)?.0);
                     }
                     Ok(())
                 };
@@ -190,6 +190,12 @@ async fn main() -> anyhow::Result<()> {
                 let labels: Vec<&str> = s.backends().iter().map(|b| b.label.as_str()).collect();
                 info!("summary backends ready: [{}] (local RSS {} MB)",
                     labels.join(", "), s.memory_bytes() / 1_048_576);
+                // Ping the global SSE bus whenever the opencode queue changes so the 🧠
+                // topbar tooltip stays live during long runs (jobs stream doesn't fire then).
+                let bus = flush_st.bus.clone();
+                s.opencode_queue().set_notifier(std::sync::Arc::new(move || {
+                    bus.publish_global(json!({ "kind": "summarizer" }).to_string());
+                }));
                 let _ = slot.set(Arc::new(s));
                 // Flush any summaries requested while the model was warming up.
                 let queued: Vec<_> = flush_st.summary_queue.lock().unwrap().drain(..).collect();
@@ -585,11 +591,22 @@ async fn get_summarizer(State(st): State<AppState>) -> Json<serde_json::Value> {
             let label = s.backends().iter().find(|b| b.primary)
                 .map(|b| b.label.clone())
                 .unwrap_or_else(|| summarize::LABEL.to_string());
+            // Visible opencode queue: who's waiting/running, and how long they've waited.
+            // `waited_ms` is computed here (waiters grow; runners freeze at start).
+            let now = now_ms();
+            let queue: Vec<_> = s.opencode_queue().snapshot().iter().map(|e| json!({
+                "job_id": e.job_id,
+                "field": e.field,
+                "backend": e.backend,
+                "running": e.running,
+                "waited_ms": e.started_ms.unwrap_or(now) - e.since_ms,
+            })).collect();
             Json(json!({
                 "loaded": true,
                 "label": label,
                 "mem_bytes": s.memory_bytes(),
                 "servers": servers,
+                "queue": queue,
             }))
         }
         None => Json(json!({ "loaded": false, "label": summarize::LABEL, "mem_bytes": 0, "servers": [] })),
@@ -738,10 +755,10 @@ fn spawn_summary(st: &AppState, id: i64, stage: &'static str) -> Vec<tokio::task
             // Bundle only: title + reproducer one-liner, generated concurrently.
             let (s, bb) = (sumz.clone(), b.clone());
             handles.push(spawn_one(st, id, "title", b.clone(), dir.clone(),
-                move |bundle, _logs, on_tok| s.title(&bb, &bundle, on_tok)));
+                move |bundle, _logs, on_tok| s.title(&bb, &bundle, on_tok, id)));
             let (s, bb) = (sumz.clone(), b.clone());
             handles.push(spawn_one(st, id, "repro", b, dir.clone(),
-                move |bundle, _logs, on_tok| s.summarize_repro(&bb, &bundle, on_tok)));
+                move |bundle, _logs, on_tok| s.summarize_repro(&bb, &bundle, on_tok, id)));
         }
     } else {
         // Bundle + run output: result one-liner + two-paragraph detail, concurrently.
@@ -753,11 +770,11 @@ fn spawn_summary(st: &AppState, id: i64, stage: &'static str) -> Vec<tokio::task
             handles.push(spawn_one(st, id, "result", b.clone(), dir.clone(),
                 move |bundle, logs, on_tok| {
                     let issues = collect_issues(&logs, &watched_patterns(&bundle));
-                    s.summarize_result(&bb, &bundle, &issues, exit, &o, on_tok)
+                    s.summarize_result(&bb, &bundle, &issues, exit, &o, on_tok, id)
                 }));
             let (s, bb) = (sumz.clone(), b.clone());
             handles.push(spawn_one(st, id, "detail", b, dir.clone(),
-                move |bundle, logs, on_tok| s.detail(&bb, &bundle, &logs, on_tok)));
+                move |bundle, logs, on_tok| s.detail(&bb, &bundle, &logs, on_tok, id)));
         }
     }
     handles

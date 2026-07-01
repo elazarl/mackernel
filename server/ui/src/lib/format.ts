@@ -1,6 +1,6 @@
 // Pure formatting / status helpers shared across the dashboard, extracted from the
 // old single-file App so components stay presentational.
-import type { Job, JobSummary, Sample } from "../api";
+import type { Job, JobSummary, Sample, SummarizerInfo } from "../api";
 
 export const PHASES = ["fetch", "configure", "build", "boot", "insmod", "run", "done"];
 
@@ -33,6 +33,19 @@ export function summaryTip(job: Job | null, field: string): string | undefined {
   const m = summaryMeta(job, field);
   if (!m) return undefined;
   return `generated in ${m.took ?? `${m.ms} ms`} · ${m.model} · ${m.tokens} tokens`;
+}
+
+// 🧠 hover tooltip: the opencode run queue — each entry's job, purpose (field), backend,
+// and how long it waited (running entries show the frozen wait; waiters, the wait so far).
+export function queueTip(q?: SummarizerInfo["queue"]): string {
+  if (!q) return "";                     // older server / opencode not in use
+  if (!q.length) return "opencode queue: idle";
+  return q.map((e) => {
+    const wait = `${Math.round(e.waited_ms / 1000)}s`;
+    return e.running
+      ? `▶ #${e.job_id} ${e.field} · ${e.backend} · running (waited ${wait})`
+      : `• #${e.job_id} ${e.field} · ${e.backend} · waiting ${wait}`;
+  }).join("\n");
 }
 
 // Per-server summary tooltip: model · duration · tokens.
