@@ -136,6 +136,13 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
         "-append", f"console={prof['console']} root=/dev/vda1 rw "
                     + (f"loglevel={mklvl}" if (mklvl := os.environ.get('MK_LOGLEVEL')) else "ignore_loglevel"),
         "-snapshot",
+        # Exit QEMU when the guest reboots instead of resetting it. Paired with
+        # CONFIG_PANIC_TIMEOUT=3 (kconf/base.config): a guest that panics reboots
+        # after 3s, QEMU exits, the forwarded SSH session drops, and ssh_run returns
+        # in seconds -- instead of a wedged guest hanging the run until the host TCP
+        # stack finally gives up (~tens of minutes). No effect on healthy runs (they
+        # never reboot; teardown kills QEMU).
+        "-no-reboot",
         "-display", "none",
         "-serial", f"file:{serial_log}",
         "-monitor", "none",
