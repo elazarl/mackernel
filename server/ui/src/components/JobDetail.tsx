@@ -59,6 +59,10 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
   const [progress, setProgress] = useState<Record<string, number>>({});
   const bundle = parseBundle(bundleText);
   const cmp = compareMode(bundle);
+  // While a scaffold/refine job is still generating, the reproducer shown is the *previous*
+  // one (the input being refined); the agent replaces it with bundle.md when it finishes.
+  const scaffolding = job?.source === "scaffold" && (job.status === "queued" || job.phase === "scaffold");
+  const showingPrevRepro = scaffolding && !!bundleText.trim() && !bundleText.startsWith("(no ");
   const t0 = useRef<number>(0);
   const userPicked = useRef(false);
 
@@ -68,6 +72,11 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
     let live = true;
     let es: EventSource | null = null;
     const refreshSummaries = () => getJobSummaries(id).then((s) => { if (live) setSummaries(s); }).catch(() => {});
+    // The reproducer can change mid-job: a scaffold/refine job writes bundle.md when the
+    // agent finishes, replacing the previous reproducer shown until then. Re-fetch on phase
+    // changes; only replace on real content so a transient miss doesn't blank the view.
+    const refreshBundle = () =>
+      getLog(id, "bundle").then((t) => { if (live && t && !t.startsWith("(no ")) setBundleText(t); }).catch(() => {});
     (async () => {
       const j = await getJob(id); if (!live) return; setJob(j);
       const m = await getMetrics(id); if (!live) return;
@@ -93,6 +102,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
           if (v.kind === "summary" && v.field)
             setProgress((p) => { const n = { ...p }; delete n[v.field]; return n; });
           if (v.kind === "phase" || v.kind === "done" || v.kind === "summary") getJob(id).then(setJob);
+          if (v.kind === "phase" || v.kind === "done") refreshBundle();
           if (v.kind === "summary" || v.kind === "done" || v.kind === "summaries_done") refreshSummaries();
           if (v.kind === "summaries_done") es?.close();
         } catch {}
@@ -183,7 +193,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
       {bundleText.trim() && (
         <section className="card">
           <div className="flex items-center justify-between">
-            <h2>Reproducer</h2>
+            <h2>Reproducer{showingPrevRepro && <span className="text-muted font-normal text-[0.72em]"> · previous — the agent is refining it; updates when scaffolding finishes</span>}</h2>
             <span>
               <button className="linkbtn" onClick={() => setMaxRepro(true)}>Maximize</button>
               {" · "}

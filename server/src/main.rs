@@ -332,7 +332,13 @@ async fn get_log(
     let jobdir = st.work.join(id.to_string());
     let logs = jobdir.join("logs");
     if kind == "bundle" {
-        return tokio::fs::read_to_string(jobdir.join("bundle.md")).await
+        // Show the reproducer as soon as there is one. For a refine job the agent hasn't
+        // written bundle.md yet (or failed to), so fall back to the reproducer it was
+        // handed — prev-repro.md — so the reproducer stays visible throughout the refine.
+        if let Ok(s) = tokio::fs::read_to_string(jobdir.join("bundle.md")).await {
+            return Ok(s);
+        }
+        return tokio::fs::read_to_string(jobdir.join("prev-repro.md")).await
             .map_err(|_| StatusCode::NOT_FOUND);
     }
     // Compare jobs nest per-variant logs under logs/<variant>/. Whitelist the names so
