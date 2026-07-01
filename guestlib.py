@@ -125,12 +125,12 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
         "-device", "virtio-net-pci,netdev=net0",
         "-object", "rng-builtin,id=rng0",
         "-device", "virtio-rng-pci,rng=rng0",
-        # `quiet loglevel=4` keeps the console to warnings+ during boot: a verbose
-        # kernel (e.g. debug builds that trace every file open) otherwise floods the
-        # emulated serial and boot crawls past the SSH timeout. KASAN/panic (≤ERR)
-        # still print, and `sudo dmesg` (the ring buffer captured to dmesg.log) keeps
-        # everything regardless. Override with MK_LOGLEVEL.
-        "-append", f"console={prof['console']} root=/dev/vda1 rw quiet loglevel={os.environ.get('MK_LOGLEVEL', '4')}",
+        # loglevel=8 prints every printk level (0-7) to the serial, so console.log
+        # mirrors what `dmesg` shows by default (the full ring buffer) rather than
+        # just errors. Tradeoff: a chatty/debug kernel can flood the emulated serial
+        # and crawl past the SSH timeout (TCG boots already triple it) -- lower it
+        # then, e.g. MK_LOGLEVEL=4, to keep the console to errors+.
+        "-append", f"console={prof['console']} root=/dev/vda1 rw loglevel={os.environ.get('MK_LOGLEVEL', '8')}",
         "-snapshot",
         "-display", "none",
         "-serial", f"file:{serial_log}",
