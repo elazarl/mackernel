@@ -125,12 +125,16 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
         "-device", "virtio-net-pci,netdev=net0",
         "-object", "rng-builtin,id=rng0",
         "-device", "virtio-rng-pci,rng=rng0",
-        # loglevel=8 prints every printk level (0-7) to the serial, so console.log
-        # mirrors what `dmesg` shows by default (the full ring buffer) rather than
-        # just errors. Tradeoff: a chatty/debug kernel can flood the emulated serial
-        # and crawl past the SSH timeout (TCG boots already triple it) -- lower it
-        # then, e.g. MK_LOGLEVEL=4, to keep the console to errors+.
-        "-append", f"console={prof['console']} root=/dev/vda1 rw loglevel={os.environ.get('MK_LOGLEVEL', '8')}",
+        # `ignore_loglevel` prints every printk to the serial for the whole VM life, so
+        # console.log mirrors what `dmesg` shows -- including post-boot lines like a
+        # reproducer's pr_info at insmod. Plain loglevel=8 isn't enough: it only sets the
+        # *initial* console level, and Ubuntu userspace resets console_loglevel via sysctl
+        # once it boots, re-hiding INFO/DEBUG. ignore_loglevel bypasses console_loglevel
+        # entirely and sysctl can't undo it. Set MK_LOGLEVEL to pin a quieter numeric
+        # level instead (e.g. =4 for errors+), if a chatty kernel floods the emulated
+        # serial and crawls past the SSH timeout (TCG boots already triple it).
+        "-append", f"console={prof['console']} root=/dev/vda1 rw "
+                    + (f"loglevel={mklvl}" if (mklvl := os.environ.get('MK_LOGLEVEL')) else "ignore_loglevel"),
         "-snapshot",
         "-display", "none",
         "-serial", f"file:{serial_log}",
