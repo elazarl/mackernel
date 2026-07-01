@@ -119,8 +119,9 @@ pub struct RefineReq {
 }
 
 /// Recursively copy a directory tree (used to bring a parent job's logs into a refine
-/// job's dir). Handles the compare-job `baseline/`+`patched/` subdirs.
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+/// job's dir, and to seed the demo job's work dir). Handles the compare-job
+/// `baseline/`+`patched/` subdirs.
+pub(crate) fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;

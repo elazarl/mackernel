@@ -1,0 +1,142 @@
+[[0;1;31mFAILED[0m] Failed to start [0;1;39mmultipathd.service[0m…Mapper Multipath Device Controller.
+[   52.828006] cloud-init[253]: Cloud-init v. 25.3-0ubuntu1~24.04.1 running 'init-local' at Tue, 24 Mar 2026 13:46:41 +0000. Up 52.37 seconds.
+[   87.498374] cloud-init[319]: Cloud-init v. 25.3-0ubuntu1~24.04.1 running 'init' at Tue, 24 Mar 2026 13:47:16 +0000. Up 86.99 seconds.
+[   87.836610] cloud-init[319]: ci-info: ++++++++++++++++++++++++++++++++++++++Net device info+++++++++++++++++++++++++++++++++++++++
+[   87.841501] cloud-init[319]: ci-info: +--------+-------+----------------------------+---------------+--------+-------------------+
+[   87.845987] cloud-init[319]: ci-info: | Device |   Up  |          Address           |      Mask     | Scope  |     Hw-Address    |
+[   87.850407] cloud-init[319]: ci-info: +--------+-------+----------------------------+---------------+--------+-------------------+
+[   87.855056] cloud-init[319]: ci-info: | enp0s1 |  True |         10.0.2.15          | 255.255.255.0 | global | 52:54:00:12:34:56 |
+[   87.859647] cloud-init[319]: ci-info: | enp0s1 |  True | fec0::5054:ff:fe12:3456/64 |       .       |  site  | 52:54:00:12:34:56 |
+[   87.863846] cloud-init[319]: ci-info: | enp0s1 |  True | fe80::5054:ff:fe12:3456/64 |       .       |  link  | 52:54:00:12:34:56 |
+[   87.869114] cloud-init[319]: ci-info: |   lo   |  True |         127.0.0.1          |   255.0.0.0   |  host  |         .         |
+[   87.874259] cloud-init[319]: ci-info: |   lo   |  True |          ::1/128           |       .       |  host  |         .         |
+[   87.878839] cloud-init[319]: ci-info: |  sit0  | False |             .              |       .       |   .    |         .         |
+[   87.883793] cloud-init[319]: ci-info: +--------+-------+----------------------------+---------------+--------+-------------------+
+[   87.887899] cloud-init[319]: ci-info: +++++++++++++++++++++++++++Route IPv4 info+++++++++++++++++++++++++++
+[   87.892679] cloud-init[319]: ci-info: +-------+-------------+---------+---------------+-----------+-------+
+[   87.897127] cloud-init[319]: ci-info: | Route | Destination | Gateway |    Genmask    | Interface | Flags |
+[   87.901415] cloud-init[319]: ci-info: +-------+-------------+---------+---------------+-----------+-------+
+[   87.905362] cloud-init[319]: ci-info: |   0   |   10.0.2.0  | 0.0.0.0 | 255.255.255.0 |   enp0s1  |   U   |
+[   87.909329] cloud-init[319]: ci-info: +-------+-------------+---------+---------------+-----------+-------+
+[   87.913010] cloud-init[319]: ci-info: +++++++++++++++++++Route IPv6 info+++++++++++++++++++
+[   87.917540] cloud-init[319]: ci-info: +-------+-------------+---------+-----------+-------+
+[   87.921952] cloud-init[319]: ci-info: | Route | Destination | Gateway | Interface | Flags |
+[   87.926252] cloud-init[319]: ci-info: +-------+-------------+---------+-----------+-------+
+[   87.930167] cloud-init[319]: ci-info: |   1   |    local    |    ::   |   enp0s1  |   U   |
+[   87.934557] cloud-init[319]: ci-info: |   2   |  fe80::/64  |    ::   |   enp0s1  |   U   |
+[   87.939164] cloud-init[319]: ci-info: |   3   |    local    |    ::   |   enp0s1  |   U   |
+[   87.944505] cloud-init[319]: ci-info: |   4   |  fec0::/64  |    ::   |   enp0s1  |   Ue  |
+[   87.949221] cloud-init[319]: ci-info: |   5   |  multicast  |    ::   |   enp0s1  |   U   |
+[   87.953913] cloud-init[319]: ci-info: |   6   |     ::/0    | fe80::2 |   enp0s1  |  UGe  |
+[   87.958469] cloud-init[319]: ci-info: +-------+-------------+---------+-----------+-------+
+[  119.182154] cloud-init[319]: Generating public/private rsa key pair.
+[  119.192891] cloud-init[319]: Your identification has been saved in /etc/ssh/ssh_host_rsa_key
+[  119.199613] cloud-init[319]: Your public key has been saved in /etc/ssh/ssh_host_rsa_key.pub
+[  119.205495] cloud-init[319]: The key fingerprint is:
+[  119.209693] cloud-init[319]: SHA256:0Tjoc7jjfJt/O1E9QhxtmgQZJtR1SZq4umNjL6HDtVs root@mackernel
+[  119.214569] cloud-init[319]: The key's randomart image is:
+[  119.218510] cloud-init[319]: +---[RSA 3072]----+
+[  119.223103] cloud-init[319]: |        .o.+*o+o.|
+[  119.227945] cloud-init[319]: |       . ooo.+++ |
+[  119.232898] cloud-init[319]: |      . + ..oo+. |
+[  119.238179] cloud-init[319]: |     . . o  .+...|
+[  119.242054] cloud-init[319]: |      + S  . .. .|
+[  119.246016] cloud-init[319]: |       + o. .    |
+[  119.250810] cloud-init[319]: |      + o.oE .   |
+[  119.255606] cloud-init[319]: |     o =.Oo o    |
+[  119.260752] cloud-init[319]: |      o.*=Bo.o   |
+[  119.265383] cloud-init[319]: +----[SHA256]-----+
+[  119.269526] cloud-init[319]: Generating public/private ecdsa key pair.
+[  119.274203] cloud-init[319]: Your identification has been saved in /etc/ssh/ssh_host_ecdsa_key
+[  119.279105] cloud-init[319]: Your public key has been saved in /etc/ssh/ssh_host_ecdsa_key.pub
+[  119.284010] cloud-init[319]: The key fingerprint is:
+[  119.288683] cloud-init[319]: SHA256:CAdfNWBVQuWHM4tiXVMD5AbC5SYpq5jhyGf0+zX8xTg root@mackernel
+[  119.292826] cloud-init[319]: The key's randomart image is:
+[  119.297160] cloud-init[319]: +---[ECDSA 256]---+
+[  119.302066] cloud-init[319]: |    .  .=*O+=.o  |
+[  119.306567] cloud-init[319]: |     o o.+ * o . |
+[  119.310909] cloud-init[319]: |    . + o o X .  |
+[  119.314836] cloud-init[319]: |     o + + + *   |
+[  119.320580] cloud-init[319]: |  ..  o S o .    |
+[  119.325346] cloud-init[319]: |.o.+.. ...  o    |
+[  119.329663] cloud-init[319]: |..+o..   + E o   |
+[  119.333910] cloud-init[319]: |  o   . . o o    |
+[  119.338651] cloud-init[319]: |     ...   .     |
+[  119.343641] cloud-init[319]: +----[SHA256]-----+
+[  119.347776] cloud-init[319]: Generating public/private ed25519 key pair.
+[  119.353499] cloud-init[319]: Your identification has been saved in /etc/ssh/ssh_host_ed25519_key
+[  119.358214] cloud-init[319]: Your public key has been saved in /etc/ssh/ssh_host_ed25519_key.pub
+[  119.364687] cloud-init[319]: The key fingerprint is:
+[  119.369141] cloud-init[319]: SHA256:QUA4ybr5PGTSrYZHS/gra9zMFDRqrABzF1mkUgpffeg root@mackernel
+[  119.373695] cloud-init[319]: The key's randomart image is:
+[  119.378328] cloud-init[319]: +--[ED25519 256]--+
+[  119.383549] cloud-init[319]: |.  .+X=o.        |
+[  119.389165] cloud-init[319]: |oo.+X.o..        |
+[  119.393566] cloud-init[319]: |.++=.+ ..        |
+[  119.398769] cloud-init[319]: |. =.. E  .       |
+[  119.403371] cloud-init[319]: |.o = o  S        |
+[  119.407830] cloud-init[319]: |. = B .          |
+[  119.413253] cloud-init[319]: | . / o           |
+[  119.418329] cloud-init[319]: |  = &            |
+[  119.423597] cloud-init[319]: | ..=.o           |
+[  119.429464] cloud-init[319]: +----[SHA256]-----+
+
+Ubuntu 24.04.4 LTS mackernel ttyAMA0
+
+mackernel login: [  143.310381] cloud-init[576]: Cloud-init v. 25.3-0ubuntu1~24.04.1 running 'modules:config' at Tue, 24 Mar 2026 13:48:11 +0000. Up 141.64 seconds.
+[  187.734733] ==================================================================
+[  187.735407] BUG: KASAN: slab-use-after-free in reader_fn+0xa0/0xb0 [em_uaf_repro]
+[  187.736866] Read of size 4 at addr fff0000011858d1c by task em_uaf_reader/988
+[  187.736998] 
+[  187.738005] CPU: 0 UID: 0 PID: 988 Comm: em_uaf_reader Tainted: G           O        6.19.0 #1 NONE 
+[  187.738384] Tainted: [O]=OOT_MODULE
+[  187.738465] Hardware name: linux,dummy-virt (DT)
+[  187.738848] Call trace:
+[  187.739062]  show_stack+0x14/0x1c (C)
+[  187.739944]  dump_stack_lvl+0x5c/0x78
+[  187.740106]  print_report+0xbc/0x4d0
+[  187.740245]  kasan_report+0xa4/0xb4
+[  187.740408]  __asan_load4+0x24/0x98
+[  187.740590]  reader_fn+0xa0/0xb0 [em_uaf_repro]
+[  187.740780]  kthread+0x260/0x278
+[  187.740927]  ret_from_fork+0x10/0x20
+[  187.741234] 
+[  187.741325] Allocated by task 987:
+[  187.743224] 
+[  187.743280] Freed by task 987:
+[  187.744578] 
+[  187.744686] The buggy address belongs to the object at fff0000011858d00
+[  187.744686]  which belongs to the cache kmalloc-64 of size 64
+[  187.744865] The buggy address is located 28 bytes inside of
+[  187.744865]  freed 64-byte region [fff0000011858d00, fff0000011858d40)
+[  187.744985] 
+[  187.745100] The buggy address belongs to the physical page:
+[  187.747280] 
+[  187.747326] Memory state around the buggy address:
+[  187.747634]  fff0000011858c00: fa fb fb fb fb fb fb fb fc fc fc fc fc fc fc fc
+[  187.747787]  fff0000011858c80: fa fb fb fb fb fb fb fb fc fc fc fc fc fc fc fc
+[  187.747873] >fff0000011858d00: fa fb fb fb fb fb fb fb fc fc fc fc fc fc fc fc
+[  187.747955]                             ^
+[  187.748075]  fff0000011858d80: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc
+[  187.748157]  fff0000011858e00: fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc fc
+[  187.748268] ==================================================================
+ci-info: ++++++++++++++++++++++++++++++++++++++Authorized keys from /home/mac/.ssh/authorized_keys for user mac++++++++++++++++++++++++++++++++++++++
+ci-info: +-------------+-------------------------------------------------------------------------------------------------+---------+----------------+
+ci-info: |   Keytype   |                                       Fingerprint (sha256)                                      | Options |    Comment     |
+ci-info: +-------------+-------------------------------------------------------------------------------------------------+---------+----------------+
+ci-info: | ssh-ed25519 | a1:e1:6c:64:d3:c6:26:29:14:6d:d8:e4:59:ad:cf:41:e9:86:f9:2b:15:8d:3a:b1:4a:aa:25:2a:4e:93:14:04 |    -    | mackernel-host |
+ci-info: +-------------+-------------------------------------------------------------------------------------------------+---------+----------------+
+<14>Mar 24 13:49:07 cloud-init: #############################################################
+<14>Mar 24 13:49:07 cloud-init: -----BEGIN SSH HOST KEY FINGERPRINTS-----
+<14>Mar 24 13:49:07 cloud-init: 256 SHA256:CAdfNWBVQuWHM4tiXVMD5AbC5SYpq5jhyGf0+zX8xTg root@mackernel (ECDSA)
+<14>Mar 24 13:49:07 cloud-init: 256 SHA256:QUA4ybr5PGTSrYZHS/gra9zMFDRqrABzF1mkUgpffeg root@mackernel (ED25519)
+<14>Mar 24 13:49:08 cloud-init: 3072 SHA256:0Tjoc7jjfJt/O1E9QhxtmgQZJtR1SZq4umNjL6HDtVs root@mackernel (RSA)
+<14>Mar 24 13:49:08 cloud-init: -----END SSH HOST KEY FINGERPRINTS-----
+<14>Mar 24 13:49:08 cloud-init: #############################################################
+-----BEGIN SSH HOST KEY KEYS-----
+ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBDk6dmBo+jUYObx6yJTHjCZmJk3jZN9hk3Ns0fYodCYFgnmqJAqKS1vFh+arg3kY5Cncb5fi1/EXILGV6b4OoPI= root@mackernel
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFn1eT79RJe7LVl2O5HeX/HSPDAmQQ3UmGDILZ/oyKKv root@mackernel
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC0u1qNv7Yj9PXOOs0ZmTN5MB2eeaJ+Dm/SIn64ZbNIw2cC+TN6GcDgtoOUwMuk+QPPjZ+WzG45+luadrucY4bIARN3UasOWEasETVlfMfkB3izFcJGvXByDx9eC/ZEsG/bFD0iucbaayyaPgMxCm1z+AxAZmr79t6Cyo0Sep4skFytR/XIajst/BKZrQMg+gAUskqBQESBV0Tw6ARium3juV2O4+FZQNAy3pZn8iC3j5g/AuaLCMT1NQIN6EK5rWksRmF+gwwsyAOCMa8oXHgEzsKxADjmVHTY/5mOesZW3uZ7cKcdEBEd0VmQyGU1OUPfsBvNnQRL6wZBxdP8zFRpNQ4VGTjib7CSany+UfES2p3mO7IocEjp1xZQUb22frpXhyZsw2blsHW+NDGUva9PVS4F6ZNv4qJgAyUqd3r/T3f5Pvdl41Be2P4MEWw8Uvbq+VSJczU78xcCCUwcOErfGfrra5ZKhTqOMGK/mofwTmLy8mmZ7j8KLJcdzKvFkcs= root@mackernel
+-----END SSH HOST KEY KEYS-----
+[  251.626738] cloud-init[993]: Cloud-init v. 25.3-0ubuntu1~24.04.1 running 'modules:final' at Tue, 24 Mar 2026 13:49:05 +0000. Up 195.44 seconds.
+[  251.632463] cloud-init[993]: Cloud-init v. 25.3-0ubuntu1~24.04.1 finished at Tue, 24 Mar 2026 13:49:08 +0000. Datasource DataSourceNoCloud [seed=/dev/vdb].  Up 199.19 seconds

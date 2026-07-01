@@ -1,0 +1,1155 @@
+{
+  "job": {
+    "id": 1,
+    "created_ms": 1782676908543,
+    "started_ms": 1782676908550,
+    "finished_ms": 1782677564336,
+    "status": "done",
+    "phase": "done",
+    "exit_code": 0,
+    "ram_peak": 3654553600,
+    "disk_peak": 5561393152,
+    "reaped_ms": null,
+    "summary": null,
+    "repro_summary": "The reproducer tests the use-after-free race condition in the Energy Model (EM) code where a reader thread accesses `dev->em_pd` after a writer thread frees it.",
+    "result_summary": "The baseline reproduced the EM use-after-free bug (KASAN splat in `reader_fn+0xa0/0xb0`), while the patched build was clean.",
+    "detail": "## Analysis\n\n### 1. What the reproducer does\n\nThe reproducer (`em_uaf_repro.ko`) creates two kthreads pinned to separate CPUs:\n\n- **Reader** (CPU 0): fetches a raw `struct em_perf_domain *` via `em_pd_get()`, waits 5 \u00b5s, then dereferences `pd->nr_perf_states`:\n\n```c\nstruct em_perf_domain *pd = em_pd_get(dev);\nif (pd) {\n    udelay(5);\n    WRITE_ONCE(pd->nr_perf_states, pd->nr_perf_states);\n}\n```\n\n- **Writer** (CPU 1): loops calling `em_dev_unregister_perf_domain()` (which `kfree()`s the struct) followed by `em_dev_register_perf_domain()` (which allocates a new one), with `msleep(1)` to prevent RCU callback OOM:\n\n```c\nem_dev_unregister_perf_domain(dev);\nret = em_dev_register_perf_domain(dev, 4, &em_cb, NULL, true);\nmsleep(1);\n```\n\nThe bug is that `em_pd_get()` returns a raw pointer with no RCU protection, so the writer can `kfree()` the struct between the reader's fetch and dereference.\n\n### 2. What happened: bug reproduced\n\nThe KASAN splat appears at `[  187.734733]` in the serial console (baseline variant), confirming the use-after-free:\n\n```\n[  187.735407] BUG: KASAN: slab-use-after-free in reader_fn+0xa0/0xb0 [em_uaf_repro]\n[  187.736866] Read of size 4 at addr fff0000011858d1c by task em_uaf_reader/988\n```\n\nThe freed object belongs to `kmalloc-64` \u2014 the `struct em_perf_domain`:\n\n```\n[  187.744686] The buggy address belongs to the object at fff0000011858d00\n[  187.744686]  which belongs to the cache kmalloc-64 of size 64\n[  187.744865] The buggy address is located 28 bytes inside of\n[  187.744865]  freed 64-byte region [fff0000011858d00, fff0000011858d40)\n```\n\nThe call trace points directly to the reader's dereference:\n\n```\n[  187.740590]  reader_fn+0xa0/0xb0 [em_uaf_repro]\n```\n\nAllocation and free are both by task 987 (the writer):\n\n```\n[  187.743224] Allocated by task 987:\n[  187.743280] Freed by task 987:\n```\n\nThe orchestrator log confirms this is the **baseline** (unfixed) result \u2014 it exited 0 because KASAN reports don't crash the kernel, and the harness detected the splat from the serial console. The **patched** variant ran cleanly (exit 0, no splat), confirming the RCU fix works.",
+    "source_url": null,
+    "title": null,
+    "short_title": "EM UAF",
+    "summary_meta": "{\"detail\":{\"model\":\"opencode/deepseek-v4-flash-free\",\"ms\":30214,\"tokens\":293,\"took\":\"30s\"},\"repro\":{\"model\":\"opencode/deepseek-v4-flash-free\",\"ms\":8604,\"tokens\":25,\"took\":\"9s\"},\"result\":{\"model\":\"opencode/deepseek-v4-flash-free\",\"ms\":10405,\"tokens\":17,\"took\":\"10s\"},\"title\":{\"model\":\"opencode/deepseek-v4-flash-free\",\"ms\":9204,\"tokens\":2,\"took\":\"9s\"}}",
+    "source": null
+  },
+  "metrics": [
+    {
+      "ts_ms": 1782676908606,
+      "rss_bytes": 11173888,
+      "disk_bytes": 28672
+    },
+    {
+      "ts_ms": 1782676910683,
+      "rss_bytes": 452009984,
+      "disk_bytes": 32632832
+    },
+    {
+      "ts_ms": 1782676912842,
+      "rss_bytes": 579850240,
+      "disk_bytes": 132952064
+    },
+    {
+      "ts_ms": 1782676914989,
+      "rss_bytes": 724062208,
+      "disk_bytes": 316960768
+    },
+    {
+      "ts_ms": 1782676917150,
+      "rss_bytes": 951959552,
+      "disk_bytes": 695414784
+    },
+    {
+      "ts_ms": 1782676919342,
+      "rss_bytes": 899960832,
+      "disk_bytes": 975806464
+    },
+    {
+      "ts_ms": 1782676921571,
+      "rss_bytes": 1023545344,
+      "disk_bytes": 1168252928
+    },
+    {
+      "ts_ms": 1782676923881,
+      "rss_bytes": 1155670016,
+      "disk_bytes": 1379766272
+    },
+    {
+      "ts_ms": 1782676926215,
+      "rss_bytes": 1300492288,
+      "disk_bytes": 1609916416
+    },
+    {
+      "ts_ms": 1782676928613,
+      "rss_bytes": 180981760,
+      "disk_bytes": 1797259264
+    },
+    {
+      "ts_ms": 1782676931022,
+      "rss_bytes": 647073792,
+      "disk_bytes": 1996771328
+    },
+    {
+      "ts_ms": 1782676933574,
+      "rss_bytes": 905502720,
+      "disk_bytes": 2439499776
+    },
+    {
+      "ts_ms": 1782676936089,
+      "rss_bytes": 925286400,
+      "disk_bytes": 2819317760
+    },
+    {
+      "ts_ms": 1782676938946,
+      "rss_bytes": 1121841152,
+      "disk_bytes": 3116826624
+    },
+    {
+      "ts_ms": 1782676941885,
+      "rss_bytes": 1233498112,
+      "disk_bytes": 3273703424
+    },
+    {
+      "ts_ms": 1782676945087,
+      "rss_bytes": 1324658688,
+      "disk_bytes": 3400683520
+    },
+    {
+      "ts_ms": 1782676948412,
+      "rss_bytes": 1409667072,
+      "disk_bytes": 3558952960
+    },
+    {
+      "ts_ms": 1782676950936,
+      "rss_bytes": 174989312,
+      "disk_bytes": 3559522304
+    },
+    {
+      "ts_ms": 1782676953406,
+      "rss_bytes": 174989312,
+      "disk_bytes": 0
+    },
+    {
+      "ts_ms": 1782676955883,
+      "rss_bytes": 174989312,
+      "disk_bytes": 0
+    },
+    {
+      "ts_ms": 1782676958388,
+      "rss_bytes": 174989312,
+      "disk_bytes": 0
+    },
+    {
+      "ts_ms": 1782676960864,
+      "rss_bytes": 173608960,
+      "disk_bytes": 0
+    },
+    {
+      "ts_ms": 1782676963794,
+      "rss_bytes": 173608960,
+      "disk_bytes": 3562549248
+    },
+    {
+      "ts_ms": 1782676966289,
+      "rss_bytes": 173608960,
+      "disk_bytes": 3566780416
+    },
+    {
+      "ts_ms": 1782676969974,
+      "rss_bytes": 173608960,
+      "disk_bytes": 3568664576
+    },
+    {
+      "ts_ms": 1782676973699,
+      "rss_bytes": 173608960,
+      "disk_bytes": 3577901056
+    },
+    {
+      "ts_ms": 1782676977423,
+      "rss_bytes": 173608960,
+      "disk_bytes": 3589652480
+    },
+    {
+      "ts_ms": 1782676981650,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3599376384
+    },
+    {
+      "ts_ms": 1782676985964,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3609452544
+    },
+    {
+      "ts_ms": 1782676990219,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3620966400
+    },
+    {
+      "ts_ms": 1782676994036,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3630047232
+    },
+    {
+      "ts_ms": 1782676998232,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3637473280
+    },
+    {
+      "ts_ms": 1782677001954,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3649286144
+    },
+    {
+      "ts_ms": 1782677005962,
+      "rss_bytes": 173613056,
+      "disk_bytes": 0
+    },
+    {
+      "ts_ms": 1782677010247,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3667984384
+    },
+    {
+      "ts_ms": 1782677015124,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3680112640
+    },
+    {
+      "ts_ms": 1782677018787,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3689897984
+    },
+    {
+      "ts_ms": 1782677022409,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3698835456
+    },
+    {
+      "ts_ms": 1782677026871,
+      "rss_bytes": 173613056,
+      "disk_bytes": 3709964288
+    },
+    {
+      "ts_ms": 1782677030538,
+      "rss_bytes": 173621248,
+      "disk_bytes": 3723476992
+    },
+    {
+      "ts_ms": 1782677034846,
+      "rss_bytes": 173629440,
+      "disk_bytes": 3732008960
+    },
+    {
+      "ts_ms": 1782677038852,
+      "rss_bytes": 173629440,
+      "disk_bytes": 3742253056
+    },
+    {
+      "ts_ms": 1782677043206,
+      "rss_bytes": 173637632,
+      "disk_bytes": 3750989824
+    },
+    {
+      "ts_ms": 1782677047341,
+      "rss_bytes": 173637632,
+      "disk_bytes": 3763073024
+    },
+    {
+      "ts_ms": 1782677051516,
+      "rss_bytes": 173649920,
+      "disk_bytes": 0
+    },
+    {
+      "ts_ms": 1782677055632,
+      "rss_bytes": 173649920,
+      "disk_bytes": 3785080832
+    },
+    {
+      "ts_ms": 1782677059783,
+      "rss_bytes": 173658112,
+      "disk_bytes": 3793752064
+    },
+    {
+      "ts_ms": 1782677063362,
+      "rss_bytes": 173666304,
+      "disk_bytes": 3806375936
+    },
+    {
+      "ts_ms": 1782677067353,
+      "rss_bytes": 173666304,
+      "disk_bytes": 3813986304
+    },
+    {
+      "ts_ms": 1782677071630,
+      "rss_bytes": 173674496,
+      "disk_bytes": 3828125696
+    },
+    {
+      "ts_ms": 1782677076252,
+      "rss_bytes": 173674496,
+      "disk_bytes": 3840135168
+    },
+    {
+      "ts_ms": 1782677079822,
+      "rss_bytes": 173682688,
+      "disk_bytes": 3848527872
+    },
+    {
+      "ts_ms": 1782677083756,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3856842752
+    },
+    {
+      "ts_ms": 1782677088294,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3870371840
+    },
+    {
+      "ts_ms": 1782677092203,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3876921344
+    },
+    {
+      "ts_ms": 1782677096576,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3888041984
+    },
+    {
+      "ts_ms": 1782677100857,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3895357440
+    },
+    {
+      "ts_ms": 1782677105401,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3906600960
+    },
+    {
+      "ts_ms": 1782677109590,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3922341888
+    },
+    {
+      "ts_ms": 1782677114034,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3933638656
+    },
+    {
+      "ts_ms": 1782677118574,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3942780928
+    },
+    {
+      "ts_ms": 1782677122494,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3952992256
+    },
+    {
+      "ts_ms": 1782677126781,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3964747776
+    },
+    {
+      "ts_ms": 1782677131142,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3974279168
+    },
+    {
+      "ts_ms": 1782677135804,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3988017152
+    },
+    {
+      "ts_ms": 1782677139972,
+      "rss_bytes": 166572032,
+      "disk_bytes": 3998363648
+    },
+    {
+      "ts_ms": 1782677143897,
+      "rss_bytes": 166572032,
+      "disk_bytes": 4008488960
+    },
+    {
+      "ts_ms": 1782677148380,
+      "rss_bytes": 166572032,
+      "disk_bytes": 4016406528
+    },
+    {
+      "ts_ms": 1782677152885,
+      "rss_bytes": 166588416,
+      "disk_bytes": 4026114048
+    },
+    {
+      "ts_ms": 1782677156994,
+      "rss_bytes": 166596608,
+      "disk_bytes": 4036448256
+    },
+    {
+      "ts_ms": 1782677161231,
+      "rss_bytes": 166604800,
+      "disk_bytes": 4046684160
+    },
+    {
+      "ts_ms": 1782677165590,
+      "rss_bytes": 166612992,
+      "disk_bytes": 4057436160
+    },
+    {
+      "ts_ms": 1782677170258,
+      "rss_bytes": 166621184,
+      "disk_bytes": 4069523456
+    },
+    {
+      "ts_ms": 1782677174548,
+      "rss_bytes": 166637568,
+      "disk_bytes": 4079075328
+    },
+    {
+      "ts_ms": 1782677179064,
+      "rss_bytes": 166645760,
+      "disk_bytes": 4090822656
+    },
+    {
+      "ts_ms": 1782677183482,
+      "rss_bytes": 166653952,
+      "disk_bytes": 4102815744
+    },
+    {
+      "ts_ms": 1782677187967,
+      "rss_bytes": 166670336,
+      "disk_bytes": 4111597568
+    },
+    {
+      "ts_ms": 1782677192219,
+      "rss_bytes": 166670336,
+      "disk_bytes": 4120002560
+    },
+    {
+      "ts_ms": 1782677196663,
+      "rss_bytes": 166686720,
+      "disk_bytes": 0
+    },
+    {
+      "ts_ms": 1782677201017,
+      "rss_bytes": 166694912,
+      "disk_bytes": 4141060096
+    },
+    {
+      "ts_ms": 1782677204979,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4152053760
+    },
+    {
+      "ts_ms": 1782677210078,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4162396160
+    },
+    {
+      "ts_ms": 1782677214183,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4172005376
+    },
+    {
+      "ts_ms": 1782677218465,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4179722240
+    },
+    {
+      "ts_ms": 1782677223066,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4191707136
+    },
+    {
+      "ts_ms": 1782677227388,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4200665088
+    },
+    {
+      "ts_ms": 1782677232119,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4208955392
+    },
+    {
+      "ts_ms": 1782677236869,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4220485632
+    },
+    {
+      "ts_ms": 1782677241800,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4232101888
+    },
+    {
+      "ts_ms": 1782677246985,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4244422656
+    },
+    {
+      "ts_ms": 1782677251885,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4253249536
+    },
+    {
+      "ts_ms": 1782677256059,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4265271296
+    },
+    {
+      "ts_ms": 1782677260419,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4272197632
+    },
+    {
+      "ts_ms": 1782677265075,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4282380288
+    },
+    {
+      "ts_ms": 1782677269644,
+      "rss_bytes": 164990976,
+      "disk_bytes": 4289650688
+    },
+    {
+      "ts_ms": 1782677273594,
+      "rss_bytes": 164999168,
+      "disk_bytes": 4298731520
+    },
+    {
+      "ts_ms": 1782677278352,
+      "rss_bytes": 165007360,
+      "disk_bytes": 4307030016
+    },
+    {
+      "ts_ms": 1782677281518,
+      "rss_bytes": 165007360,
+      "disk_bytes": 4318384128
+    },
+    {
+      "ts_ms": 1782677284173,
+      "rss_bytes": 165007360,
+      "disk_bytes": 4791140352
+    },
+    {
+      "ts_ms": 1782677286800,
+      "rss_bytes": 165007360,
+      "disk_bytes": 4978831360
+    },
+    {
+      "ts_ms": 1782677289407,
+      "rss_bytes": 165007360,
+      "disk_bytes": 5116534784
+    },
+    {
+      "ts_ms": 1782677292171,
+      "rss_bytes": 154759168,
+      "disk_bytes": 5555679232
+    },
+    {
+      "ts_ms": 1782677294764,
+      "rss_bytes": 139804672,
+      "disk_bytes": 5556006912
+    },
+    {
+      "ts_ms": 1782677297336,
+      "rss_bytes": 139804672,
+      "disk_bytes": 5557776384
+    },
+    {
+      "ts_ms": 1782677299929,
+      "rss_bytes": 139804672,
+      "disk_bytes": 5560365056
+    },
+    {
+      "ts_ms": 1782677302532,
+      "rss_bytes": 139804672,
+      "disk_bytes": 5561257984
+    },
+    {
+      "ts_ms": 1782677305199,
+      "rss_bytes": 318144512,
+      "disk_bytes": 5561143296
+    },
+    {
+      "ts_ms": 1782677307793,
+      "rss_bytes": 1122123776,
+      "disk_bytes": 5561143296
+    },
+    {
+      "ts_ms": 1782677310400,
+      "rss_bytes": 1248206848,
+      "disk_bytes": 5561143296
+    },
+    {
+      "ts_ms": 1782677313062,
+      "rss_bytes": 1389129728,
+      "disk_bytes": 5561143296
+    },
+    {
+      "ts_ms": 1782677315665,
+      "rss_bytes": 1488027648,
+      "disk_bytes": 5561143296
+    },
+    {
+      "ts_ms": 1782677318444,
+      "rss_bytes": 1524314112,
+      "disk_bytes": 5561151488
+    },
+    {
+      "ts_ms": 1782677321389,
+      "rss_bytes": 1621872640,
+      "disk_bytes": 5561163776
+    },
+    {
+      "ts_ms": 1782677324114,
+      "rss_bytes": 1699471360,
+      "disk_bytes": 5561167872
+    },
+    {
+      "ts_ms": 1782677326741,
+      "rss_bytes": 1689473024,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677329354,
+      "rss_bytes": 1706561536,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677332291,
+      "rss_bytes": 1716305920,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677335306,
+      "rss_bytes": 1777324032,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677338319,
+      "rss_bytes": 1779486720,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677340949,
+      "rss_bytes": 1764519936,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677343638,
+      "rss_bytes": 1812471808,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677346363,
+      "rss_bytes": 1907216384,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677349188,
+      "rss_bytes": 2140393472,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677351821,
+      "rss_bytes": 2278703104,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677354418,
+      "rss_bytes": 2290089984,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677357009,
+      "rss_bytes": 2326212608,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677359633,
+      "rss_bytes": 2350358528,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677362235,
+      "rss_bytes": 2357407744,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677364832,
+      "rss_bytes": 2391326720,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677367456,
+      "rss_bytes": 2387857408,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677370147,
+      "rss_bytes": 2420064256,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677372754,
+      "rss_bytes": 2430259200,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677375385,
+      "rss_bytes": 2413449216,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677378022,
+      "rss_bytes": 2430529536,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677380688,
+      "rss_bytes": 2437341184,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677383301,
+      "rss_bytes": 2449960960,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677385868,
+      "rss_bytes": 2465366016,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677388472,
+      "rss_bytes": 2450518016,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677391083,
+      "rss_bytes": 2450522112,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677393676,
+      "rss_bytes": 2453393408,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677396302,
+      "rss_bytes": 2461536256,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677398948,
+      "rss_bytes": 2476953600,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677401610,
+      "rss_bytes": 2485723136,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677404239,
+      "rss_bytes": 2485747712,
+      "disk_bytes": 5561176064
+    },
+    {
+      "ts_ms": 1782677406849,
+      "rss_bytes": 2489311232,
+      "disk_bytes": 5561180160
+    },
+    {
+      "ts_ms": 1782677409546,
+      "rss_bytes": 2522914816,
+      "disk_bytes": 5561180160
+    },
+    {
+      "ts_ms": 1782677412258,
+      "rss_bytes": 2577641472,
+      "disk_bytes": 5561180160
+    },
+    {
+      "ts_ms": 1782677414966,
+      "rss_bytes": 2608480256,
+      "disk_bytes": 5561180160
+    },
+    {
+      "ts_ms": 1782677417657,
+      "rss_bytes": 2655739904,
+      "disk_bytes": 5561180160
+    },
+    {
+      "ts_ms": 1782677420358,
+      "rss_bytes": 2695516160,
+      "disk_bytes": 5561180160
+    },
+    {
+      "ts_ms": 1782677423082,
+      "rss_bytes": 2743721984,
+      "disk_bytes": 5561180160
+    },
+    {
+      "ts_ms": 1782677425756,
+      "rss_bytes": 2782191616,
+      "disk_bytes": 5561180160
+    },
+    {
+      "ts_ms": 1782677428549,
+      "rss_bytes": 2835660800,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677431438,
+      "rss_bytes": 2921099264,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677434245,
+      "rss_bytes": 3000438784,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677436969,
+      "rss_bytes": 3059126272,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677439722,
+      "rss_bytes": 3144929280,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677442463,
+      "rss_bytes": 3181527040,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677445336,
+      "rss_bytes": 3228213248,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677448102,
+      "rss_bytes": 3263877120,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677450854,
+      "rss_bytes": 3314409472,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677453768,
+      "rss_bytes": 3388502016,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677456689,
+      "rss_bytes": 3437457408,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677459462,
+      "rss_bytes": 3484217344,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677462233,
+      "rss_bytes": 3509129216,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677465086,
+      "rss_bytes": 3545075712,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677467866,
+      "rss_bytes": 3551645696,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677470636,
+      "rss_bytes": 3565547520,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677473371,
+      "rss_bytes": 3579764736,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677476146,
+      "rss_bytes": 3594387456,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677478945,
+      "rss_bytes": 3604172800,
+      "disk_bytes": 5561184256
+    },
+    {
+      "ts_ms": 1782677481702,
+      "rss_bytes": 3619405824,
+      "disk_bytes": 5561188352
+    },
+    {
+      "ts_ms": 1782677484459,
+      "rss_bytes": 3624169472,
+      "disk_bytes": 5561188352
+    },
+    {
+      "ts_ms": 1782677487195,
+      "rss_bytes": 3626741760,
+      "disk_bytes": 5561188352
+    },
+    {
+      "ts_ms": 1782677489912,
+      "rss_bytes": 3646128128,
+      "disk_bytes": 5561188352
+    },
+    {
+      "ts_ms": 1782677492625,
+      "rss_bytes": 3646480384,
+      "disk_bytes": 5561188352
+    },
+    {
+      "ts_ms": 1782677495410,
+      "rss_bytes": 3653570560,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677498172,
+      "rss_bytes": 3653873664,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677500908,
+      "rss_bytes": 3654148096,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677503621,
+      "rss_bytes": 3654164480,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677506337,
+      "rss_bytes": 3654164480,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677509025,
+      "rss_bytes": 3654045696,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677511723,
+      "rss_bytes": 3654414336,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677514401,
+      "rss_bytes": 3654209536,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677517089,
+      "rss_bytes": 3654553600,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677519789,
+      "rss_bytes": 3654553600,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677522478,
+      "rss_bytes": 3654553600,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677525174,
+      "rss_bytes": 3654553600,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677527920,
+      "rss_bytes": 3654479872,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677530630,
+      "rss_bytes": 3654479872,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677533336,
+      "rss_bytes": 3654479872,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677536042,
+      "rss_bytes": 3653873664,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677538734,
+      "rss_bytes": 3653939200,
+      "disk_bytes": 5561192448
+    },
+    {
+      "ts_ms": 1782677541383,
+      "rss_bytes": 3653828608,
+      "disk_bytes": 5561196544
+    },
+    {
+      "ts_ms": 1782677544067,
+      "rss_bytes": 3654131712,
+      "disk_bytes": 5561393152
+    },
+    {
+      "ts_ms": 1782677546685,
+      "rss_bytes": 1845547008,
+      "disk_bytes": 5561344000
+    },
+    {
+      "ts_ms": 1782677549347,
+      "rss_bytes": 1845547008,
+      "disk_bytes": 5561344000
+    },
+    {
+      "ts_ms": 1782677551980,
+      "rss_bytes": 1845547008,
+      "disk_bytes": 5561344000
+    },
+    {
+      "ts_ms": 1782677554599,
+      "rss_bytes": 1845547008,
+      "disk_bytes": 5561344000
+    },
+    {
+      "ts_ms": 1782677557209,
+      "rss_bytes": 1845186560,
+      "disk_bytes": 5561344000
+    },
+    {
+      "ts_ms": 1782677559765,
+      "rss_bytes": 1845129216,
+      "disk_bytes": 5561348096
+    },
+    {
+      "ts_ms": 1782677562329,
+      "rss_bytes": 1845305344,
+      "disk_bytes": 5561348096
+    }
+  ],
+  "events": [
+    {
+      "phase": "fetch",
+      "ts_ms": 1782676908689
+    },
+    {
+      "phase": "configure",
+      "ts_ms": 1782676948344
+    },
+    {
+      "phase": "configure",
+      "ts_ms": 1782676948356
+    },
+    {
+      "phase": "build",
+      "ts_ms": 1782676958871
+    },
+    {
+      "phase": "build",
+      "ts_ms": 1782676959087
+    },
+    {
+      "phase": "boot",
+      "ts_ms": 1782677303294
+    },
+    {
+      "phase": "boot",
+      "ts_ms": 1782677303508
+    },
+    {
+      "phase": "insmod",
+      "ts_ms": 1782677467408
+    },
+    {
+      "phase": "insmod",
+      "ts_ms": 1782677488067
+    },
+    {
+      "phase": "run",
+      "ts_ms": 1782677534794
+    },
+    {
+      "phase": "done",
+      "ts_ms": 1782677543746
+    },
+    {
+      "phase": "run",
+      "ts_ms": 1782677555313
+    },
+    {
+      "phase": "done",
+      "ts_ms": 1782677562668
+    },
+    {
+      "phase": "done",
+      "ts_ms": 1782677562676
+    },
+    {
+      "phase": "reclaimed",
+      "ts_ms": 1782677578099
+    }
+  ],
+  "summaries": [
+    {
+      "field": "detail",
+      "server": "opencode",
+      "text": "## Analysis\n\n### 1. What the reproducer does\n\nThe reproducer (`em_uaf_repro.ko`) creates two kthreads pinned to separate CPUs:\n\n- **Reader** (CPU 0): fetches a raw `struct em_perf_domain *` via `em_pd_get()`, waits 5 \u00b5s, then dereferences `pd->nr_perf_states`:\n\n```c\nstruct em_perf_domain *pd = em_pd_get(dev);\nif (pd) {\n    udelay(5);\n    WRITE_ONCE(pd->nr_perf_states, pd->nr_perf_states);\n}\n```\n\n- **Writer** (CPU 1): loops calling `em_dev_unregister_perf_domain()` (which `kfree()`s the struct) followed by `em_dev_register_perf_domain()` (which allocates a new one), with `msleep(1)` to prevent RCU callback OOM:\n\n```c\nem_dev_unregister_perf_domain(dev);\nret = em_dev_register_perf_domain(dev, 4, &em_cb, NULL, true);\nmsleep(1);\n```\n\nThe bug is that `em_pd_get()` returns a raw pointer with no RCU protection, so the writer can `kfree()` the struct between the reader's fetch and dereference.\n\n### 2. What happened: bug reproduced\n\nThe KASAN splat appears at `[  187.734733]` in the serial console (baseline variant), confirming the use-after-free:\n\n```\n[  187.735407] BUG: KASAN: slab-use-after-free in reader_fn+0xa0/0xb0 [em_uaf_repro]\n[  187.736866] Read of size 4 at addr fff0000011858d1c by task em_uaf_reader/988\n```\n\nThe freed object belongs to `kmalloc-64` \u2014 the `struct em_perf_domain`:\n\n```\n[  187.744686] The buggy address belongs to the object at fff0000011858d00\n[  187.744686]  which belongs to the cache kmalloc-64 of size 64\n[  187.744865] The buggy address is located 28 bytes inside of\n[  187.744865]  freed 64-byte region [fff0000011858d00, fff0000011858d40)\n```\n\nThe call trace points directly to the reader's dereference:\n\n```\n[  187.740590]  reader_fn+0xa0/0xb0 [em_uaf_repro]\n```\n\nAllocation and free are both by task 987 (the writer):\n\n```\n[  187.743224] Allocated by task 987:\n[  187.743280] Freed by task 987:\n```\n\nThe orchestrator log confirms this is the **baseline** (unfixed) result \u2014 it exited 0 because KASAN reports don't crash the kernel, and the harness detected the splat from the serial console. The **patched** variant ran cleanly (exit 0, no splat), confirming the RCU fix works.",
+      "ms": 30214,
+      "tokens": 293,
+      "model": "opencode/deepseek-v4-flash-free"
+    },
+    {
+      "field": "repro",
+      "server": "opencode",
+      "text": "The reproducer tests the use-after-free race condition in the Energy Model (EM) code where a reader thread accesses `dev->em_pd` after a writer thread frees it.",
+      "ms": 8604,
+      "tokens": 25,
+      "model": "opencode/deepseek-v4-flash-free"
+    },
+    {
+      "field": "repro",
+      "server": "phi3.5-mini",
+      "text": "Reproduces the use-after-free race in Linux kernel's pre-fix Energy Model (EM) code for arm64 architecture by running a test harness that detects KASAN errors. The fix involves unpublishing `dev->em_pd` before teardown and deferring",
+      "ms": 40009,
+      "tokens": 64,
+      "model": "phi3.5-mini"
+    },
+    {
+      "field": "result",
+      "server": "opencode",
+      "text": "The baseline reproduced the EM use-after-free bug (KASAN splat in `reader_fn+0xa0/0xb0`), while the patched build was clean.",
+      "ms": 10405,
+      "tokens": 17,
+      "model": "opencode/deepseek-v4-flash-free"
+    },
+    {
+      "field": "result",
+      "server": "phi3.5-mini",
+      "text": "The reproducer successfully fixed the use-after-free race bug, with a run result of exit code 0 and no issues found.",
+      "ms": 1063249,
+      "tokens": 30,
+      "model": "phi3.5-mini"
+    },
+    {
+      "field": "title",
+      "server": "opencode",
+      "text": "EM UAF",
+      "ms": 9204,
+      "tokens": 2,
+      "model": "opencode/deepseek-v4-flash-free"
+    },
+    {
+      "field": "title",
+      "server": "phi3.5-mini",
+      "text": "EM Race",
+      "ms": 30736,
+      "tokens": 8,
+      "model": "phi3.5-mini"
+    }
+  ]
+}

@@ -7,6 +7,7 @@ mod lkml;
 mod metrics;
 mod scaffold;
 mod sched;
+mod seed;
 mod summarize;
 
 use std::collections::{HashMap, VecDeque};
@@ -174,6 +175,12 @@ async fn main() -> anyhow::Result<()> {
         summarizer: summarizer.clone(), summary_queue,
         scaffold_creds: Arc::new(std::sync::Mutex::new(HashMap::new())),
     };
+
+    // Seed the demo job (#1) from server/seed/ if it's missing, so the guided tour's
+    // /job/1 always resolves to a real job even on a fresh database.
+    if let Err(e) = seed::seed_demo_job(&state) {
+        warn!("demo job seed failed: {e:#}");
+    }
 
     if summarize::Summarizer::enabled() {
         let slot = summarizer.clone();

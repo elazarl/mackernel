@@ -3,14 +3,14 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use duckdb::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Job {
     pub id: i64,
     pub created_ms: i64,
@@ -175,6 +175,25 @@ impl Db {
             "INSERT INTO jobs (id, created_ms, status, submitter, source_url, title)
              VALUES (?, ?, 'queued', ?, ?, ?)",
             duckdb::params![id, now_ms, submitter, source_url, title],
+        )?;
+        Ok(id)
+    }
+
+    /// Insert a fully-formed job row (all columns) for seeding the demo job. Takes the id
+    /// from the sequence like a normal create, so the next real job doesn't collide — on a
+    /// fresh DB this is id 1. `Job.source` maps back to the `submitter` column.
+    pub fn seed_job(&self, j: &Job) -> Result<i64> {
+        let c = self.lock();
+        let id: i64 = c.query_row("SELECT nextval('job_seq')", [], |r| r.get(0))?;
+        c.execute(
+            "INSERT INTO jobs (id, created_ms, started_ms, finished_ms, status, phase, exit_code,
+                ram_peak, disk_peak, reaped_ms, summary, repro_summary, result_summary, detail,
+                source_url, title, short_title, summary_meta, submitter)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            duckdb::params![id, j.created_ms, j.started_ms, j.finished_ms, j.status, j.phase,
+                j.exit_code, j.ram_peak, j.disk_peak, j.reaped_ms, j.summary, j.repro_summary,
+                j.result_summary, j.detail, j.source_url, j.title, j.short_title, j.summary_meta,
+                j.source],
         )?;
         Ok(id)
     }

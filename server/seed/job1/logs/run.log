@@ -1,0 +1,62 @@
+MKPROGRESS {"phase": "fetch"}
+[1;36m[run-kernel][0m building with gcc-14
+[1;36m[run-kernel][0m commit v6.19 already present, skipping fetch
+[1;36m[run-kernel][0m resolved v6.19 -> 05f7e89ab973
+[1;36m[run-kernel][0m creating worktree /home/elazarl/mackernel-srv/work/1/wt/baseline/05f7e89ab973 @ 05f7e89ab973
+[1;36m[run-kernel][0m commit v6.19 already present, skipping fetch
+[1;36m[run-kernel][0m resolved v6.19 -> 05f7e89ab973
+[1;36m[run-kernel][0m creating worktree /home/elazarl/mackernel-srv/work/1/wt/patched/05f7e89ab973 @ 05f7e89ab973
+[1;36m[run-kernel][0m downloading patch file:///tmp/mk-patch-9oxuta1a/inline.patch ...
+[1;36m[run-kernel][0m applying patch ...
+[1;36m[run-kernel][0m compare: baseline tree /home/elazarl/mackernel-srv/work/1/wt/baseline/05f7e89ab973; patched tree /home/elazarl/mackernel-srv/work/1/wt/patched/05f7e89ab973
+[1;36m[run-kernel][0m configuring kernel ...
+[1;36m[run-kernel][0m configuring kernel ...
+MKPROGRESS {"phase": "configure", "variant": "patched"}
+MKPROGRESS {"phase": "configure", "variant": "baseline"}
+[1;36m[run-kernel][0m building kernel ...
+MKPROGRESS {"phase": "build", "variant": "baseline"}
+[1;36m[run-kernel][0m building kernel ...
+MKPROGRESS {"phase": "build", "variant": "patched"}
+[1;36m[run-kernel][0m building module(s) em_uaf_repro.ko ...
+[1;36m[run-kernel][0m building module(s) em_uaf_repro.ko ...
+[1;36m[run-kernel][0m port 2222 busy, using 2223 instead
+MKPROGRESS {"phase": "boot", "variant": "patched"}
+[1;36m[run-kernel][0m sandbox: auto (systemd-run)
+[1;36m[run-kernel][0m booting kernel (arm64, accel=tcg; serial -> console.log) ...
+[1;36m[run-kernel][0m emulated (tcg) boot: extending SSH timeout to 540s
+[1;36m[run-kernel][0m waiting for guest SSH on 127.0.0.1:2223 (cloud-init can take ~10-40s) ...
+MKPROGRESS {"phase": "boot", "variant": "baseline"}
+[1;36m[run-kernel][0m sandbox: auto (systemd-run)
+[1;36m[run-kernel][0m booting kernel (arm64, accel=tcg; serial -> console.log) ...
+[1;36m[run-kernel][0m emulated (tcg) boot: extending SSH timeout to 540s
+[1;36m[run-kernel][0m waiting for guest SSH on 127.0.0.1:2222 (cloud-init can take ~10-40s) ...
+[1;36m[run-kernel][0m   ... still waiting (511s left)
+[1;36m[run-kernel][0m   ... still waiting (511s left)
+[1;36m[run-kernel][0m   ... still waiting (476s left)
+[1;36m[run-kernel][0m   ... still waiting (476s left)
+[1;36m[run-kernel][0m   ... still waiting (451s left)
+[1;36m[run-kernel][0m   ... still waiting (451s left)
+[1;36m[run-kernel][0m   ... still waiting (441s left)
+[1;36m[run-kernel][0m   ... still waiting (441s left)
+[1;36m[run-kernel][0m   ... still waiting (431s left)
+[1;36m[run-kernel][0m   ... still waiting (421s left)
+[1;36m[run-kernel][0m   ... still waiting (416s left)
+[1;36m[run-kernel][0m   ... still waiting (396s left)
+[1;36m[run-kernel][0m guest is up.
+[1;36m[run-kernel][0m copying 2 file(s) into guest:/tmp/mkbundle ...
+MKPROGRESS {"phase": "insmod", "variant": "patched"}
+[1;36m[run-kernel][0m insmod em_uaf_repro.ko ...
+[1;36m[run-kernel][0m guest is up.
+[1;36m[run-kernel][0m copying 2 file(s) into guest:/tmp/mkbundle ...
+MKPROGRESS {"phase": "insmod", "variant": "baseline"}
+[1;36m[run-kernel][0m insmod em_uaf_repro.ko ...
+MKPROGRESS {"phase": "run", "variant": "patched"}
+[1;36m[run-kernel][0m guest command exited with status 0
+MKPROGRESS {"phase": "done", "variant": "patched", "exit": 0}
+[1;36m[run-kernel][0m shutting down the guest ...
+MKPROGRESS {"phase": "run", "variant": "baseline"}
+[1;36m[run-kernel][0m guest command exited with status 0
+MKPROGRESS {"phase": "done", "variant": "baseline", "exit": 0}
+[1;36m[run-kernel][0m shutting down the guest ...
+[1;36m[run-kernel][0m compare: baseline exit=0, patched exit=0
+MKPROGRESS {"phase": "done", "exit": 0}
