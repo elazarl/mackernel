@@ -118,13 +118,17 @@ export function startTour(opts: { selectJob?: (id: number) => void } = {}): void
         },
       },
       {
+        element: '[data-tour="refine"]',
         popover: {
           title: "Refine a reproducer",
           description:
             "On any finished job, <b>Refine ✨</b> hands the reproducer and its logs back to the agent " +
             "to fix — and you can add a prompt to steer it. You can also <b>Refine</b> straight from " +
             "the bundle editor to improve a reproducer you're editing.",
+          side: "left",
+          align: "start",
         },
+        onHighlightStarted: openDemoJob, // job #1 must be open for the Refine button to exist
       },
       {
         element: '[data-tour="spec"]',

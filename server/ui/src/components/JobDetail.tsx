@@ -200,7 +200,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
               <button className="linkbtn" onClick={() => onEdit(bundleText)}>Edit reproducer</button>
               {(job?.status === "done" || job?.status === "failed") && <>
                 {" · "}
-                <button className="linkbtn" title="Hand this reproducer + its run logs back to the agent to fix"
+                <button className="linkbtn" data-tour="refine" title="Hand this reproducer + its run logs back to the agent to fix"
                   onClick={() => setRefineOpen(true)}>Refine ✨</button>
               </>}
             </span>
