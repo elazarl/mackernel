@@ -16,7 +16,9 @@ export function BundleModal(
 ) {
   const [view, setView] = useState<"edit" | "repro">("edit");
   // Optional prompt that guides "Refine" — the agent improves the current bundle with it.
+  // Collected in a popped modal (below) rather than an inline box.
   const [note, setNote] = useState("");
+  const [refineOpen, setRefineOpen] = useState(false);
   const parsed = useMemo(() => parseBundle(bundle), [bundle]);
 
   return (
@@ -29,11 +31,8 @@ export function BundleModal(
           items={[{ key: "edit", label: "Edit" }, { key: "repro", label: "Reproducer" }]}
         />
         <div className="flex items-center gap-2">
-          <input
-            className="w-48 rounded-md border border-border bg-bg px-2 py-1 text-sm text-fg outline-none focus:border-accent"
-            placeholder="refine prompt (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
-          <button className="chip" title="Send this bundle + the prompt to the agent to improve it"
-            onClick={() => onRefine(bundle, note)} disabled={!bundle.trim()}>Refine ✨</button>
+          <button className="chip" title="Send this bundle to the agent to improve it"
+            onClick={() => setRefineOpen(true)} disabled={!bundle.trim()}>Refine ✨</button>
           <button className="btn" onClick={onRun} disabled={!bundle.trim()}>Run reproducer</button>
         </div>
       </div>
@@ -43,6 +42,26 @@ export function BundleModal(
         </div>
       ) : (
         <BundlePreview parsed={parsed} />
+      )}
+      {refineOpen && (
+        <Modal onClose={() => setRefineOpen(false)} label="Refine reproducer">
+          <h2>Refine reproducer ✨</h2>
+          <p className="text-muted mb-2">
+            The agent gets this bundle and is asked to improve it. Add any context that should
+            guide the fix (optional) — e.g. what actually failed, a config to enable, or where
+            to focus.
+          </p>
+          <textarea
+            className="mb-3 w-full box-border rounded-md border border-border bg-bg p-[9px] font-mono text-fg outline-none focus:border-accent"
+            rows={5} autoFocus placeholder="optional context for the agent…"
+            value={note} onChange={(e) => setNote(e.target.value)} />
+          <div className="flex justify-end">
+            <button className="btn"
+              onClick={() => { setRefineOpen(false); onRefine(bundle, note); setNote(""); }}>
+              Refine
+            </button>
+          </div>
+        </Modal>
       )}
     </Modal>
   );

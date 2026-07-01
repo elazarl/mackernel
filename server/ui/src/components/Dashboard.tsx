@@ -37,15 +37,21 @@ export function Dashboard() {
     const path = id == null ? "/" : `/job/${id}`;
     if (location.pathname !== path) history.pushState({}, "", path);
   };
-  useEffect(() => {
-    const onPop = () => setSel(jobFromPath());
-    window.addEventListener("popstate", onPop);
-    return () => window.removeEventListener("popstate", onPop);
-  }, []);
   const [bundle, setBundle] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
   const [lkmlOpen, setLkmlOpen] = useState(false);
-  const [showSpec, setShowSpec] = useState(false);
+  // Spec mirrors the URL (/spec) so it's linkable and back/forward work, like jobs.
+  const [showSpec, setShowSpec] = useState(() => location.pathname === "/spec");
+  const openSpec = (open: boolean) => {
+    setShowSpec(open);
+    const path = open ? "/spec" : (sel == null ? "/" : `/job/${sel}`);
+    if (location.pathname !== path) history.pushState({}, "", path);
+  };
+  useEffect(() => {
+    const onPop = () => { setSel(jobFromPath()); setShowSpec(location.pathname === "/spec"); };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
   // Settings opens automatically when a scaffold is attempted without OpenAI creds.
   const [showSettings, setShowSettings] = useState(false);
   // Scaffold prompt modal: holds the lore thread to scaffold + the user's optional prompt.
@@ -150,7 +156,7 @@ export function Dashboard() {
       {hlCss && <style>{hlCss}</style>}
       <div className="flex items-center gap-3">
         <h1 className="cursor-pointer hover:text-accent" title="Home" onClick={() => selectJob(null)}>Kernel Reproducer Runner</h1>
-        <button className="linkbtn" data-tour="spec" onClick={() => setShowSpec(true)}>Spec</button>
+        <button className="linkbtn" data-tour="spec" onClick={() => openSpec(true)}>Spec</button>
         <button className="linkbtn" onClick={toggleTheme}>{theme === "dark" ? "☀ Light" : "🌙 Dark"}</button>
         <button className="linkbtn" title="Scaffold model settings (OpenAI endpoint + key)" onClick={() => setShowSettings(true)}>⚙ Settings</button>
         <button className="linkbtn" title="How to use this site" onClick={() => startTour({ selectJob })}>❓ Tour</button>
@@ -168,7 +174,7 @@ export function Dashboard() {
           </span>
         )}
       </div>
-      {showSpec && <SpecModal onClose={() => setShowSpec(false)} />}
+      {showSpec && <SpecModal onClose={() => openSpec(false)} />}
       {showSettings && <OpenAISettings onClose={() => setShowSettings(false)} />}
       {scaffoldThread && (
         <Modal onClose={() => setScaffoldThread(null)} label="Scaffold a reproducer">
