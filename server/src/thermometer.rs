@@ -4,9 +4,8 @@
 //! temperature graph is simply omitted ("if available"). Mirrors the sysfs-with-fallback
 //! style of `summarize::rss_of`.
 
-use std::path::PathBuf;
 #[cfg(target_os = "linux")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Reads the host CPU temperature.
 pub trait Thermometer: Send + Sync {
