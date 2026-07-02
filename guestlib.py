@@ -100,9 +100,19 @@ def scp_to_guest(port: int, key: Path, user: str, srcs, dest: str) -> int:
     return subprocess.run(cmd).returncode
 
 
-def ssh_run(port: int, key: Path, user: str, remote_cmd: str, **kw) -> int:
-    """Run a shell command in the guest, inheriting stdio. Returns its rc."""
-    return subprocess.run(["ssh", *ssh_base(port, key, user), remote_cmd], **kw).returncode
+def ssh_run(port: int, key: Path, user: str, remote_cmd: str, timeout: int | None = None, **kw) -> int:
+    """Run a shell command in the guest, inheriting stdio. Returns its rc (124 on
+    timeout, like coreutils `timeout`). A host-side timeout is the only thing that
+    unblocks a *hung command on a live connection*: after an oops with irqs disabled
+    the wedged CPU's command (e.g. `sudo dmesg`) never returns, yet sshd on the other
+    vCPUs keeps answering keepalives, so ServerAlive can't fire. Killing the ssh
+    client here lets the run finalize instead of hanging forever."""
+    try:
+        return subprocess.run(["ssh", *ssh_base(port, key, user), remote_cmd],
+                              timeout=timeout, **kw).returncode
+    except subprocess.TimeoutExpired:
+        log(f"ssh command timed out after {timeout}s (guest wedged?): {remote_cmd}")
+        return 124
 
 
 def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> subprocess.Popen:

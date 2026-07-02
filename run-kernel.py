@@ -665,19 +665,22 @@ def build_boot_run(b, tree: Path, arch: str, args, log_dir: Path | None,
             die("bundle has nothing to run (no user binary, init script, or module)")
         prog("run")
         # Guest output -> exec.log when a log dir is set, else streamed to stdout.
+        # Bound the guest command: a repro that oopses with irqs disabled can wedge the
+        # command (not the connection) forever. 15 min is far above any real repro here.
+        run_timeout = 15 * 60
         if log_dir:
             with open(log_dir / "exec.log", "w") as elog:
-                rc = g.ssh_run(port, key, user, cmd, stdout=elog, stderr=subprocess.STDOUT)
+                rc = g.ssh_run(port, key, user, cmd, timeout=run_timeout, stdout=elog, stderr=subprocess.STDOUT)
         else:
             print("\033[1;32m---------------- guest output ----------------\033[0m", flush=True)
-            rc = g.ssh_run(port, key, user, cmd)
+            rc = g.ssh_run(port, key, user, cmd, timeout=run_timeout)
             print("\033[1;32m----------------------------------------------\033[0m", flush=True)
         log(f"guest command exited with status {rc}")
         # Capture the guest kernel ring buffer for the dmesg tab (best effort:
         # the guest may be wedged after a crash, in which case console.log has it).
         if log_dir:
             with open(log_dir / "dmesg.log", "w") as dlog:
-                g.ssh_run(port, key, user, "sudo dmesg", stdout=dlog, stderr=subprocess.STDOUT)
+                g.ssh_run(port, key, user, "sudo dmesg", timeout=30, stdout=dlog, stderr=subprocess.STDOUT)
         prog("done", exit=rc)
     finally:
         if args.keep_running:
