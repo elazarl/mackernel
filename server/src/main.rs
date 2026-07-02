@@ -9,6 +9,7 @@ mod scaffold;
 mod sched;
 mod seed;
 mod summarize;
+mod thermometer;
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -916,15 +917,18 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
     let sampler = {
         let (db, busc, jdir) = (st.db.clone(), st.bus.clone(), dir.clone());
         let (rp, dp, sp) = (ram_peak.clone(), disk_peak.clone(), stop.clone());
+        // Host CPU thermometer (None off Linux / no sensor); resolved once per job.
+        let thermo = thermometer::for_host();
         tokio::spawn(async move {
             while !sp.load(Ordering::Relaxed) {
                 let rss = metrics::tree_rss(pid).await;
                 let disk = metrics::dir_disk(&jdir).await;
+                let temp = thermo.read_mc(); // millidegrees C, or None if unavailable
                 rp.fetch_max(rss, Ordering::Relaxed);
                 dp.fetch_max(disk, Ordering::Relaxed);
                 let ts = now_ms();
-                let _ = db.add_metric(id, ts, rss as i64, disk as i64);
-                busc.publish(id, json!({ "kind": "metric", "ts_ms": ts, "rss": rss, "disk": disk }).to_string());
+                let _ = db.add_metric(id, ts, rss as i64, disk as i64, temp);
+                busc.publish(id, json!({ "kind": "metric", "ts_ms": ts, "rss": rss, "disk": disk, "temp_mc": temp }).to_string());
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         })

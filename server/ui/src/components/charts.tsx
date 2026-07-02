@@ -27,10 +27,14 @@ export function PeaksChart({ peaks }: { peaks: Peak[] }) {
 export function ResourceChart(
   { samples, t0, phaseTs }: { samples: Sample[]; t0: number; phaseTs: Record<string, number> },
 ) {
+  // Temperature is optional (only hosts with a readable CPU sensor report it); when no
+  // sample has it, the chart stays single-axis exactly as before.
+  const hasTemp = samples.some((s) => s.temp_mc != null);
   const data = samples.map((s) => ({
     t: Math.max(0, Math.round((s.ts_ms - t0) / 1000)),
     RAM: +mib(s.rss_bytes),
     Disk: +mib(s.disk_bytes),
+    Temp: s.temp_mc != null ? +(s.temp_mc / 1000).toFixed(1) : undefined,
   }));
   const marks = Object.entries(phaseTs)
     .map(([phase, ts]) => ({ phase, t: Math.max(0, Math.round((ts - t0) / 1000)) }))
@@ -51,11 +55,12 @@ export function ResourceChart(
       <LineChart data={data}>
         <CartesianGrid strokeDasharray="3 3" stroke="#8b949e" strokeOpacity={0.3} />
         <XAxis dataKey="t" type="number" domain={[0, "dataMax"]} stroke="#8b949e" unit="s" />
-        <YAxis stroke="#8b949e" unit="M" />
+        <YAxis yAxisId="left" stroke="#8b949e" unit="M" />
+        {hasTemp && <YAxis yAxisId="temp" orientation="right" stroke="#f85149" unit="°C" />}
         <Tooltip contentStyle={TIP_STYLE} />
         <Legend />
         {marksRows.map((m) => (
-          <ReferenceLine key={m.phase} x={m.t} stroke="#8b949e" strokeDasharray="4 3"
+          <ReferenceLine key={m.phase} x={m.t} yAxisId="left" stroke="#8b949e" strokeDasharray="4 3"
             label={({ viewBox }: any) => {
               const nearRight = maxT > 0 && m.t > maxT * 0.85;
               const x = (viewBox.x as number) + (nearRight ? -3 : 3);
@@ -68,8 +73,9 @@ export function ResourceChart(
               );
             }} />
         ))}
-        <Line type="monotone" dataKey="RAM" stroke="#58a6ff" dot={false} isAnimationActive={false} />
-        <Line type="monotone" dataKey="Disk" stroke="#bc8cff" dot={false} isAnimationActive={false} />
+        <Line yAxisId="left" type="monotone" dataKey="RAM" stroke="#58a6ff" dot={false} isAnimationActive={false} />
+        <Line yAxisId="left" type="monotone" dataKey="Disk" stroke="#bc8cff" dot={false} isAnimationActive={false} />
+        {hasTemp && <Line yAxisId="temp" type="monotone" dataKey="Temp" stroke="#f85149" dot={false} isAnimationActive={false} connectNulls />}
       </LineChart>
     </ResponsiveContainer>
   );

@@ -48,7 +48,7 @@ pub fn seed_demo_job(st: &AppState) -> anyhow::Result<()> {
 
     let id = st.db.seed_job(&f.job)?;
     for m in &f.metrics {
-        st.db.add_metric(id, m.ts_ms, m.rss_bytes, m.disk_bytes)?;
+        st.db.add_metric(id, m.ts_ms, m.rss_bytes, m.disk_bytes, None)?;
     }
     for e in &f.events {
         st.db.add_event(id, e.ts_ms, &e.phase, "")?;

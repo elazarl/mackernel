@@ -76,6 +76,8 @@ pub struct Sample {
     pub ts_ms: i64,
     pub rss_bytes: i64,
     pub disk_bytes: i64,
+    /// Host CPU temperature in millidegrees Celsius, or None if unavailable.
+    pub temp_mc: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -139,6 +141,9 @@ impl Db {
                 job_id BIGINT NOT NULL, ts_ms BIGINT NOT NULL,
                 rss_bytes BIGINT NOT NULL, disk_bytes BIGINT NOT NULL
             );
+            -- Host CPU temperature in millidegrees Celsius at sample time; NULL on old
+            -- rows and hosts with no readable sensor (see src/thermometer.rs).
+            ALTER TABLE metrics ADD COLUMN IF NOT EXISTS temp_mc BIGINT;
             -- Every LKML message id the monitor has already evaluated, so it never
             -- re-fetches/re-parses one across polls (qualifying or not).
             CREATE TABLE IF NOT EXISTS lkml_seen (
@@ -365,10 +370,10 @@ impl Db {
         Ok(out)
     }
 
-    pub fn add_metric(&self, id: i64, ts_ms: i64, rss: i64, disk: i64) -> Result<()> {
+    pub fn add_metric(&self, id: i64, ts_ms: i64, rss: i64, disk: i64, temp_mc: Option<i64>) -> Result<()> {
         self.lock().execute(
-            "INSERT INTO metrics (job_id, ts_ms, rss_bytes, disk_bytes) VALUES (?, ?, ?, ?)",
-            duckdb::params![id, ts_ms, rss, disk],
+            "INSERT INTO metrics (job_id, ts_ms, rss_bytes, disk_bytes, temp_mc) VALUES (?, ?, ?, ?, ?)",
+            duckdb::params![id, ts_ms, rss, disk, temp_mc],
         )?;
         Ok(())
     }
@@ -404,12 +409,12 @@ impl Db {
     pub fn metrics(&self, id: i64) -> Result<Vec<Sample>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT ts_ms, rss_bytes, disk_bytes FROM metrics WHERE job_id=? ORDER BY ts_ms",
+            "SELECT ts_ms, rss_bytes, disk_bytes, temp_mc FROM metrics WHERE job_id=? ORDER BY ts_ms",
         )?;
         let mut rows = stmt.query(duckdb::params![id])?;
         let mut out = Vec::new();
         while let Some(r) = rows.next()? {
-            out.push(Sample { ts_ms: r.get(0)?, rss_bytes: r.get(1)?, disk_bytes: r.get(2)? });
+            out.push(Sample { ts_ms: r.get(0)?, rss_bytes: r.get(1)?, disk_bytes: r.get(2)?, temp_mc: r.get(3)? });
         }
         Ok(out)
     }
