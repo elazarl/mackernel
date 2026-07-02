@@ -6,7 +6,7 @@ import {
   Job, JobSummary, Sample, SummarizerInfo,
 } from "../api";
 import { compareMode, parseBundle } from "../bundle";
-import { jobSummaryTip, phaseList, statusColor, stepClass, summaryTip, toSample } from "../lib/format";
+import { jobSummaryTip, phaseList, statusColor, stepClass, summaryError, summaryTip, toSample } from "../lib/format";
 import { ResourceChart } from "./charts";
 import { IssuesCard } from "./IssuesCard";
 import { LogPane } from "./LogPane";
@@ -57,6 +57,10 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
   };
   const [phaseTs, setPhaseTs] = useState<Record<string, number>>({});
   const [progress, setProgress] = useState<Record<string, number>>({});
+  // Per-field failure reason pushed live via the `summary_error` SSE event; on reload
+  // the same info comes from job.summary_meta (see summaryError). Cleared when a fresh
+  // attempt for that field starts streaming or lands.
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const bundle = parseBundle(bundleText);
   const cmp = compareMode(bundle);
   // While a scaffold/refine job is still generating, the reproducer shown is the *previous*
@@ -67,7 +71,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
   const userPicked = useRef(false);
 
   useEffect(() => {
-    setSamples([]); setJob(null); setPhaseTs({}); setProgress({}); setSummaries([]);
+    setSamples([]); setJob(null); setPhaseTs({}); setProgress({}); setSummaries([]); setErrors({});
     userPicked.current = false;
     let live = true;
     let es: EventSource | null = null;
@@ -97,10 +101,18 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
           if (v.kind === "metric") setSamples((s) => [...s, toSample(v)]);
           if (v.kind === "phase" && v.phase && v.ts_ms)
             setPhaseTs((p) => (p[v.phase] ? p : { ...p, [v.phase]: v.ts_ms }));
-          if (v.kind === "summary_progress" && v.field)
+          if (v.kind === "summary_progress" && v.field) {
             setProgress((p) => ({ ...p, [v.field]: v.tokens ?? 0 }));
-          if (v.kind === "summary" && v.field)
+            setErrors((e) => { if (!(v.field in e)) return e; const n = { ...e }; delete n[v.field]; return n; });
+          }
+          if (v.kind === "summary" && v.field) {
             setProgress((p) => { const n = { ...p }; delete n[v.field]; return n; });
+            setErrors((e) => { if (!(v.field in e)) return e; const n = { ...e }; delete n[v.field]; return n; });
+          }
+          if (v.kind === "summary_error" && v.field) {
+            setProgress((p) => { const n = { ...p }; delete n[v.field]; return n; });
+            setErrors((e) => ({ ...e, [v.field]: v.error ?? "generation failed" }));
+          }
           if (v.kind === "phase" || v.kind === "done" || v.kind === "summary") getJob(id).then(setJob);
           if (v.kind === "phase" || v.kind === "done") refreshBundle();
           if (v.kind === "summary" || v.kind === "done" || v.kind === "summaries_done") refreshSummaries();
@@ -153,11 +165,13 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
         </div>
         {isPrimary
           ? <SummaryLine job={job} field="repro" icon="📝" text={job?.repro_summary ?? null}
-              progress={progress} due={job != null && job.status !== "queued"} summarizerReady={summarizerReady} />
+              progress={progress} due={job != null && job.status !== "queued"} summarizerReady={summarizerReady}
+              error={errors["repro"] ?? summaryError(job, "repro") ?? undefined} />
           : serverLine("repro", "📝")}
         {isPrimary
           ? <SummaryLine job={job} field="result" icon="✅" text={job?.result_summary ?? null}
-              progress={progress} due={job?.status === "done" || job?.status === "failed"} summarizerReady={summarizerReady} />
+              progress={progress} due={job?.status === "done" || job?.status === "failed"} summarizerReady={summarizerReady}
+              error={errors["result"] ?? summaryError(job, "result") ?? undefined} />
           : serverLine("result", "✅")}
         {job && (
           <p className="text-muted">
@@ -171,8 +185,12 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
         const detailText = isPrimary ? job?.detail ?? null : cell("detail")?.text ?? null;
         const detailTip = isPrimary ? summaryTip(job, "detail")
           : (cell("detail") ? jobSummaryTip(cell("detail")!) : undefined);
+        // Failure (after retries) surfaces instead of a perpetual "pending": live via
+        // SSE, or from summary_meta on reload. Primary backend only.
+        const detailErr = isPrimary ? (errors["detail"] ?? summaryError(job, "detail")) : null;
         const show = detailText != null ||
-          (isPrimary && (progress["detail"] !== undefined || job?.status === "done" || job?.status === "failed"));
+          (isPrimary && (progress["detail"] !== undefined || detailErr != null ||
+            job?.status === "done" || job?.status === "failed"));
         if (!show) return null;
         return (
           <section className="card">
@@ -183,9 +201,11 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{detailText}</ReactMarkdown>
                 </div>
               : isPrimary
-                ? <p className="text-muted">{progress["detail"] !== undefined
-                    ? `generating… ${progress["detail"]} tok`
-                    : (summarizerReady ? "⏳ pending" : "⏳ summarizer warming up…")}</p>
+                ? progress["detail"] !== undefined
+                  ? <p className="text-muted">generating… {progress["detail"]} tok</p>
+                  : detailErr != null
+                    ? <p style={{ color: "#f85149" }} title={detailErr}>⚠️ failed: {detailErr}</p>
+                    : <p className="text-muted">{summarizerReady ? "⏳ pending" : "⏳ summarizer warming up…"}</p>
                 : <p className="text-muted">no summary from {selModel} yet</p>}
           </section>
         );

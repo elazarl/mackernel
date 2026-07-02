@@ -70,6 +70,13 @@ const REMOTE_LOG_CAP: usize = 200_000;
 
 /// How long to wait for an `opencode run` one-shot before killing it.
 const OPENCODE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Extra opencode attempts after the first on failure (timeout / non-zero exit /
+/// empty output). The free zen tier and the CLI both fail transiently, so retry a
+/// couple of times before giving up and surfacing the failure. Total attempts =
+/// `OPENCODE_RETRIES + 1`.
+const OPENCODE_RETRIES: usize = 2;
+/// Pause between opencode attempts so a transient rate-limit/hiccup can clear.
+const OPENCODE_BACKOFF: Duration = Duration::from_secs(2);
 
 const GGUF_REPO: &str = "bartowski/Phi-3.5-mini-instruct-GGUF";
 const GGUF_FILE: &str = "Phi-3.5-mini-instruct-Q4_K_M.gguf";
@@ -546,48 +553,90 @@ fn generate_opencode(
     on_tok: &dyn Fn(u32),
 ) -> Result<(String, GenStats)> {
     // Registered as waiting; `run` blocks for a turn, marks it running, and removes the
-    // entry on drop. Only one opencode CLI executes at a time.
+    // entry on drop. Only one opencode CLI executes at a time. Each attempt spawns a
+    // fresh `opencode run` (see `with_retries`), so a transient failure sends another
+    // instance without releasing the serialization slot.
     let ticket = queue.enter(job_id, field, &b.label);
     ticket.run(|| {
         let bin = std::env::var("MK_OPENCODE_BIN").unwrap_or_else(|_| "opencode".to_string());
         let prompt = format!("{sys}\n\n{user}");
-        let started = Instant::now();
-        let mut child = Command::new(&bin)
-            .args(["run", "--pure", "-m", &b.model, &prompt])
-            .current_dir(std::env::temp_dir())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .with_context(|| format!("spawn {bin} run"))?;
+        let label = format!("job {job_id}: opencode {field}");
+        with_retries(OPENCODE_RETRIES + 1, OPENCODE_BACKOFF, &label, || {
+            opencode_attempt(&bin, &b.model, &prompt, on_tok)
+        })
+    })
+}
 
-        let deadline = Instant::now() + OPENCODE_TIMEOUT;
-        loop {
-            match child.try_wait()? {
-                Some(status) if status.success() => break,
-                Some(status) => bail!("opencode run exited with {status}"),
-                None => {
-                    if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        bail!("opencode run timed out after {OPENCODE_TIMEOUT:?}");
-                    }
-                    std::thread::sleep(Duration::from_millis(200));
+/// One `opencode run` invocation: spawn, poll until it exits or the timeout fires,
+/// then read stdout as the answer. A non-zero exit, a timeout, or empty output is a
+/// failure (`Err`) — `with_retries` decides whether to try another instance.
+fn opencode_attempt(
+    bin: &str,
+    model: &str,
+    prompt: &str,
+    on_tok: &dyn Fn(u32),
+) -> Result<(String, GenStats)> {
+    let started = Instant::now();
+    let mut child = Command::new(bin)
+        .args(["run", "--pure", "-m", model, prompt])
+        .current_dir(std::env::temp_dir())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn {bin} run"))?;
+
+    let deadline = Instant::now() + OPENCODE_TIMEOUT;
+    loop {
+        match child.try_wait()? {
+            Some(status) if status.success() => break,
+            Some(status) => bail!("opencode run exited with {status}"),
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    bail!("opencode run timed out after {OPENCODE_TIMEOUT:?}");
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
+
+    // Summaries are small, so reading stdout after the child exits won't deadlock.
+    let mut text = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_string(&mut text).context("read opencode stdout")?;
+    }
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        bail!("opencode produced no output");
+    }
+    let tokens = text.split_whitespace().count() as u32; // estimate; CLI has no usage
+    on_tok(tokens);
+    Ok((text, GenStats { ms: started.elapsed().as_millis() as u64, tokens }))
+}
+
+/// Run `attempt` up to `total` times, returning the first `Ok`. On each failure it
+/// logs `label` + the attempt number and (unless it was the last) sleeps `backoff`
+/// before retrying. Returns the last `Err` if every attempt fails.
+fn with_retries<T>(
+    total: usize,
+    backoff: Duration,
+    label: &str,
+    mut attempt: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let mut last: Option<anyhow::Error> = None;
+    for n in 1..=total {
+        match attempt() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                warn!("{label} attempt {n}/{total} failed: {e:#}");
+                last = Some(e);
+                if n < total {
+                    std::thread::sleep(backoff);
                 }
             }
         }
-
-        // Summaries are small, so reading stdout after the child exits won't deadlock.
-        let mut text = String::new();
-        if let Some(mut out) = child.stdout.take() {
-            out.read_to_string(&mut text).context("read opencode stdout")?;
-        }
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            bail!("opencode produced no output");
-        }
-        let tokens = text.split_whitespace().count() as u32; // estimate; CLI has no usage
-        on_tok(tokens);
-        Ok((text, GenStats { ms: started.elapsed().as_millis() as u64, tokens }))
-    })
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("{label}: no attempts run")))
 }
 
 /// Spawn the local `llama-server` (optionally CPU-deprioritized via `MK_LLAMA_NICE`)
@@ -1072,6 +1121,27 @@ fn cap_chars(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn with_retries_stops_on_success_and_bounds_attempts() {
+        use std::cell::Cell;
+        // Fails twice, succeeds on the third: exactly 3 calls, returns Ok.
+        let calls = Cell::new(0);
+        let r = with_retries(3, Duration::from_millis(0), "t", || {
+            calls.set(calls.get() + 1);
+            if calls.get() < 3 { anyhow::bail!("boom") } else { Ok(42) }
+        });
+        assert_eq!(r.unwrap(), 42);
+        assert_eq!(calls.get(), 3);
+        // Always fails: runs exactly `total` times, returns the last Err.
+        let calls = Cell::new(0);
+        let r: Result<i32> = with_retries(3, Duration::from_millis(0), "t", || {
+            calls.set(calls.get() + 1);
+            anyhow::bail!("nope")
+        });
+        assert!(r.is_err());
+        assert_eq!(calls.get(), 3);
+    }
 
     #[test]
     fn queue_tracks_waiting_running_and_dequeues_on_drop() {

@@ -323,6 +323,27 @@ impl Db {
         Ok(())
     }
 
+    /// Record that a summary field failed to generate (after retries), as an `error`
+    /// entry in the `summary_meta` JSON: `{field:{"error":msg}}`. The UI shows this
+    /// instead of a perpetual "pending" when the field's column is still NULL. A later
+    /// successful `set_summary_meta` overwrites `obj[field]` with the normal
+    /// {ms,took,tokens,model} shape, so recovery clears the error automatically.
+    /// Read-modify-write under one held lock, mirroring `set_summary_meta`.
+    pub fn set_summary_error(&self, id: i64, field: &str, msg: &str) -> Result<()> {
+        let c = self.lock();
+        let cur: Option<String> = c
+            .query_row("SELECT summary_meta FROM jobs WHERE id=?", duckdb::params![id],
+                       |r| r.get::<_, Option<String>>(0))
+            .unwrap_or(None);
+        let mut obj = cur
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        obj[field] = serde_json::json!({"error": msg});
+        c.execute("UPDATE jobs SET summary_meta=? WHERE id=?",
+                  duckdb::params![obj.to_string(), id])?;
+        Ok(())
+    }
+
     pub fn add_event(&self, id: i64, ts_ms: i64, phase: &str, message: &str) -> Result<()> {
         self.lock().execute(
             "INSERT INTO events (job_id, ts_ms, phase, message) VALUES (?, ?, ?, ?)",
@@ -538,4 +559,37 @@ fn row_to_job(r: &duckdb::Row<'_>) -> Result<Job> {
         summary_meta: r.get(17)?,
         source: r.get(18)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A successful summary_meta write for a field must clear a prior error for that
+    /// field (recovery), while leaving other fields' entries untouched.
+    #[test]
+    fn summary_error_is_cleared_by_a_later_success() {
+        let dir = std::env::temp_dir().join(format!("mk_db_err_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.duckdb")).unwrap();
+        let id = db.create_job(1, None).unwrap();
+
+        // A failure on `detail` and an unrelated success on `title`.
+        db.set_summary_error(id, "detail", "opencode run timed out").unwrap();
+        db.set_summary_meta(id, "title", 12, 3, "opencode").unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_str(db.get_job(id).unwrap().unwrap().summary_meta.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["detail"]["error"], "opencode run timed out");
+        assert_eq!(meta["title"]["model"], "opencode");
+
+        // A later success on `detail` overwrites the entry — no error key survives.
+        db.set_summary_meta(id, "detail", 34, 100, "opencode").unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_str(db.get_job(id).unwrap().unwrap().summary_meta.as_deref().unwrap()).unwrap();
+        assert!(meta["detail"].get("error").is_none(), "recovered field keeps no error: {meta}");
+        assert_eq!(meta["detail"]["tokens"], 100);
+        assert_eq!(meta["title"]["model"], "opencode"); // untouched
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

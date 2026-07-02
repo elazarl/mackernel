@@ -845,11 +845,36 @@ where
                 info!("job {id}: {field} summary ready via {} ({} tok, {} ms)",
                     backend.label, stats.tokens, stats.ms);
             }
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => warn!("job {id}: {field} summary via {} failed: {e:#}", backend.label),
-            Err(e) => warn!("job {id}: {field} summary via {} task panicked: {e}", backend.label),
+            Ok(Ok(_)) => {
+                if backend.primary {
+                    record_summary_failure(&db, &bus, id, field, "produced no output");
+                }
+            }
+            Ok(Err(e)) => {
+                warn!("job {id}: {field} summary via {} failed: {e:#}", backend.label);
+                if backend.primary {
+                    record_summary_failure(&db, &bus, id, field, &format!("{e:#}"));
+                }
+            }
+            Err(e) => {
+                warn!("job {id}: {field} summary via {} task panicked: {e}", backend.label);
+                if backend.primary {
+                    record_summary_failure(&db, &bus, id, field, &format!("task panicked: {e}"));
+                }
+            }
         }
     })
+}
+
+/// Persist a primary-backend summary failure and push it live over SSE. The error is
+/// stored in `summary_meta` (survives reload) so the UI can show "⚠️ failed: <reason>"
+/// instead of a perpetual "⏳ pending"; a later successful generation clears it.
+fn record_summary_failure(db: &Db, bus: &Bus, id: i64, field: &str, msg: &str) {
+    if let Err(e) = db.set_summary_error(id, field, msg) {
+        warn!("job {id}: recording {field} summary failure failed: {e:#}");
+    }
+    bus.publish(id, json!({ "kind": "summary_error", "field": field, "error": msg }).to_string());
+    bus.publish_global(json!({ "kind": "jobs" }).to_string());
 }
 
 async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {

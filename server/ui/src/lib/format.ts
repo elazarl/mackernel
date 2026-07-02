@@ -21,7 +21,9 @@ export const statusColor = (s: string) =>
 
 // Per-summary generation metadata (from job.summary_meta JSON) → hover tooltip text.
 // `took` is a human-readable duration formatted server-side; `ms` is kept for older rows.
-export type SummaryMeta = { ms: number; took?: string; tokens: number; model: string };
+// A field either succeeded (ms/tokens/model) or failed (error) — never both; a later
+// success overwrites a prior error (see db.rs set_summary_error / set_summary_meta).
+export type SummaryMeta = { ms?: number; took?: string; tokens?: number; model?: string; error?: string };
 
 export function summaryMeta(job: Job | null, field: string): SummaryMeta | null {
   if (!job?.summary_meta) return null;
@@ -29,9 +31,14 @@ export function summaryMeta(job: Job | null, field: string): SummaryMeta | null 
   catch { return null; }
 }
 
+// The persisted failure reason for a field, if its last attempt failed (else null).
+export function summaryError(job: Job | null, field: string): string | null {
+  return summaryMeta(job, field)?.error ?? null;
+}
+
 export function summaryTip(job: Job | null, field: string): string | undefined {
   const m = summaryMeta(job, field);
-  if (!m) return undefined;
+  if (!m || m.model == null) return undefined;   // absent, or an error-only entry
   return `generated in ${m.took ?? `${m.ms} ms`} · ${m.model} · ${m.tokens} tokens`;
 }
 
