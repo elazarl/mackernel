@@ -242,6 +242,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/highlight.css", get(highlight_css))
         .route("/api/highlight/:lang", post(highlight_code))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), require_auth));
+    // Unauthenticated: the raw reproducer bundle, so the "Run locally" command can be
+    // curled (and fetched by run-kernel.py) without a token. Added AFTER route_layer so
+    // it is not wrapped by require_auth.
+    let api = api.route("/api/reproducer/:id", get(get_reproducer));
     let app = api.fallback(embed::static_handler).with_state(state);
 
     info!("mackernel-server listening on {bind} (work={}, repo={})", work.display(), repo.display());
@@ -381,6 +385,23 @@ async fn get_log(
     // run.log is the orchestrator's own output (one per job, top-level), not per-variant.
     let dir = if kind == "run" { &logs } else { &vdir };
     tokio::fs::read_to_string(dir.join(file)).await.map_err(|_| StatusCode::NOT_FOUND)
+}
+
+/// Public (unauthenticated) reproducer bundle for a job — the exact bundle.md that
+/// run-kernel.py consumes. Mounted outside the /api/* auth layer so the "Run locally"
+/// command can curl it (and run-kernel.py fetch it) without a token. Read-only; `id` is
+/// an i64 (no path traversal), and it returns only the bundle the UI already shows.
+/// Falls back to prev-repro.md for an in-flight refine (same rule as get_log's bundle).
+async fn get_reproducer(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<String, StatusCode> {
+    let jobdir = st.work.join(id.to_string());
+    if let Ok(s) = tokio::fs::read_to_string(jobdir.join("bundle.md")).await {
+        return Ok(s);
+    }
+    tokio::fs::read_to_string(jobdir.join("prev-repro.md")).await
+        .map_err(|_| StatusCode::NOT_FOUND)
 }
 
 /// Extract kernel BUG/oops/KASAN reports from a dmesg capture. We anchor on
