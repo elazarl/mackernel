@@ -7,7 +7,8 @@
 //!   - a one-sentence **result** summary (at job end, + run output),
 //!   - a Markdown **detail** ("why it failed", reading the bundle + all logs;
 //!     a GitHub-flavored Markdown doc with Summary/Root cause/Evidence sections).
-//! Set `MK_SUMMARY_DISABLE=1` to turn the feature off entirely.
+//! Set `MK_SUMMARY_DISABLE=1` to turn the feature off entirely, or
+//! `MK_LLAMA_DISABLE=1` to drop just the local model and rely on remote backends.
 //!
 //! Inference runs out-of-process against one or more OpenAI-compatible servers.
 //! `load()` spawns llama.cpp's `llama-server` (the most stable native CPU LLM
@@ -276,9 +277,17 @@ impl Summarizer {
         let mut backends: Vec<Backend> = parse_remote_backends();
 
         // Local llama-server backend. If it can't start but remotes exist, degrade
-        // to remote-only rather than disabling summaries entirely.
+        // to remote-only rather than disabling summaries entirely. `MK_LLAMA_DISABLE`
+        // skips the local model outright (e.g. RAM-constrained hosts that rely on the
+        // remote/opencode backends) — distinct from `MK_SUMMARY_DISABLE`, which kills
+        // summaries entirely.
         let mut child: Option<Mutex<Child>> = None;
-        match spawn_local_server() {
+        let local_result = if local_disabled() {
+            Err(anyhow::anyhow!("local llama-server disabled via MK_LLAMA_DISABLE"))
+        } else {
+            spawn_local_server()
+        };
+        match local_result {
             Ok((c, port)) => {
                 child = Some(Mutex::new(c));
                 backends.push(Backend {
@@ -671,6 +680,14 @@ fn spawn_local_server() -> Result<(Child, u16)> {
 /// `label=openrouter,base_url=https://openrouter.ai/api/v1,model=x:free,api_key_env=OPENROUTER_API_KEY,primary=true`
 /// `label=opencode,model=opencode/deepseek-v4-flash-free,kind=opencode,primary=true`
 /// Returns [] when the var is unset/blank.
+/// True when the local llama-server backend is disabled via `MK_LLAMA_DISABLE`.
+fn local_disabled() -> bool {
+    matches!(
+        std::env::var("MK_LLAMA_DISABLE").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
 fn parse_remote_backends() -> Vec<Backend> {
     let Some(raw) = std::env::var("MK_OPENAI_SERVERS")
         .ok()

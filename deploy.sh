@@ -27,6 +27,8 @@
 #   MK_OPENCODE_PROXY  if set, the scaffold agent container routes egress through this
 #                    allowlisting HTTPS proxy (see docs/opencode-egress.md)
 #   MK_LLAMA_NICE    nice level for the local llama-server          (default: 19)
+#   MK_LLAMA_DISABLE drop the local phi3.5-mini backend, remote-only (default: 1;
+#                    home is RAM-constrained — set 0 to run the local model)
 set -euo pipefail
 
 HOST="${MK_HOST:-home}"
@@ -38,6 +40,7 @@ OR_KEY="${OPENROUTER_API_KEY:-}"
 OR_MODELS="${MK_OR_MODELS:-poolside/laguna-xs.2:free nvidia/nemotron-3-ultra-550b-a55b:free}"
 OPENCODE_MODEL="${MK_OPENCODE_MODEL:-opencode/deepseek-v4-flash-free}"
 LLAMA_NICE="${MK_LLAMA_NICE:-19}"
+LLAMA_DISABLE="${MK_LLAMA_DISABLE:-1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -79,8 +82,11 @@ rsync -az --delete "$HERE/server/ui/dist/" "$HOST:$REMOTE_REPO/server/ui/dist/"
 # travels over ssh *stdin* (never argv, never the repo).
 DROPIN="[Service]
 Environment=MK_LLAMA_NICE=${LLAMA_NICE}
+Environment=MK_LLAMA_DISABLE=${LLAMA_DISABLE}
 Environment=MK_OPENCODE_BIN=%h/.opencode/bin/opencode
 Environment=MK_OPENCODE_MODEL=${OPENCODE_MODEL}"
+# Human-readable state of the local phi3.5 backend for the log lines below.
+if [[ "$LLAMA_DISABLE" == "1" ]]; then LOCAL_DESC="local phi3.5 disabled"; else LOCAL_DESC="local phi3.5 (nice ${LLAMA_NICE})"; fi
 # Scaffolding (the opencode agent in a container) restricts egress to opencode's
 # servers via an allowlisting proxy; pass MK_OPENCODE_PROXY through if set (see
 # docs/opencode-egress.md). Unset = unrestricted egress for the agent container.
@@ -101,9 +107,9 @@ if [[ -n "$OR_KEY" ]]; then
   done
   DROPIN+="
 Environment=OPENROUTER_API_KEY=${OR_KEY}"
-  log "configure backends on $HOST: opencode primary (${OPENCODE_MODEL}) + local phi3.5 (nice ${LLAMA_NICE}) + OpenRouter [${OR_MODELS}]"
+  log "configure backends on $HOST: opencode primary (${OPENCODE_MODEL}) + ${LOCAL_DESC} + OpenRouter [${OR_MODELS}]"
 else
-  log "configure backends on $HOST: opencode primary (${OPENCODE_MODEL}) + local phi3.5 (nice ${LLAMA_NICE})"
+  log "configure backends on $HOST: opencode primary (${OPENCODE_MODEL}) + ${LOCAL_DESC}"
 fi
 DROPIN+="
 Environment=MK_OPENAI_SERVERS=${SERVERS_SPEC}"
