@@ -50,6 +50,18 @@ Support your explanation with evidence: quote the most relevant lines of the rep
 
 Reply ONLY in concise GitHub-flavored Markdown, no preamble."#;
 
+/// Appended to the opencode `detail` prompt. The opencode CLI runs the agent with its
+/// file tools in the job's logs dir (see `detail`), so the ~600 KB of logs are read as
+/// files rather than embedded in one CLI argument — the old inline prompt tripped
+/// Linux's ~128 KB single-argv limit (`MAX_ARG_STRLEN`) and failed every time.
+const DETAIL_READ_LOGS_HINT: &str = "\
+The run logs are files in your current working directory — open them with your file tools:
+- compile.log — the kernel + out-of-tree module + userspace build output
+- console.log — the guest's serial console (dmesg)
+- run.log — the orchestrator log (it SSHes into the VM and runs the commands; an SSH hang or timeout here signals reproduction, not an infrastructure failure)
+A compare job nests these under baseline/ and patched/ subdirectories — read those if the top-level files are absent.
+Quote the most relevant reproducer lines AND the most relevant dmesg/console lines as evidence.";
+
 const REPEAT_PENALTY: f32 = 1.1;
 const REPEAT_LAST_N: usize = 64;
 
@@ -77,6 +89,10 @@ const OPENCODE_TIMEOUT: Duration = Duration::from_secs(300);
 const OPENCODE_RETRIES: usize = 2;
 /// Pause between opencode attempts so a transient rate-limit/hiccup can clear.
 const OPENCODE_BACKOFF: Duration = Duration::from_secs(2);
+/// Cap (chars) for the reproducer source inlined into the opencode `detail` prompt.
+/// Only the small reproducer rides in the prompt now; the logs are read as files (see
+/// `DETAIL_READ_LOGS_HINT`), so this stays well under the ~128 KB single-argv limit.
+const OPENCODE_REPRO_CAP: usize = 60_000;
 
 const GGUF_REPO: &str = "bartowski/Phi-3.5-mini-instruct-GGUF";
 const GGUF_FILE: &str = "Phi-3.5-mini-instruct-Q4_K_M.gguf";
@@ -415,8 +431,23 @@ impl Summarizer {
         on_tok: &dyn Fn(u32),
         job_id: i64,
     ) -> Result<(String, GenStats)> {
-        // Per-backend log cap: only the local llama-server is context-constrained;
-        // remote HTTP backends and opencode have huge contexts and get near-full logs.
+        // opencode is invoked as a CLI, so a full-log prompt would exceed the ~128 KB
+        // single-argv limit. Instead give it a small prompt — the reproducer source
+        // inline plus an instruction to READ the logs as files — and run it in the logs
+        // dir so its file tools can open them (see DETAIL_READ_LOGS_HINT).
+        if b.kind == BackendKind::Opencode {
+            let user = format!(
+                "This is the reproducer you are using — its full source. Quote the relevant code in your analysis:\n{}\n\n{}",
+                cap_chars(bundle_md.trim(), OPENCODE_REPRO_CAP),
+                DETAIL_READ_LOGS_HINT,
+            );
+            return generate_opencode(
+                &self.opencode_queue, job_id, "detail", b, SYS_DETAIL, &user,
+                logs_dir.to_path_buf(), false, on_tok,
+            );
+        }
+        // HTTP backends take the logs inline (they have huge contexts): only the local
+        // llama-server is context-constrained and gets the tight cap.
         let cap = if b.is_local() { LOCAL_LOG_CAP } else { REMOTE_LOG_CAP };
         let user = curate_end_context(bundle_md, logs_dir, cap);
         self.generate(b, SYS_DETAIL, &user, 400, false, on_tok, job_id, "detail")
@@ -438,7 +469,11 @@ impl Summarizer {
         field: &'static str,
     ) -> Result<(String, GenStats)> {
         if b.kind == BackendKind::Opencode {
-            return generate_opencode(&self.opencode_queue, job_id, field, b, sys, user, on_tok);
+            // The short fields (title/repro/result) answer inline, so run --pure in a
+            // neutral dir. The `detail` field bypasses this and calls generate_opencode
+            // directly with a working dir + tools (see `detail`).
+            return generate_opencode(&self.opencode_queue, job_id, field, b, sys, user,
+                                     std::env::temp_dir(), true, on_tok);
         }
         self.generate_openai(b, sys, user, max_new, json, on_tok)
     }
@@ -534,15 +569,18 @@ impl Summarizer {
     }
 }
 
-/// One completion via the `opencode` CLI run one-shot: `opencode run --pure -m
-/// <model> "<sys>\n\n<user>"`. With `--pure`, stdout is exactly the answer (the
-/// "> build · model" header and ANSI go to stderr), and the agent answers directly
-/// without invoking tools. Binary from `$MK_OPENCODE_BIN`, else `opencode` on PATH.
-/// Runs in a neutral cwd so it doesn't scan a project, and is killed after a timeout.
+/// One completion via the `opencode` CLI run one-shot: `opencode run [--pure] -m
+/// <model> "<sys>\n\n<user>"`. Either way stdout is exactly the answer (the
+/// "> build · model" header, ANSI, and any tool traces go to stderr). Binary from
+/// `$MK_OPENCODE_BIN`, else `opencode` on PATH. `pure` = `--pure` (no tools, answer
+/// inline) for the short fields in a neutral `cwd`; `!pure` enables the agent's file
+/// tools (with `--dangerously-skip-permissions`) so `detail` can read the logs from
+/// `cwd` instead of receiving them in the prompt. Killed after a per-attempt timeout.
 /// opencode emits no token usage, so `tokens` is a whitespace-word estimate.
 /// `queue` serializes runs — the free zen tier rejects concurrent invocations — and
 /// records this run's `job_id`/`field` as a waiting entry, flipped to running once it
 /// holds the serialization lock (see `OpencodeQueue`).
+#[allow(clippy::too_many_arguments)]
 fn generate_opencode(
     queue: &OpencodeQueue,
     job_id: i64,
@@ -550,6 +588,8 @@ fn generate_opencode(
     b: &Backend,
     sys: &str,
     user: &str,
+    cwd: std::path::PathBuf,
+    pure: bool,
     on_tok: &dyn Fn(u32),
 ) -> Result<(String, GenStats)> {
     // Registered as waiting; `run` blocks for a turn, marks it running, and removes the
@@ -562,7 +602,7 @@ fn generate_opencode(
         let prompt = format!("{sys}\n\n{user}");
         let label = format!("job {job_id}: opencode {field}");
         with_retries(OPENCODE_RETRIES + 1, OPENCODE_BACKOFF, &label, || {
-            opencode_attempt(&bin, &b.model, &prompt, on_tok)
+            opencode_attempt(&bin, &b.model, &prompt, &cwd, pure, on_tok)
         })
     })
 }
@@ -574,12 +614,24 @@ fn opencode_attempt(
     bin: &str,
     model: &str,
     prompt: &str,
+    cwd: &Path,
+    pure: bool,
     on_tok: &dyn Fn(u32),
 ) -> Result<(String, GenStats)> {
     let started = Instant::now();
-    let mut child = Command::new(bin)
-        .args(["run", "--pure", "-m", model, prompt])
-        .current_dir(std::env::temp_dir())
+    let mut cmd = Command::new(bin);
+    cmd.arg("run");
+    if pure {
+        // No tools: the agent answers directly from the (self-contained) prompt.
+        cmd.arg("--pure");
+    } else {
+        // Tools enabled so the agent can read the logs from `cwd`; auto-approve so the
+        // non-interactive run doesn't block on a permission prompt.
+        cmd.arg("--dangerously-skip-permissions");
+    }
+    let mut child = cmd
+        .args(["-m", model, prompt])
+        .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
