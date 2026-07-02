@@ -6,7 +6,8 @@ import { gib, mib, Peak, Sample } from "../api";
 
 const TIP_STYLE = { background: "var(--card)", border: "1px solid var(--border)" };
 
-// Peak RAM/disk per job, across all jobs.
+// Peak RAM/disk per job, for the jobs handed in (the caller limits + orders them to
+// match the jobs list — see Dashboard).
 export function PeaksChart({ peaks }: { peaks: Peak[] }) {
   const data = peaks.map((p) => ({ id: `#${p.id}`, RAM: +gib(p.ram_peak), Disk: +gib(p.disk_peak) }));
   return (

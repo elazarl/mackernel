@@ -274,8 +274,9 @@ export function Dashboard() {
             </ul>
           </section>
           <section className="card">
-            <h2>Peak resource usage (per job)</h2>
-            <PeaksChart peaks={peaks} />
+            <h2>Peak resource usage (per job){peaks.length > JOB_LIMIT && <span className="text-muted"> · newest {JOB_LIMIT} of {peaks.length}</span>}</h2>
+            {/* Match the jobs list: newest JOB_LIMIT by id, shown oldest→newest left-to-right. */}
+            <PeaksChart peaks={[...peaks].sort((a, b) => b.id - a.id).slice(0, JOB_LIMIT).sort((a, b) => a.id - b.id)} />
           </section>
         </div>
         <div data-tour="detail">
