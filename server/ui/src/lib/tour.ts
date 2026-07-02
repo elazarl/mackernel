@@ -131,6 +131,19 @@ export function startTour(opts: { selectJob?: (id: number) => void } = {}): void
         onHighlightStarted: openDemoJob, // job #1 must be open for the Refine button to exist
       },
       {
+        element: '[data-tour="runlocal"]',
+        popover: {
+          title: "Run it on your own machine",
+          description:
+            "Want to reproduce this yourself? <b>Run locally</b> gives you a copy-paste command — " +
+            "clone the mackernel repo and point <code>run-kernel.py</code> at this job's bundle to " +
+            "build the kernel and boot the reproducer on your own box.",
+          side: "left",
+          align: "start",
+        },
+        onHighlightStarted: openDemoJob, // job #1 must be open for the Run locally button to exist
+      },
+      {
         element: '[data-tour="spec"]',
         popover: {
           title: "The bundle spec",

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  eventsUrl, getJob, getJobSummaries, getLog, getMetrics, getPhases, gib,
+  eventsUrl, getJob, getJobSummaries, getLog, getMetrics, getPhases, gib, token,
   Job, JobSummary, Sample, SummarizerInfo,
 } from "../api";
 import { compareMode, parseBundle } from "../bundle";
@@ -28,6 +28,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
   const [logKind, setLogKind] = useState<LogKind>("exec");
   const [bundleText, setBundleText] = useState("");
   const [maxRepro, setMaxRepro] = useState(false);
+  const [runOpen, setRunOpen] = useState(false);
   // Refine: optional free-text context the user adds to the agent's fix-it prompt.
   const [refineOpen, setRefineOpen] = useState(false);
   const [refineNote, setRefineNote] = useState("");
@@ -133,6 +134,13 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
     ? <BundlePreview parsed={bundle} />
     : <pre className="log">{bundleText}</pre>;
 
+  // "Run locally": clone the repo, then point run-kernel.py at this job's bundle
+  // URL. require_auth accepts the token as a query param, so plain curl (which
+  // run-kernel.py uses to fetch a URL) can pull the bundle. Empty token => omit it.
+  const tk = token();
+  const bundleUrl = `${location.origin}/api/jobs/${id}/logs/bundle${tk ? `?token=${encodeURIComponent(tk)}` : ""}`;
+  const runCmd = `git clone https://github.com/elazarl/mackernel.git\ncd mackernel\n./run-kernel.py '${bundleUrl}'`;
+
   return (
     <div>
       {cmp ? (
@@ -217,6 +225,8 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
             <span>
               <button className="linkbtn" onClick={() => setMaxRepro(true)}>Maximize</button>
               {" · "}
+              <button className="linkbtn" data-tour="runlocal" onClick={() => setRunOpen(true)}>Run locally</button>
+              {" · "}
               <button className="linkbtn" onClick={() => onEdit(bundleText)}>Edit reproducer</button>
               {(job?.status === "done" || job?.status === "failed") && <>
                 {" · "}
@@ -232,6 +242,19 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
         <Modal onClose={() => setMaxRepro(false)} label="Reproducer">
           <h2>Reproducer</h2>
           {reproView}
+        </Modal>
+      )}
+      {runOpen && (
+        <Modal onClose={() => setRunOpen(false)} label="Run locally">
+          <h2>Run this reproducer locally</h2>
+          <p className="text-muted mb-2">
+            Clone the mackernel repo, then run this job's reproducer bundle. The URL
+            carries an auth token — treat it like a shareable secret.
+          </p>
+          <pre className="log">{runCmd}</pre>
+          <div className="flex justify-end mt-2">
+            <button className="btn" onClick={() => navigator.clipboard.writeText(runCmd)}>Copy</button>
+          </div>
         </Modal>
       )}
       {refineOpen && (
