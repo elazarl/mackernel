@@ -4,7 +4,9 @@
 //! temperature graph is simply omitted ("if available"). Mirrors the sysfs-with-fallback
 //! style of `summarize::rss_of`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::path::Path;
 
 /// Reads the host CPU temperature.
 pub trait Thermometer: Send + Sync {
@@ -20,6 +22,9 @@ pub fn for_host() -> Box<dyn Thermometer> {
     if let Some(t) = LinuxThermometer::detect() {
         return Box::new(t);
     }
+    #[cfg(target_os = "macos")]
+    return Box::new(MacThermometer);
+    #[allow(unreachable_code)]
     Box::new(MachineThermometer)
 }
 
@@ -33,18 +38,47 @@ impl Thermometer for MachineThermometer {
     }
 }
 
+/// macOS (Apple Silicon) CPU temperature via the `macmon` crate, which reads the SMC /
+/// IOReport sensors without root. `macmon`'s `Sampler` holds IOKit/CoreFoundation handles
+/// and is not `Send`, so we can't store it in this `Send + Sync` trait object; instead we
+/// build a fresh `Sampler` inside each `read_mc` (created, used, and dropped on one stack
+/// frame — it never crosses a thread boundary). Fieldless, so the struct is trivially
+/// `Send + Sync`. This path only runs when the server is started on a Mac (dev); the
+/// deployed Linux box uses `LinuxThermometer`.
+#[cfg(target_os = "macos")]
+struct MacThermometer;
+
+/// How long `get_metrics` samples before returning. Temperature (SMC) is read within the
+/// call; the window mainly governs the power/usage deltas we ignore, so keep it short.
+#[cfg(target_os = "macos")]
+const MAC_SAMPLE_MS: u32 = 100;
+
+#[cfg(target_os = "macos")]
+impl Thermometer for MacThermometer {
+    fn read_mc(&self) -> Option<i64> {
+        let mut sampler = macmon::Sampler::new().ok()?;
+        let c = sampler.get_metrics(MAC_SAMPLE_MS).ok()?.temp.cpu_temp_avg;
+        // 0.0 means no sensor value this sample; treat as unavailable.
+        (c > 0.0).then(|| (c as f64 * 1000.0).round() as i64)
+    }
+}
+
 /// Reads a resolved Linux hwmon `tempN_input` (millidegrees Celsius) each sample.
+#[cfg(target_os = "linux")]
 struct LinuxThermometer {
     input_path: PathBuf,
 }
 
 /// CPU-temperature hwmon chip `name`s, most-preferred first. `coretemp` = Intel,
 /// `k10temp`/`zenpower` = AMD, then generic SoC/ACPI zones.
+#[cfg(target_os = "linux")]
 const CPU_CHIP_PRIORITY: &[&str] = &["coretemp", "k10temp", "zenpower", "cpu_thermal", "acpitz"];
 
 /// `tempN_label`s that denote the package/whole-die temperature, most-preferred first.
+#[cfg(target_os = "linux")]
 const PACKAGE_LABELS: &[&str] = &["Tctl", "Tdie", "Package id 0", "Tccd1"];
 
+#[cfg(target_os = "linux")]
 impl LinuxThermometer {
     /// Scan `/sys/class/hwmon` for a CPU-temperature chip and resolve the specific
     /// `tempN_input` file to read. `None` if nothing recognizable is present.
@@ -56,6 +90,7 @@ impl LinuxThermometer {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Thermometer for LinuxThermometer {
     fn read_mc(&self) -> Option<i64> {
         std::fs::read_to_string(&self.input_path)
@@ -67,6 +102,7 @@ impl Thermometer for LinuxThermometer {
 }
 
 /// `(chip_name, hwmon_dir)` for every `/sys/class/hwmon/hwmon*` with a readable `name`.
+#[cfg(target_os = "linux")]
 fn read_hwmon_chips(root: &Path) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir(root) else {
@@ -83,6 +119,7 @@ fn read_hwmon_chips(root: &Path) -> Vec<(String, PathBuf)> {
 
 /// Choose the CPU-temperature chip's hwmon dir from `(name, dir)` pairs, by
 /// `CPU_CHIP_PRIORITY`. Pure (list injected) so it's testable without sysfs.
+#[cfg(target_os = "linux")]
 fn pick_cpu_chip(chips: &[(String, PathBuf)]) -> Option<PathBuf> {
     CPU_CHIP_PRIORITY.iter().find_map(|want| {
         chips
@@ -94,6 +131,7 @@ fn pick_cpu_chip(chips: &[(String, PathBuf)]) -> Option<PathBuf> {
 
 /// Within a chip dir, pick the `tempN_input` for the package/die temperature: prefer one
 /// whose `tempN_label` is in `PACKAGE_LABELS`, else fall back to `temp1_input`.
+#[cfg(target_os = "linux")]
 fn pick_temp_input(dir: &Path) -> Option<PathBuf> {
     for label in PACKAGE_LABELS {
         // temp1..temp9 covers real hardware; labels beyond that are vanishingly rare.
@@ -128,6 +166,7 @@ mod tests {
         let _ = for_host().read_mc();
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn pick_cpu_chip_prefers_cpu_over_gpu_and_by_priority() {
         // amdgpu + wifi + k10temp present (the home box's real set): pick k10temp.

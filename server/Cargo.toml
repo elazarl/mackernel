@@ -46,3 +46,9 @@ arborium = { version = "2.18.0", features = ["lang-c", "lang-bash"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 # Human-readable summary generation time ("17s", "2m 3s") for the UI tooltip.
 humantime = "2"
+
+# macOS-only: sudoless CPU temperature (Apple Silicon SMC/IOReport) for the
+# thermometer's Mac impl (see src/thermometer.rs). Not pulled into the Linux
+# production build — the deployed home box uses the sysfs LinuxThermometer.
+[target.'cfg(target_os = "macos")'.dependencies]
+macmon = "0.7"
