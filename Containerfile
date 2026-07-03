@@ -20,7 +20,7 @@ ARG TARGETARCH
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
       gcc-${GCC_VERSION} build-essential flex bison libssl-dev libelf-dev bc \
-      libncurses-dev cpio kmod git \
+      libncurses-dev cpio kmod git dwarves python3 \
  && if [ "$TARGETARCH" != "arm64" ]; then \
       DEBIAN_FRONTEND=noninteractive apt-get install -y \
         gcc-${GCC_VERSION}-aarch64-linux-gnu; \
