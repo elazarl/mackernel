@@ -156,7 +156,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
             {cmp && <span className="text-muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
           {bundleText.trim() && (
             <span className="shrink-0 whitespace-nowrap">
-              <button className="linkbtn" onClick={() => setRunOpen(true)}>Run locally</button>
+              <button className="linkbtn font-semibold no-underline" style={{ color: "#3fb950" }} onClick={() => setRunOpen(true)}>💻 Run locally</button>
               {" · "}
               <button className="linkbtn" onClick={() => onEdit(bundleText)}>Edit reproducer</button>
               {(job?.status === "done" || job?.status === "failed") && <>
@@ -226,7 +226,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
             <span>
               <button className="linkbtn" onClick={() => setMaxRepro(true)}>Maximize</button>
               {" · "}
-              <button className="linkbtn" data-tour="runlocal" onClick={() => setRunOpen(true)}>Run locally</button>
+              <button className="linkbtn font-semibold no-underline" style={{ color: "#3fb950" }} data-tour="runlocal" onClick={() => setRunOpen(true)}>💻 Run locally</button>
               {" · "}
               <button className="linkbtn" onClick={() => onEdit(bundleText)}>Edit reproducer</button>
               {(job?.status === "done" || job?.status === "failed") && <>
