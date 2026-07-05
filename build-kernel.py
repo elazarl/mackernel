@@ -59,10 +59,11 @@ def main() -> int:
             "-e", f"OPT={opt}",
             "-e", f"GCC={gcc}",
             "-e", f"CROSS={cross}",
+            "-e", f"MK_JOBS={os.environ.get('MK_BUILD_JOBS', '')}",
             image,
             "bash", "-c",
             'make ARCH="$ARCH" $OPT CROSS_COMPILE="$CROSS" CC="${CROSS}gcc-$GCC" '
-            'HOSTCC="gcc-$GCC" -j"$(nproc)" "$TARGET"',
+            'HOSTCC="gcc-$GCC" -j"${MK_JOBS:-$(nproc)}" "$TARGET"',
         ],
         check=True,
     )
