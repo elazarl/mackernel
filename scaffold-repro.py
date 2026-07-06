@@ -138,14 +138,35 @@ The user added this guidance — treat it as important:
 """ if note.strip() else ""
 
 
-def build_prompt_md(has_example: bool, note: str = "") -> str:
+def build_prompt_md(has_example: bool, note: str = "", has_patch: bool = True) -> str:
     """The instruction file the agent reads (PROMPT.md). The bulky reference material —
     the bundle spec, the fix's patch series, and an example reproducer — is written to
     files in the work dir (the agent reads them with its own tools) and described here, so
-    the prompt itself stays small. The agent writes ./repro.md."""
+    the prompt itself stays small. The agent writes ./repro.md. Without a patch
+    (prompt-only scaffold) the user's note IS the task — reproduce what it describes."""
     example_line = ("- `./example-repro.md` — a complete, working example reproducer "
                     "bundle; mirror its structure.\n") if has_example else ""
+    patch_line = ("- `./fix.patch` — the patch series that fixes the bug you must "
+                  "reproduce.\n") if has_patch else ""
     note_section = _note_section(note)
+    if has_patch:
+        task = f"""{INSTRUCTION}
+
+Set `patch-compare: true` (or `thread-compare:`) in the bundle so the runner builds
+the kernel both without and with the fix and shows the difference. Put the fix's patch
+(from `./fix.patch`) into a `patch:` fence, or use `thread-compare:` with the thread
+URL, as the spec describes."""
+    else:
+        task = """\
+Write a reproducer bundle for the kernel bug or behavior the user describes below
+(there is no fix patch — the user's description is the whole task).
+
+Try to understand how that code is reached, explore sysfs, procfs, syscalls etc. \
+The kernel source is mounted read-only at /linux for you to read.
+
+Then write code that triggers the described bug/behavior, in userspace or a kernel
+module. If you can't find a way to trigger it, at least write a reproducer that
+exercises the relevant code path and say so in the reproducer."""
     return f"""\
 # Scaffold a kernel reproducer
 
@@ -156,8 +177,7 @@ directory that follows the bundle spec exactly, so it can be run with
 ## Reference files (read these with your own tools)
 
 - `./reproducer-spec.md` — the bundle format you MUST follow.
-- `./fix.patch` — the patch series that fixes the bug you must reproduce.
-{example_line}
+{patch_line}{example_line}
 ## Constraints
 
 Work as a single agent: do NOT spawn sub-agents or use a task/explore delegation
@@ -166,12 +186,7 @@ model backend allows only one request at a time, so a sub-agent would stall.)
 
 ## Your task
 
-{INSTRUCTION}
-
-Set `patch-compare: true` (or `thread-compare:`) in the bundle so the runner builds
-the kernel both without and with the fix and shows the difference. Put the fix's patch
-(from `./fix.patch`) into a `patch:` fence, or use `thread-compare:` with the thread
-URL, as the spec describes.
+{task}
 {note_section}
 When done, the bundle MUST be written to `./repro.md` and nothing else is needed.
 """
@@ -338,8 +353,9 @@ def main() -> int:
         if not args.prev_repro or not Path(args.prev_repro).is_file() \
                 or not Path(args.prev_repro).read_text(errors="replace").strip():
             die("--refine needs a non-empty --prev-repro")
-    elif not args.thread and not args.patch_file:
-        die("one of --thread / --patch-file is required")
+    elif not args.thread and not args.patch_file and not args.note.strip():
+        # Prompt-only scaffold: the note alone describes what to reproduce.
+        die("one of --thread / --patch-file / --note is required")
 
     global _PROGRESS
     _PROGRESS = args.progress
@@ -403,7 +419,8 @@ def main() -> int:
             example = HERE / "docs" / "em_uaf_repro.md"
             if example.is_file():
                 shutil.copyfile(example, work / "example-repro.md")
-            (work / "PROMPT.md").write_text(build_prompt_md(example.is_file(), args.note))
+            (work / "PROMPT.md").write_text(
+                build_prompt_md(example.is_file(), args.note, has_patch=patches is not None))
         # Seed the patch as a file too (described in the prompt; the agent drops it into a
         # `patch:` fence). Always present for a fresh scaffold; optional under --refine.
         if patches:

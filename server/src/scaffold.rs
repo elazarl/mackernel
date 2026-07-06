@@ -68,7 +68,10 @@ pub async fn start(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let thread = req.thread.filter(|s| !s.trim().is_empty());
     let patch = req.patch.filter(|s| !s.trim().is_empty());
-    if thread.is_none() && patch.is_none() {
+    let note = req.note.filter(|s| !s.trim().is_empty());
+    // Prompt-only scaffold: no thread/patch is fine as long as the user described what
+    // to reproduce in the note (scaffold-repro.py builds a from-scratch prompt).
+    if thread.is_none() && patch.is_none() && note.is_none() {
         return Err(StatusCode::BAD_REQUEST);
     }
     // No free tier: scaffolding requires the user's own OpenAI-compatible creds. Reject
@@ -95,7 +98,6 @@ pub async fn start(
         None
     };
     // Persist the non-secret spec; keep the creds in memory only.
-    let note = req.note.filter(|s| !s.trim().is_empty());
     let spec = Spec { thread, patch_file, commit, refine_parent: None, note };
     std::fs::write(dir.join("scaffold.json"), serde_json::to_vec(&spec).map_err(crate::ise)?)
         .map_err(crate::ise)?;
@@ -287,12 +289,30 @@ pub async fn run_scaffold_stage(
     if let Some(note) = &spec.note {
         cmd.arg("--note").arg(note);
     }
-    // No --progress: run_job owns the single "scaffold" phase. scaffold-repro.py's stdout
-    // and stderr both append to run.log (run_job opens it append-mode, so the run-kernel
-    // output that follows lands after this).
-    let logf = std::fs::OpenOptions::new().create(true).append(true).open(logs.join("run.log"))?;
+    // No --progress: run_job owns the single "scaffold" phase. The agent's output is
+    // streamed line-by-line: appended to logs/scaffold.log (its own file — run.log stays
+    // the run-kernel orchestrator log) and published on the job's SSE bus as
+    // `scaffold_log` events so the UI shows it live. stdout and stderr are both piped
+    // (scaffold-repro.py merges opencode's stderr into stdout, but its own die() prints
+    // to stderr).
+    let logpath = logs.join("scaffold.log");
+    let logf = std::fs::OpenOptions::new().create(true).append(true).open(&logpath)?;
     let logf2 = logf.try_clone()?;
-    let status = cmd
+    // Tee one child stream: each line lands in scaffold.log and on the SSE bus.
+    fn tee<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
+        r: R, mut file: std::fs::File, bus: crate::bus::Bus, id: i64,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            use std::io::Write;
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(r).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = writeln!(file, "{line}");
+                bus.publish(id, json!({ "kind": "scaffold_log", "line": line }).to_string());
+            }
+        })
+    }
+    let mut child = cmd
         .arg("--out").arg(&bundle)
         .arg("--log-dir").arg(logs)
         .current_dir(&st.repo)
@@ -302,10 +322,19 @@ pub async fn run_scaffold_stage(
         .env("MK_OPENAI_BASE_URL", &creds.base_url)
         .env("MK_OPENAI_API_KEY", &creds.api_key)
         .env("MK_OPENCODE_MODEL", &creds.model)
-        .stdout(Stdio::from(logf))
-        .stderr(Stdio::from(logf2))
-        .status()
-        .await?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let t_out = tee(child.stdout.take().expect("stdout piped"), logf, st.bus.clone(), id);
+    let t_err = tee(child.stderr.take().expect("stderr piped"), logf2, st.bus.clone(), id);
+    let status = child.wait().await?;
+    let _ = t_out.await;
+    let _ = t_err.await;
+    // Persist the log to the jobs row win or lose — it's the only scaffold diagnostic
+    // left once the job dir is reaped.
+    if let Ok(text) = std::fs::read_to_string(&logpath) {
+        let _ = st.db.set_scaffold_log(id, &text);
+    }
     if !status.success() {
         anyhow::bail!("scaffold stage: scaffold-repro.py exited with {status}");
     }

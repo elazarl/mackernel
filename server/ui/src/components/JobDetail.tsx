@@ -68,15 +68,31 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
   // one (the input being refined); the agent replaces it with bundle.md when it finishes.
   const scaffolding = job?.source === "scaffold" && (job.status === "queued" || job.phase === "scaffold");
   const showingPrevRepro = scaffolding && !!bundleText.trim() && !bundleText.startsWith("(no ");
+  // The opencode agent's live log: seeded from the server, appended via `scaffold_log`
+  // SSE events. Shown in a foldable card that auto-folds when scaffolding finishes.
+  const [scaffoldLog, setScaffoldLog] = useState("");
+  const [scaffoldLogOpen, setScaffoldLogOpen] = useState(true);
+  const scaffoldPre = useRef<HTMLPreElement>(null);
+  // Open while the agent runs, auto-fold when scaffolding ends (the user can re-toggle).
+  useEffect(() => { setScaffoldLogOpen(scaffolding); }, [scaffolding]);
+  useEffect(() => {
+    const el = scaffoldPre.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [scaffoldLog]);
   const t0 = useRef<number>(0);
   const userPicked = useRef(false);
 
   useEffect(() => {
     setSamples([]); setJob(null); setPhaseTs({}); setProgress({}); setSummaries([]); setErrors({});
+    setScaffoldLog("");
     userPicked.current = false;
     let live = true;
     let es: EventSource | null = null;
     const refreshSummaries = () => getJobSummaries(id).then((s) => { if (live) setSummaries(s); }).catch(() => {});
+    // Full-text refresh of the agent log (initial load, and self-heal if SSE lines
+    // were dropped by a lagging stream).
+    const refreshScaffoldLog = () =>
+      getLog(id, "scaffold").then((t) => { if (live && t && !t.startsWith("(no ")) setScaffoldLog(t); }).catch(() => {});
     // The reproducer can change mid-job: a scaffold/refine job writes bundle.md when the
     // agent finishes, replacing the previous reproducer shown until then. Re-fetch on phase
     // changes; only replace on real content so a transient miss doesn't blank the view.
@@ -114,14 +130,16 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
             setProgress((p) => { const n = { ...p }; delete n[v.field]; return n; });
             setErrors((e) => ({ ...e, [v.field]: v.error ?? "generation failed" }));
           }
+          if (v.kind === "scaffold_log" && v.line != null) setScaffoldLog((s) => s + v.line + "\n");
           if (v.kind === "phase" || v.kind === "done" || v.kind === "summary") getJob(id).then(setJob);
-          if (v.kind === "phase" || v.kind === "done") refreshBundle();
+          if (v.kind === "phase" || v.kind === "done") { refreshBundle(); refreshScaffoldLog(); }
           if (v.kind === "summary" || v.kind === "done" || v.kind === "summaries_done") refreshSummaries();
           if (v.kind === "summaries_done") es?.close();
         } catch {}
       };
     })();
     getLog(id, "bundle").then(setBundleText).catch(() => setBundleText(""));
+    refreshScaffoldLog();
     return () => { live = false; es?.close(); };
   }, [id]);
 
@@ -188,6 +206,18 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
           </p>
         )}
       </section>
+      {job?.source === "scaffold" && (scaffolding || scaffoldLog) && (
+        <section className="card">
+          <details open={scaffoldLogOpen} onToggle={(e) => setScaffoldLogOpen(e.currentTarget.open)}>
+            <summary className="cursor-pointer">
+              <h2 className="inline">Scaffolding log ✨</h2>
+              {scaffolding && <span className="text-muted"> · agent running…</span>}
+            </summary>
+            {/* eslint-disable-next-line no-control-regex -- strip ANSI colors from the agent's terminal output */}
+            <pre className="log mt-2" ref={scaffoldPre}>{scaffoldLog.replace(/\x1b\[[0-9;]*m/g, "") || "waiting for the agent…"}</pre>
+          </details>
+        </section>
+      )}
       {(() => {
         // Detail markdown + tooltip follow the selected model: live column for the
         // primary, the per-server row otherwise.

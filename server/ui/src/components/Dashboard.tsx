@@ -54,8 +54,9 @@ export function Dashboard() {
   }, []);
   // Settings opens automatically when a scaffold is attempted without OpenAI creds.
   const [showSettings, setShowSettings] = useState(false);
-  // Scaffold prompt modal: holds the lore thread to scaffold + the user's optional prompt.
-  const [scaffoldThread, setScaffoldThread] = useState<string | null>(null);
+  // Scaffold prompt modal: an optional lore thread to scaffold (absent = from-scratch,
+  // prompt-only scaffold) + the user's prompt (required when there's no thread).
+  const [scaffoldTarget, setScaffoldTarget] = useState<{ thread?: string } | null>(null);
   const [scaffoldNote, setScaffoldNote] = useState("");
   const [theme, setTheme] = useState<Theme>(getTheme());
   const toggleTheme = () => {
@@ -114,17 +115,19 @@ export function Dashboard() {
     selectJob(id);
   };
 
-  // Scaffold a lore thread: open the prompt modal (where the user can add optional context),
-  // then create the background job. Needs OpenAI creds — bounce to settings if missing.
-  const openScaffold = (thread: string) => {
+  // Scaffold a lore thread — or, with no thread, a reproducer from scratch driven only by
+  // the user's prompt. Opens the prompt modal, then creates the background job. Needs
+  // OpenAI creds — bounce to settings if missing.
+  const openScaffold = (thread?: string) => {
     if (!hasCreds()) { setShowSettings(true); return; }
     setScaffoldNote("");
-    setScaffoldThread(thread);
+    setScaffoldTarget({ thread });
   };
   const doScaffold = async () => {
-    if (!scaffoldThread) return;
-    const { id } = await startScaffold({ thread: scaffoldThread, note: scaffoldNote });
-    setScaffoldThread(null);
+    if (!scaffoldTarget) return;
+    if (!scaffoldTarget.thread && !scaffoldNote.trim()) return; // prompt-only needs a prompt
+    const { id } = await startScaffold({ thread: scaffoldTarget.thread, note: scaffoldNote });
+    setScaffoldTarget(null);
     selectJob(id);
   };
   const onScaffoldCandidate = (c: Candidate) => openScaffold(c.source_url);
@@ -176,20 +179,25 @@ export function Dashboard() {
       </div>
       {showSpec && <SpecModal onClose={() => openSpec(false)} />}
       {showSettings && <OpenAISettings onClose={() => setShowSettings(false)} />}
-      {scaffoldThread && (
-        <Modal onClose={() => setScaffoldThread(null)} label="Scaffold a reproducer">
+      {scaffoldTarget && (
+        <Modal onClose={() => setScaffoldTarget(null)} label="Scaffold a reproducer">
           <h2>Scaffold a reproducer ✨</h2>
           <p className="text-muted mb-2">
-            The agent reads the patch series and the kernel source, writes a reproducer
-            bundle, then runs it. Add any context to guide it (optional) — e.g. which bug to
-            target, a subsystem to focus on, or how to trigger it.
+            {scaffoldTarget.thread
+              ? `The agent reads the patch series and the kernel source, writes a reproducer
+                 bundle, then runs it. Add any context to guide it (optional) — e.g. which bug to
+                 target, a subsystem to focus on, or how to trigger it.`
+              : `Describe the kernel bug or behavior to reproduce. The agent explores the kernel
+                 source and writes a reproducer bundle from scratch, then runs it.`}
           </p>
           <textarea
             className="mb-3 w-full box-border rounded-md border border-border bg-bg p-[9px] font-mono text-fg outline-none focus:border-accent"
-            rows={5} autoFocus placeholder="optional context for the agent…"
+            rows={5} autoFocus
+            placeholder={scaffoldTarget.thread ? "optional context for the agent…" : "describe the bug to reproduce…"}
             value={scaffoldNote} onChange={(e) => setScaffoldNote(e.target.value)} />
           <div className="flex justify-end">
-            <button className="btn" onClick={doScaffold}>Scaffold</button>
+            <button className="btn" disabled={!scaffoldTarget.thread && !scaffoldNote.trim()}
+              onClick={doScaffold}>Scaffold</button>
           </div>
         </Modal>
       )}
@@ -207,16 +215,22 @@ export function Dashboard() {
                   cover letter as a reproducer (or Scaffold it) — no polling. */}
               <button className="chip" data-tour="lkml" onClick={() => setLkmlOpen(true)}>Browse LKML</button>
             </div>
-            {/* Pasting a bundle opens the modal — the one place you edit / preview / run. */}
-            <input
-              className="mb-2.5 w-full box-border rounded-md border border-border bg-bg p-[9px] font-mono text-fg outline-none focus:border-accent"
-              placeholder="paste here"
-              onPaste={(e) => {
-                const text = e.clipboardData.getData("text");
-                if (text.trim()) { e.preventDefault(); setBundle(text); setModalOpen(true); }
-              }}
-              onChange={() => { /* controlled-but-ephemeral: real text lives in the modal */ }}
-              value="" />
+            {/* Pasting a bundle opens the modal — the one place you edit / preview / run.
+                Scaffold ✨ instead creates a reproducer from scratch with a prompt only. */}
+            <div className="mb-2.5 flex items-center gap-1.5">
+              <input
+                className="w-full box-border rounded-md border border-border bg-bg p-[9px] font-mono text-fg outline-none focus:border-accent"
+                placeholder="paste here"
+                onPaste={(e) => {
+                  const text = e.clipboardData.getData("text");
+                  if (text.trim()) { e.preventDefault(); setBundle(text); setModalOpen(true); }
+                }}
+                onChange={() => { /* controlled-but-ephemeral: real text lives in the modal */ }}
+                value="" />
+              <button className="chip shrink-0 whitespace-nowrap"
+                title="Create a reproducer from scratch — describe the bug to the agent"
+                onClick={() => openScaffold()}>Scaffold ✨</button>
+            </div>
             <div className="mb-2.5 flex flex-wrap items-center gap-1.5" data-tour="examples">
               <span className="text-xs text-muted">Examples:</span>
               {EXAMPLES.map((ex) => (

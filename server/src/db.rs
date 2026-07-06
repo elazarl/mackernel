@@ -124,6 +124,10 @@ impl Db {
             -- Per-summary generation metadata as a JSON object keyed by field
             -- ({"title":{"ms","tokens","model"},...}); drives the UI hover tooltip.
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS summary_meta VARCHAR;
+            -- The opencode agent's full scaffold/refine log, persisted at the end of
+            -- the scaffold stage so it survives the job dir being reaped. Served via
+            -- GET /api/jobs/:id/logs/scaffold, never in the job list (it's large).
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS scaffold_log VARCHAR;
             -- One row per (job, summary field, backend server): every backend's
             -- output. The legacy per-field columns above hold the primary backend's
             -- copy; this holds all of them for the UI's "see all models" view.
@@ -215,6 +219,20 @@ impl Db {
         self.lock()
             .execute("UPDATE jobs SET phase=? WHERE id=?", duckdb::params![phase, id])?;
         Ok(())
+    }
+
+    /// Persist the scaffold stage's agent log (see scaffold::run_scaffold_stage).
+    pub fn set_scaffold_log(&self, id: i64, text: &str) -> Result<()> {
+        self.lock()
+            .execute("UPDATE jobs SET scaffold_log=? WHERE id=?", duckdb::params![text, id])?;
+        Ok(())
+    }
+
+    pub fn get_scaffold_log(&self, id: i64) -> Result<Option<String>> {
+        Ok(self.lock()
+            .query_row("SELECT scaffold_log FROM jobs WHERE id=?", duckdb::params![id],
+                       |r| r.get::<_, Option<String>>(0))
+            .unwrap_or(None))
     }
 
     pub fn finish(&self, id: i64, now_ms: i64, status: &str, exit: Option<i64>,

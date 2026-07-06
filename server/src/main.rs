@@ -359,6 +359,14 @@ async fn get_log(
         return tokio::fs::read_to_string(jobdir.join("prev-repro.md")).await
             .map_err(|_| StatusCode::NOT_FOUND);
     }
+    if kind == "scaffold" {
+        // The opencode agent's scaffold/refine log: the live file while the job dir
+        // exists, else the copy persisted on the jobs row (survives reaping).
+        if let Ok(s) = tokio::fs::read_to_string(logs.join("scaffold.log")).await {
+            return Ok(s);
+        }
+        return st.db.get_scaffold_log(id).map_err(ise)?.ok_or(StatusCode::NOT_FOUND);
+    }
     // Compare jobs nest per-variant logs under logs/<variant>/. Whitelist the names so
     // a `?variant=` value can't escape the logs dir.
     let vdir = match q.get("variant").map(String::as_str) {
