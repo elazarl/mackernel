@@ -472,20 +472,39 @@ fn collect_issues(logs: &std::path::Path, watched: &Watched) -> String {
     json!(sections).to_string()
 }
 
-/// Bundle-declared extra patterns (`search-dmesg:` literals, `regex-dmesg:` regexes)
-/// to surface from console.log like a BUG. Empty when the bundle declares none.
+/// One group of bundle-declared patterns (literals + compiled regexes) to surface from a
+/// log like a BUG. Empty when the bundle declares none of the group's keys.
 #[derive(Default)]
-struct Watched {
+struct PatternSet {
     literals: Vec<String>,
     regexes: Vec<regex::Regex>,
 }
 
-impl Watched {
+impl PatternSet {
     fn is_empty(&self) -> bool { self.literals.is_empty() && self.regexes.is_empty() }
     fn matches(&self, line: &str) -> bool {
         self.literals.iter().any(|s| line.contains(s.as_str()))
             || self.regexes.iter().any(|re| re.is_match(line))
     }
+    fn push_literal(&mut self, v: &str) {
+        let v = v.trim();
+        if !v.is_empty() { self.literals.push(v.to_string()); }
+    }
+    fn push_regex(&mut self, v: &str, key: &str) {
+        match regex::Regex::new(v.trim()) {
+            Ok(re) => self.regexes.push(re),
+            Err(e) => tracing::warn!("ignoring invalid {key} {:?}: {e}", v.trim()),
+        }
+    }
+}
+
+/// Bundle-declared extra patterns to surface like a BUG: `search-dmesg`/`regex-dmesg`
+/// scanned against the serial console (console.log), `search-user`/`regex-user` against
+/// userspace output (exec.log). Empty when the bundle declares none.
+#[derive(Default)]
+struct Watched {
+    dmesg: PatternSet,
+    user: PatternSet,
 }
 
 /// Parse `search-dmesg:`/`regex-dmesg:` from a bundle's frontmatter — the first
@@ -509,14 +528,13 @@ fn watched_patterns(bundle_md: &str) -> Watched {
         }
         if in_block {
             if let Some(v) = line.strip_prefix("search-dmesg:") {
-                let v = v.trim();
-                if !v.is_empty() { w.literals.push(v.to_string()); }
+                w.dmesg.push_literal(v);
             } else if let Some(v) = line.strip_prefix("regex-dmesg:") {
-                let v = v.trim();
-                match regex::Regex::new(v) {
-                    Ok(re) => w.regexes.push(re),
-                    Err(e) => tracing::warn!("ignoring invalid regex-dmesg {v:?}: {e}"),
-                }
+                w.dmesg.push_regex(v, "regex-dmesg");
+            } else if let Some(v) = line.strip_prefix("search-user:") {
+                w.user.push_literal(v);
+            } else if let Some(v) = line.strip_prefix("regex-user:") {
+                w.user.push_regex(v, "regex-user");
             }
         }
     }
@@ -536,13 +554,15 @@ fn scan_issue_dir(logs: &std::path::Path, prefix: &str, watched: &Watched) -> Ve
         "WARNING:", "FATAL", "fatal", "Call Trace", "segfault", "error:", "Error",
     ];
     let mut sections = Vec::new();
-    // Bundle-declared watched patterns come first so they're the default Issues tab.
-    if !watched.is_empty() {
-        if let Ok(content) = std::fs::read_to_string(logs.join("console.log")) {
-            let hits: Vec<&str> = content.lines().filter(|l| watched.matches(l)).collect();
+    // Bundle-declared watched patterns come first so they're the default Issues tab:
+    // dmesg patterns scan the serial console, user patterns scan userspace output.
+    for (set, file) in [(&watched.dmesg, "console.log"), (&watched.user, "exec.log")] {
+        if set.is_empty() { continue; }
+        if let Ok(content) = std::fs::read_to_string(logs.join(file)) {
+            let hits: Vec<&str> = content.lines().filter(|l| set.matches(l)).collect();
             if !hits.is_empty() {
                 sections.push(json!({
-                    "file": format!("{prefix}console.log (watched)"),
+                    "file": format!("{prefix}{file} (watched)"),
                     "blocks": [json!({ "head": hits, "trace": [] })],
                 }));
             }
@@ -956,10 +976,12 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
                 rp.fetch_max(rss, Ordering::Relaxed);
                 dp.fetch_max(disk, Ordering::Relaxed);
                 let ts = now_ms();
-                // Run phase: host `ps`/`du` sampling — no container CPU%/net (that's the
-                // scaffold stage's podman-stats sampler; see scaffold.rs).
-                let _ = db.add_metric(id, ts, rss as i64, disk as i64, temp, None, None);
-                busc.publish(id, json!({ "kind": "metric", "ts_ms": ts, "rss": rss, "disk": disk, "temp_mc": temp }).to_string());
+                // Run phase: host `ps`/`du` sampling (no container CPU% — that's the
+                // scaffold stage). Network is host-wide and sampled here too, so the net
+                // line keeps going through the whole test cycle (build pulls, guest egress).
+                let net = metrics::host_net_bytes().await;
+                let _ = db.add_metric(id, ts, rss as i64, disk as i64, temp, None, net.map(|n| n as i64));
+                busc.publish(id, json!({ "kind": "metric", "ts_ms": ts, "rss": rss, "disk": disk, "temp_mc": temp, "net_bytes": net }).to_string());
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         })
@@ -1117,13 +1139,17 @@ mod tests {
 
     #[test]
     fn watched_patterns_extracts_literals_and_regexes() {
-        let md = "---\ncommit: v6.12\nsearch-dmesg: MK_SENTINEL_HIT\nsearch-dmesg: other\nregex-dmesg: MK_SENTINEL_\\w+\nregex-dmesg: ([unclosed\n---\n\n# prose\n";
+        let md = "---\ncommit: v6.12\nsearch-dmesg: MK_SENTINEL_HIT\nsearch-dmesg: other\nregex-dmesg: MK_SENTINEL_\\w+\nregex-dmesg: ([unclosed\nsearch-user: USERSPACE_HIT\nregex-user: rc=\\d+\n---\n\n# prose\n";
         let w = watched_patterns(md);
-        assert_eq!(w.literals, vec!["MK_SENTINEL_HIT", "other"]);
-        assert_eq!(w.regexes.len(), 1, "the unclosed regex must be skipped");
-        assert!(w.matches("[ 1.2] MK_SENTINEL_HIT now"));
-        assert!(w.matches("MK_SENTINEL_42"), "regex matches");
-        assert!(!w.matches("nothing here"));
+        assert_eq!(w.dmesg.literals, vec!["MK_SENTINEL_HIT", "other"]);
+        assert_eq!(w.dmesg.regexes.len(), 1, "the unclosed regex must be skipped");
+        assert!(w.dmesg.matches("[ 1.2] MK_SENTINEL_HIT now"));
+        assert!(w.dmesg.matches("MK_SENTINEL_42"), "regex matches");
+        assert!(!w.dmesg.matches("nothing here"));
+        // search-user / regex-user land in the userspace set, scanned against exec.log.
+        assert_eq!(w.user.literals, vec!["USERSPACE_HIT"]);
+        assert!(w.user.matches("prog exited rc=7"), "user regex matches");
+        assert!(!w.user.matches("MK_SENTINEL_HIT"), "dmesg patterns don't leak into user set");
     }
 
     #[test]
@@ -1131,7 +1157,7 @@ mod tests {
         // A `search-dmesg:` line inside a fenced block (or after the block) is not meta.
         let md = "---\nsearch-dmesg: real\n---\n\n```init:init.sh\nsearch-dmesg: notmeta\n```\n";
         let w = watched_patterns(md);
-        assert_eq!(w.literals, vec!["real"]);
+        assert_eq!(w.dmesg.literals, vec!["real"]);
     }
 
     #[test]

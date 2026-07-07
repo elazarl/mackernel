@@ -344,11 +344,15 @@ pub async fn run_scaffold_stage(
         tokio::spawn(async move {
             while !sp.load(Ordering::Relaxed) {
                 if let Some(s) = crate::metrics::container_stats(&name).await {
+                    // Network is host-wide (host_net_bytes), so it's the same counter the
+                    // run phase samples — the chart's net line stays continuous across the
+                    // whole cycle instead of resetting at the scaffold→run boundary.
+                    let net = crate::metrics::host_net_bytes().await;
                     let ts = now_ms();
                     let _ = db.add_metric(id, ts, s.mem_bytes as i64, s.blk_bytes as i64,
-                                          None, Some(s.cpu_pct), Some(s.net_bytes as i64));
+                                          None, Some(s.cpu_pct), net.map(|n| n as i64));
                     busc.publish(id, json!({ "kind": "metric", "ts_ms": ts, "rss": s.mem_bytes,
-                        "disk": s.blk_bytes, "cpu_pct": s.cpu_pct, "net_bytes": s.net_bytes }).to_string());
+                        "disk": s.blk_bytes, "cpu_pct": s.cpu_pct, "net_bytes": net }).to_string());
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }

@@ -44,23 +44,23 @@ pub async fn tree_rss(root_pid: u32) -> u64 {
     total * 1024
 }
 
-/// A single `podman stats` reading for one container. `net_bytes`/`blk_bytes` are
-/// cumulative counters (bytes since container start); the UI plots their per-interval delta.
+/// A single `podman stats` reading for one container. `blk_bytes` is a cumulative counter
+/// (bytes since container start); the UI plots its per-interval delta. (Network is sampled
+/// host-wide instead — see host_net_bytes — so it's continuous across the whole job.)
 pub struct ContainerStat {
     pub cpu_pct: f64,
     pub mem_bytes: u64,
-    pub net_bytes: u64,
     pub blk_bytes: u64,
 }
 
-/// Sample one podman container's CPU/mem/net/disk in a single call. Used for the scaffold
+/// Sample one podman container's CPU/mem/disk in a single call. Used for the scaffold
 /// stage, whose whole workload is the opencode container (a host `ps` can't see into it,
 /// least of all through the podman-machine VM on macOS). `None` if the container is gone
 /// or stats fail — the caller treats that as "no sample this tick".
 pub async fn container_stats(name: &str) -> Option<ContainerStat> {
     let out = tokio::process::Command::new("podman")
         .args(["stats", "--no-stream", "--format",
-               "{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}|{{.BlockIO}}", name])
+               "{{.CPUPerc}}|{{.MemUsage}}|{{.BlockIO}}", name])
         .output()
         .await
         .ok()?;
@@ -71,11 +71,35 @@ pub async fn container_stats(name: &str) -> Option<ContainerStat> {
     let line = line.trim();
     let mut f = line.split('|');
     let cpu = f.next()?.trim().trim_end_matches('%').parse::<f64>().ok()?;
-    // MemUsage / NetIO / BlockIO are "<used> / <total>" and "<rx|read> / <tx|write>" pairs.
+    // MemUsage / BlockIO are "<used> / <total>" and "<read> / <write>" pairs.
     let mem = parse_size(f.next()?.split('/').next()?);
-    let (nrx, ntx) = parse_pair(f.next()?);
     let (brd, bwr) = parse_pair(f.next()?);
-    Some(ContainerStat { cpu_pct: cpu, mem_bytes: mem, net_bytes: nrx + ntx, blk_bytes: brd + bwr })
+    Some(ContainerStat { cpu_pct: cpu, mem_bytes: mem, blk_bytes: brd + bwr })
+}
+
+/// Cumulative host network bytes (rx+tx over real interfaces, excluding loopback).
+/// Sampled across the WHOLE job — scaffold and run phases alike — so network activity
+/// shows throughout the test cycle, not just while the opencode container is up. One
+/// monotonic host-lifetime counter (rootless podman + qemu egress both flow through the
+/// host, so this captures them); the UI charts its per-interval delta as a rate. Linux
+/// via /proc/net/dev; None elsewhere (the macOS dev host doesn't run the pipeline).
+pub async fn host_net_bytes() -> Option<u64> {
+    let text = tokio::fs::read_to_string("/proc/net/dev").await.ok()?;
+    Some(sum_proc_net_dev(&text))
+}
+
+fn sum_proc_net_dev(text: &str) -> u64 {
+    let mut total = 0u64;
+    for line in text.lines() {
+        let Some((iface, rest)) = line.split_once(':') else { continue };
+        if iface.trim() == "lo" || iface.trim().is_empty() { continue; }
+        // /proc/net/dev columns after the iface: receive bytes = 0, transmit bytes = 8.
+        let f: Vec<&str> = rest.split_whitespace().collect();
+        if f.len() >= 9 {
+            total += f[0].parse::<u64>().unwrap_or(0) + f[8].parse::<u64>().unwrap_or(0);
+        }
+    }
+    total
 }
 
 fn parse_pair(s: &str) -> (u64, u64) {
@@ -108,18 +132,28 @@ mod tests {
         let mut f = line.split('|');
         let cpu = f.next().unwrap().trim().trim_end_matches('%').parse::<f64>().unwrap();
         let mem = parse_size(f.next().unwrap().split('/').next().unwrap());
-        let (nrx, ntx) = parse_pair(f.next().unwrap());
         let (brd, bwr) = parse_pair(f.next().unwrap());
-        ContainerStat { cpu_pct: cpu, mem_bytes: mem, net_bytes: nrx + ntx, blk_bytes: brd + bwr }
+        ContainerStat { cpu_pct: cpu, mem_bytes: mem, blk_bytes: brd + bwr }
     }
 
     #[test]
     fn parses_podman_stats_line() {
-        let s = parse_line("0.50%|12.3MB / 1.5GB|1.2kB / 3.4kB|0B / 4.1MB");
+        let s = parse_line("0.50%|12.3MB / 1.5GB|0B / 4.1MB");
         assert_eq!(s.cpu_pct, 0.50);
         assert_eq!(s.mem_bytes, 12_300_000);
-        assert_eq!(s.net_bytes, 1_200 + 3_400);
         assert_eq!(s.blk_bytes, 4_100_000);
+    }
+
+    #[test]
+    fn sums_proc_net_dev_excluding_loopback() {
+        let text = "\
+Inter-|   Receive                    |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo:  100      1    0    0    0     0          0         0      100      1    0    0    0     0       0          0
+  eth0: 1000     10    0    0    0     0          0         0      500      5    0    0    0     0       0          0
+";
+        // eth0 rx 1000 + tx 500 = 1500; lo excluded.
+        assert_eq!(sum_proc_net_dev(text), 1500);
     }
 }
 
