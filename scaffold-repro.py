@@ -123,6 +123,15 @@ patch's date: build on the mainline release current at that date (the latest
 `vX.Y`/`vX.Y-rcN` tag whose date precedes the patch's), and put it in the bundle's
 `commit:` so the runner builds against a tree the patch applies cleanly to."""
 
+# The guest VM ships only the kernel + your bundle's files — no source tree, no build
+# toolchain. A common failure is a reproducer that tries to compile kernel-tree source
+# (perf, tools/lib/...) inside the guest; steer the agent to the `tools:` key instead.
+GUEST_ENV_NOTE = """\
+The guest VM has NO kernel source tree and NO compiler — do NOT compile kernel-tree
+source (e.g. `tools/perf`, `tools/lib/...`) inside the guest. If the reproducer needs a
+kernel-tree userspace tool, request it with the `tools:` key (e.g. `tools: perf`): the
+runner builds it from the job's tree and ships it into the guest on `PATH`, ready to run."""
+
 
 def progress(phase: str, **extra) -> None:
     if _PROGRESS:
@@ -190,9 +199,11 @@ URL, as the spec describes.
 
 {DMESG_COMPARE_DIRECTIVE}
 
-{BASE_COMMIT_NOTE}"""
+{BASE_COMMIT_NOTE}
+
+{GUEST_ENV_NOTE}"""
     else:
-        task = """\
+        task = f"""\
 Write a reproducer bundle for the kernel bug or behavior the user describes below
 (there is no fix patch — the user's description is the whole task).
 
@@ -201,7 +212,9 @@ The kernel source is mounted read-only at /linux for you to read.
 
 Then write code that triggers the described bug/behavior, in userspace or a kernel
 module. If you can't find a way to trigger it, at least write a reproducer that
-exercises the relevant code path and say so in the reproducer."""
+exercises the relevant code path and say so in the reproducer.
+
+{GUEST_ENV_NOTE}"""
     return f"""\
 # Scaffold a kernel reproducer
 
@@ -266,7 +279,7 @@ necessarily been run, so there are no prior logs."""
 Read `./prev-repro.md` and improve it, following the user's guidance below and the spec,
 then write the improved bundle to `./repro.md`. Keep the `patch-compare:`/`thread-compare:`
 setup so the runner builds the kernel both without and with the fix."""
-    task = f"{task}\n\n{DMESG_COMPARE_DIRECTIVE}\n\n{BASE_COMMIT_NOTE}\n\n{LORE_ACCESS_NOTE}"
+    task = f"{task}\n\n{DMESG_COMPARE_DIRECTIVE}\n\n{BASE_COMMIT_NOTE}\n\n{GUEST_ENV_NOTE}\n\n{LORE_ACCESS_NOTE}"
     return f"""\
 # Refine a kernel reproducer
 
