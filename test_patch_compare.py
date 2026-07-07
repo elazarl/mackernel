@@ -55,6 +55,21 @@ def test_thread_compare():
     assert patched["thread"] == url and patched["commit"] == "v6.12"
 
 
+def test_commit_compare():
+    meta = parse("---\ncommit-compare: v6.11 v6.12\n---\n")
+    assert meta["commit-compare"] == "v6.11 v6.12"
+    assert meta["url"] == rk.KERNEL_URL          # commit-compare also hardens
+    base, patched = rk.compare_variants(meta)
+    assert base["commit"] == "v6.11" and "commit-compare" not in base
+    assert patched["commit"] == "v6.12" and "commit-compare" not in patched
+
+
+def test_commit_compare_needs_two():
+    # commit-compare with one token -> no comparison, single run.
+    meta = parse("---\ncommit-compare: v6.11\n---\n")
+    assert rk.compare_variants(meta) is None
+
+
 def test_no_compare():
     meta = parse("---\ncommit: v6.12\n---\n")
     assert rk.compare_variants(meta) is None

@@ -32,16 +32,20 @@ A `---`-delimited block, at column 0 and outside any code fence, holding
 | `arch`           | target arch (`x86_64` / `arm64`); overrides `ARCH` env and host  |
 | `patch-compare`  | `true` to run twice — with and without `patch:` — in parallel    |
 | `thread-compare` | lore thread URL; run baseline vs the thread's series, in parallel|
+| `commit-compare` | two whitespace-separated commit-ishes; run the first (baseline) vs the second (patched), in parallel |
 | `search-dmesg`   | literal string to hunt for in the serial console (`console.log`); matches are flagged like a `BUG:` and shown at the top of the Issues view. Repeatable; does **not** change the run's pass/fail. |
 | `regex-dmesg`    | same as `search-dmesg`, but the value is a regular expression. Repeatable. |
+| `search-user`    | literal string to hunt for in userspace output (`exec.log` — the reproducer's own stdout/stderr in the guest); flagged and shown in Issues just like `search-dmesg`. Repeatable; does **not** change pass/fail. |
+| `regex-user`     | same as `search-user`, but the value is a regular expression. Repeatable. |
 
 With no metadata block, the kernel at `LINUX_SRC` (default `~/linux`) is built
 as-is. Arch precedence: frontmatter `arch:` > `ARCH` env > host arch.
 
-`search-dmesg` / `regex-dmesg` are scanned against the captured serial console
+`search-dmesg` / `regex-dmesg` are scanned against the captured serial console,
+and `search-user` / `regex-user` against the reproducer's userspace output,
 *after* the run; they only surface matching lines (so you can spot a custom
-`pr_info`, a known error string, or a sanitizer line the built-in `BUG:`/oops
-detection misses) — they never affect the exit status.
+`pr_info`, a program's own "FAIL"/"ok" line, a known error string, or a sanitizer
+line the built-in `BUG:`/oops detection misses) — they never affect the exit status.
 
 ```
 ---
@@ -54,9 +58,10 @@ arch: x86_64
 
 #### Comparison runs (`patch-compare` / `thread-compare`)
 
-Either key turns one bundle into **two runs, executed in parallel** — a **baseline**
-and a **patched** variant — so you can see what a patch (or a mailing-list series)
-changes. They build on separate worktrees and boot separate guests.
+Any of these keys turns one bundle into **two runs, executed in parallel** — a
+**baseline** and a **patched** variant — so you can see what a patch (or a
+mailing-list series, or a range of commits) changes. They build on separate
+worktrees and boot separate guests.
 
 - `patch-compare: true` (requires a patch — either a `patch:` URL or an inline
   `patch` fence) — baseline is `commit:` with the patch *stripped*; patched is
@@ -65,6 +70,13 @@ changes. They build on separate worktrees and boot separate guests.
   `commit:` with the thread's whole patch series applied. The series is fetched as
   the thread mbox (`<url>/t.mbox.gz`) and applied with `git am` (cover letter and
   non-patch replies are dropped).
+- `commit-compare: <baseline> <patched>` — two whitespace-separated commit-ishes
+  (commit / tag / branch). Baseline builds the first, patched builds the second;
+  both come from the canonical tree with no patch applied. Any `commit:` key is
+  ignored in this mode.
+
+If more than one compare key is set, precedence is
+`patch-compare` > `thread-compare` > `commit-compare`.
 
 With `--log-dir DIR`, each variant writes its own subdir of the usual logs:
 `DIR/baseline/` and `DIR/patched/`. The runs are reported verbatim (both exit codes
@@ -83,6 +95,12 @@ patch-compare: true
 ---
 commit: v6.12
 thread-compare: https://lore.kernel.org/lkml/cover.123@example/
+---
+```
+
+```
+---
+commit-compare: v6.11 v6.12
 ---
 ```
 
@@ -158,8 +176,8 @@ set -e
 5. Copy the artifacts in and run `init:` over SSH, streaming output.
 6. Exit with the `init:` script's status.
 
-With `patch-compare` / `thread-compare`, steps 1–6 run twice in parallel (a
-baseline and a patched variant, each on its own worktree and guest); the overall
+With `patch-compare` / `thread-compare` / `commit-compare`, steps 1–6 run twice in
+parallel (a baseline and a patched variant, each on its own worktree and guest); the overall
 exit status is the patched run's.
 
 Guest network egress is restricted by default (override with `GUEST_NET=open`);

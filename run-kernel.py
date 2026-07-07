@@ -54,7 +54,7 @@ def progress(phase: str, **extra) -> None:
         with _PRINT_LOCK:
             print(f"{PROGRESS_SENTINEL} {json.dumps({'phase': phase, **extra})}", flush=True)
 
-META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare", "compiler"}
+META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare", "commit-compare", "compiler"}
 # gcc versions for which a build image is published (see Containerfile / CI). A
 # bundle's `compiler:` key selects one; an unsupported value falls back to the default.
 SUPPORTED_GCC = {"13", "14", "15"}
@@ -78,9 +78,11 @@ LORE_UA = "git/2.43"
 
 def enforce_hardened(meta: dict) -> dict:
     """Force the kernel source to KERNEL_URL whenever the bundle requests a remote
-    tree (url/commit/patch/thread/thread-compare). Returns the (mutated) meta dict."""
+    tree (url/commit/patch/thread/thread-compare/commit-compare). Returns the
+    (mutated) meta dict."""
     if (meta.get("url") or meta.get("commit") or meta.get("patch")
-            or meta.get("thread") or meta.get("thread-compare")):
+            or meta.get("thread") or meta.get("thread-compare")
+            or meta.get("commit-compare")):
         if meta.get("url") and meta["url"] != KERNEL_URL:
             log(f"hardened: ignoring bundle url {meta['url']!r}; forcing {KERNEL_URL}")
         meta["url"] = KERNEL_URL
@@ -699,13 +701,22 @@ def compare_variants(meta: dict) -> tuple[dict, dict] | None:
     """If `meta` requests a comparison, return (baseline_meta, patched_meta); else None.
     patch-compare strips the bundle's own `patch:` for the baseline; thread-compare
     git-ams a lore thread's series (via an internal `thread` key) for the patched
-    variant. patch-compare wins if both are set."""
+    variant; commit-compare builds two whitespace-separated commit-ishes (first is
+    baseline, second is patched). Precedence: patch-compare > thread-compare >
+    commit-compare."""
     if _truthy(meta.get("patch-compare")) and meta.get("patch"):
         baseline = {k: v for k, v in meta.items() if k != "patch"}
         return baseline, dict(meta)
     if meta.get("thread-compare"):
         baseline = {k: v for k, v in meta.items() if k != "thread-compare"}
         return baseline, {**baseline, "thread": meta["thread-compare"]}
+    cc = meta.get("commit-compare")
+    if cc:
+        parts = cc.split()
+        if len(parts) == 2:
+            base_c, patch_c = parts
+            common = {k: v for k, v in meta.items() if k != "commit-compare"}
+            return {**common, "commit": base_c}, {**common, "commit": patch_c}
     return None
 
 

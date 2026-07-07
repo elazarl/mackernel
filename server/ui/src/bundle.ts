@@ -8,7 +8,7 @@ export interface ParsedBundle { meta: BundleMeta[]; files: BundleFile[]; }
 
 // Recognized metadata keys and the canonical tab order (per the spec). Roles not in
 // this list still get a tab, ordered after the known ones.
-const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch", "patch-compare", "thread-compare", "search-dmesg", "regex-dmesg"];
+const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch", "patch-compare", "thread-compare", "commit-compare", "search-dmesg", "regex-dmesg", "search-user", "regex-user"];
 export const ROLE_ORDER = ["user", "module", "kconf", "patch", "init"];
 
 const FENCE_OPEN = /^(`{3,})(.*)$/;     // ```role:filename  (or any info string)
@@ -88,16 +88,19 @@ function roleRank(role: string): number {
 }
 
 // Does a parsed bundle request a baseline-vs-patched comparison? Returns the mode
-// ("patch" strips the bundle's patch:; "thread" git-ams a lore series) or null. Both
-// modes produce baseline/patched runs, so the UI renders either side by side.
+// ("patch" strips the bundle's patch:; "thread" git-ams a lore series; "commit"
+// builds two commit-ishes) or null. All modes produce baseline/patched runs, so the
+// UI renders either side by side. Precedence matches the runner: patch > thread > commit.
 const TRUTHY = ["1", "true", "yes", "on"];
-export function compareMode(parsed: ParsedBundle): "patch" | "thread" | null {
+export function compareMode(parsed: ParsedBundle): "patch" | "thread" | "commit" | null {
   const get = (k: string) => parsed.meta.find((m) => m.key === k)?.value;
   const pc = get("patch-compare");
   // A patch can come from the patch: key or an inline ```patch:… fence.
   const hasPatch = !!get("patch") || parsed.files.some((f) => f.role === "patch");
   if (pc && TRUTHY.includes(pc.trim().toLowerCase()) && hasPatch) return "patch";
   if (get("thread-compare")) return "thread";
+  // Two whitespace-separated commit-ishes: first baseline, second patched.
+  if (get("commit-compare")?.trim().split(/\s+/).length === 2) return "commit";
   return null;
 }
 

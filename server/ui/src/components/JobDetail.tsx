@@ -185,7 +185,7 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
       <section className="card" data-tour="jobsummary">
         <div className="flex items-start justify-between gap-2">
           <h2>Job #{id} {job && <span style={{ color: statusColor(job.status) }}>· {job.status}</span>}
-            {cmp && <span className="text-muted"> · {cmp === "thread" ? "thread-compare" : "patch-compare"} (baseline vs patched)</span>}</h2>
+            {cmp && <span className="text-muted"> · {cmp}-compare (baseline vs patched)</span>}</h2>
           {bundleText.trim() && (
             <span className="shrink-0 whitespace-nowrap">
               <button className="linkbtn font-semibold no-underline" style={{ color: "#3fb950" }} onClick={() => setRunOpen(true)}>💻 Run locally</button>
