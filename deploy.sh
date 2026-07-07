@@ -132,7 +132,11 @@ if [[ -n "$PROXY" ]]; then
   UNIT="[Unit]
 Description=mackernel scaffold egress allowlist proxy
 [Service]
-ExecStart=/usr/bin/python3 %h/${REMOTE_REPO}/scaffold-proxy.py --bind 127.0.0.1:8888
+# Bind all interfaces, not loopback: rootless podman (pasta) routes the container's
+# host.containers.internal to a host-gateway addr (169.254.1.2), NOT host loopback, so a
+# 127.0.0.1-bound proxy is refused and the agent gets zero egress. LAN-only exposure of a
+# CONNECT proxy that only tunnels to the allowlist (port not WAN-forwarded) is acceptable.
+ExecStart=/usr/bin/python3 %h/${REMOTE_REPO}/scaffold-proxy.py --bind 0.0.0.0:8888
 Restart=on-failure
 [Install]
 WantedBy=default.target"
