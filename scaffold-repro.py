@@ -100,6 +100,29 @@ Always try to add `search-dmesg`/`regex-dmesg` matchers (see the spec) for the b
 signature in the serial console, chosen so they match on the baseline (unpatched) build \
 but NOT on the patched one — proving the bug appears without the fix and is gone with it."""
 
+# The agent can pull extra context straight from lore.kernel.org (the container has
+# network egress). lore is behind Anubis bot-protection that challenges browser
+# User-Agents but lets git/curl through — so it MUST fetch with a git-like UA.
+LORE_ACCESS_NOTE = f"""\
+## Fetching more context from lore.kernel.org (optional)
+
+You may pull extra context straight from lore.kernel.org — the patch's own thread
+discussion, review replies, and earlier revisions (v1, v2, …) — to understand the
+bug better. lore is behind Anubis bot-protection that blocks browser User-Agents,
+so ALWAYS fetch with a git-like agent:
+
+    curl -sSL -A {rk.LORE_UA} <url>
+
+Append `/raw` to a message URL for the raw email, or `/t.mbox.gz` to a thread URL to
+get the whole series as an mbox."""
+
+# When the bundle has no base commit, derive one from the patch's own date.
+BASE_COMMIT_NOTE = """\
+If the base commit to build on is missing or unknown, find a relevant base from the
+patch's date: build on the mainline release current at that date (the latest
+`vX.Y`/`vX.Y-rcN` tag whose date precedes the patch's), and put it in the bundle's
+`commit:` so the runner builds against a tree the patch applies cleanly to."""
+
 
 def progress(phase: str, **extra) -> None:
     if _PROGRESS:
@@ -165,7 +188,9 @@ the kernel both without and with the fix and shows the difference. Put the fix's
 (from `./fix.patch`) into a `patch:` fence, or use `thread-compare:` with the thread
 URL, as the spec describes.
 
-{DMESG_COMPARE_DIRECTIVE}"""
+{DMESG_COMPARE_DIRECTIVE}
+
+{BASE_COMMIT_NOTE}"""
     else:
         task = """\
 Write a reproducer bundle for the kernel bug or behavior the user describes below
@@ -198,6 +223,8 @@ model backend allows only one request at a time, so a sub-agent would stall.)
 
 {task}
 {note_section}
+{LORE_ACCESS_NOTE}
+
 When done, the bundle MUST be written to `./repro.md` and nothing else is needed.
 """
 
@@ -239,7 +266,7 @@ necessarily been run, so there are no prior logs."""
 Read `./prev-repro.md` and improve it, following the user's guidance below and the spec,
 then write the improved bundle to `./repro.md`. Keep the `patch-compare:`/`thread-compare:`
 setup so the runner builds the kernel both without and with the fix."""
-    task = f"{task}\n\n{DMESG_COMPARE_DIRECTIVE}"
+    task = f"{task}\n\n{DMESG_COMPARE_DIRECTIVE}\n\n{BASE_COMMIT_NOTE}\n\n{LORE_ACCESS_NOTE}"
     return f"""\
 # Refine a kernel reproducer
 

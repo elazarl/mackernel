@@ -48,6 +48,11 @@ Reach the host from a rootless container via `host.containers.internal`, e.g.:
 
     # /etc/tinyproxy/allow.txt -- the OpenAI-compatible provider hosts the UI offers
     # (server/ui/src/lib/providers.ts). Add a "Custom" provider's host here too.
+    #
+    # lore.kernel.org lets the scaffold agent pull extra patch/thread context
+    # (git.kernel.org is the canonical source it may also read); keep them allowed.
+    (^|\.)lore\.kernel\.org$
+    (^|\.)git\.kernel\.org$
     (^|\.)api\.openai\.com$
     (^|\.)api\.inference\.crusoecloud\.com$
     (^|\.)api\.inference\.crusoecloud\.xyz$
