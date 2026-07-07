@@ -54,7 +54,14 @@ def progress(phase: str, **extra) -> None:
         with _PRINT_LOCK:
             print(f"{PROGRESS_SENTINEL} {json.dumps({'phase': phase, **extra})}", flush=True)
 
-META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare", "commit-compare", "compiler"}
+META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare", "commit-compare", "compiler", "tools"}
+# Kernel-tree userspace tools a bundle may request via `tools:` (space-separated). Each
+# maps to (subdir under tools/, built binary name). Built against the job's tree and
+# shipped into the guest so a reproducer can call e.g. `perf` (see build_tools).
+TOOLS = {
+    "perf": ("perf", "perf"),
+    "bpftool": ("bpf/bpftool", "bpftool"),
+}
 # gcc versions for which a build image is published (see Containerfile / CI). A
 # bundle's `compiler:` key selects one; an unsupported value falls back to the default.
 SUPPORTED_GCC = {"13", "14", "15"}
@@ -481,6 +488,59 @@ def build_modules(modfiles, tree: Path, arch: str, image: str, is_local: bool,
     return kos
 
 
+def build_tools(names, tree: Path, arch: str, image: str, is_local: bool,
+                log_file=None) -> list[tuple[Path, list[Path]]]:
+    """Build each requested kernel-tree userspace tool (perf, bpftool, …) against the
+    job's tree, in the build container. Returns [(binary, [dep .so files])] — the binary
+    plus its non-glibc shared-lib deps, both lifted to the host so build_boot_run can scp
+    them into the guest. Version-matched to the built kernel; the .so's ride along so the
+    guest doesn't need the tool's runtime packages (glibc/ld itself is the guest's own,
+    which matches because the build image and the guest are the same Ubuntu release)."""
+    prof = mklib.arch_profile(arch)
+    ka = prof["kernel_arch"]
+    cross = mklib.cross_compile(arch)
+    gcc = os.environ.get("MK_GCC", DEFAULT_GCC)
+    pull = ["--pull=never"] if is_local else []
+    mklib.ensure_pulled(image, is_local, mklib.platform_args(arch))
+    out: list[tuple[Path, list[Path]]] = []
+    for name in names:
+        if name not in TOOLS:
+            die(f"unknown tool {name!r} in `tools:` (supported: {', '.join(sorted(TOOLS))})")
+        subdir, binname = TOOLS[name]
+        odir = Path(tempfile.mkdtemp(prefix=f".mk-tool-{name}-", dir=HERE))
+        # Build to O=/out (keeps the worktree clean), then copy the binary's runtime .so
+        # deps into /out/.libs — skipping libc/libm and the dynamic loader, which must be
+        # the guest's own. `-j` capped by MK_BUILD_JOBS (thermal control on small hosts).
+        script = (
+            f'set -e; make -C /linux/tools/{subdir} O=/out '
+            f'ARCH={ka} CROSS_COMPILE={cross} CC={cross}gcc-{gcc} HOSTCC=gcc-{gcc} '
+            f'-j"${{MK_JOBS:-$(nproc)}}"; '
+            f'mkdir -p /out/.libs; '
+            f'for lib in $(ldd /out/{binname} | awk "/=> \\// {{print \\$3}}"); do '
+            f'case "$lib" in */libc.so*|*/libm.so*|*/ld-linux*|*/ld64.so*) ;; '
+            f'*) cp -L "$lib" /out/.libs/ ;; esac; done'
+        )
+        cmd = [
+            "podman", "run", "--rm", *pull, *mklib.platform_args(arch),
+            *mklib.hardening_args(arch),
+            "-v", mklib.volume(tree, "/linux"), "-v", mklib.volume(odir, "/out"),
+            "-e", f"MK_JOBS={os.environ.get('MK_BUILD_JOBS', '')}",
+            "-w", "/out", image, "bash", "-c", script,
+        ]
+        log(f"building tool {name} ...")
+        cap = {"stdout": log_file, "stderr": subprocess.STDOUT} if log_file else {}
+        if log_file:
+            print(f"\n=== building tool: {name} ===", file=log_file, flush=True)
+        if run(cmd, **cap).returncode != 0:
+            die(f"tool build failed: {name}")
+        binpath = odir / binname
+        if not binpath.is_file():
+            die(f"tool build produced no binary: {name} ({binpath})")
+        libs = sorted((odir / ".libs").glob("*")) if (odir / ".libs").is_dir() else []
+        out.append((binpath, libs))
+    return out
+
+
 # ----------------------------------------------------------------------------
 # Bundle mode
 # ----------------------------------------------------------------------------
@@ -604,6 +664,9 @@ def build_boot_run(b, tree: Path, arch: str, args, log_dir: Path | None,
     # 3. Build kernel module(s).
     kos = build_modules(b.files["module"], tree, arch, image, is_local,
                         log_file=clog) if b.files["module"] else []
+    # 3b. Build any kernel-tree userspace tools the bundle asked for (perf, bpftool, …).
+    tools = build_tools(b.meta["tools"].split(), tree, arch, image, is_local,
+                        log_file=clog) if b.meta.get("tools") else []
     if clog:
         clog.close()
 
@@ -636,16 +699,20 @@ def build_boot_run(b, tree: Path, arch: str, args, log_dir: Path | None,
         g.wait_for_ssh(port, key, user, boot_timeout)
         g.ssh_run(port, key, user, f"rm -rf {gdir} && mkdir -p {gdir}")
 
-        payload = ([binary] if binary else []) + kos + data_files + \
+        # Tools ride in flat next to everything else in gdir: the binaries (perf, …) plus
+        # their .so deps; the run command below puts gdir on PATH + LD_LIBRARY_PATH.
+        tool_bins = [b for b, _ in tools]
+        tool_libs = [lib for _, libs in tools for lib in libs]
+        payload = ([binary] if binary else []) + kos + tool_bins + tool_libs + data_files + \
                   ([init_path] if init_path else [])
         if payload:
             log(f"copying {len(payload)} file(s) into guest:{gdir} ...")
             if g.scp_to_guest(port, key, user, payload, f"{gdir}/") != 0:
                 die("scp into the guest failed")
 
-        # scp doesn't preserve the executable bit, so restore it on the binary and
-        # init script (the init script may exec the binary).
-        execs = [p.name for p in ([binary] if binary else []) + ([init_path] if init_path else [])]
+        # scp doesn't preserve the executable bit, so restore it on the binary, the tool
+        # binaries, and the init script (the init script may exec any of them).
+        execs = [p.name for p in ([binary] if binary else []) + tool_bins + ([init_path] if init_path else [])]
         if execs:
             g.ssh_run(port, key, user, "chmod +x " + " ".join(f"{gdir}/{e}" for e in execs))
 
@@ -656,11 +723,14 @@ def build_boot_run(b, tree: Path, arch: str, args, log_dir: Path | None,
             if g.ssh_run(port, key, user, f"sudo insmod {gdir}/{ko.name}") != 0:
                 die(f"insmod {ko.name} failed (see boot log / dmesg)")
 
+        # Shipped tools live in gdir; expose them on PATH + LD_LIBRARY_PATH so the
+        # reproducer can just call `perf`/`bpftool` (and find their bundled .so deps).
+        env = f"PATH={gdir}:$PATH LD_LIBRARY_PATH={gdir} " if tools else ""
         # What to run: init script, else the user binary, else (module-only) dmesg.
         if init_name:
-            cmd = f"cd {gdir} && ./{init_name}"
+            cmd = f"cd {gdir} && {env}./{init_name}"
         elif binary:
-            cmd = f"cd {gdir} && ./{binary.name}"
+            cmd = f"cd {gdir} && {env}./{binary.name}"
         elif kos:
             cmd = "sudo dmesg | tail -n 40"
         else:

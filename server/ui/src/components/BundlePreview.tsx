@@ -10,7 +10,7 @@ export function BundlePreview({ parsed }: { parsed: ParsedBundle }) {
   useEffect(() => { if (!roles.includes(tab)) setTab(roles[0] ?? ""); }, [roles, tab]);
 
   const get = (k: string) => parsed.meta.find((m) => m.key === k)?.value;
-  const commit = get("commit"), arch = get("arch"), patch = get("patch"), url = get("url");
+  const commit = get("commit"), arch = get("arch"), patch = get("patch"), url = get("url"), tools = get("tools");
   const cmp = compareMode(parsed), threadCompare = get("thread-compare"), commitCompare = get("commit-compare");
   const requestsKernel = !!(commit || patch || url || threadCompare || commitCompare);
 
@@ -34,6 +34,7 @@ export function BundlePreview({ parsed }: { parsed: ParsedBundle }) {
           {cmp === "patch" && <Row dt="compare">baseline vs patched (with / without patch)</Row>}
           {threadCompare && <Row dt="thread-compare">baseline vs series · {threadCompare}</Row>}
           {cmp === "commit" && <Row dt="commit-compare">baseline vs patched · {commitCompare}</Row>}
+          {tools && <Row dt="tools">{tools} <span className="text-muted">· built from the tree, shipped into the guest</span></Row>}
           {url && url !== KERNEL_URL && <Row dt="url"><span className="text-muted"><s>{url}</s> · ignored</span></Row>}
         </dl>
       ) : (

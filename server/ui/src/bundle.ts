@@ -8,7 +8,7 @@ export interface ParsedBundle { meta: BundleMeta[]; files: BundleFile[]; }
 
 // Recognized metadata keys and the canonical tab order (per the spec). Roles not in
 // this list still get a tab, ordered after the known ones.
-const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch", "patch-compare", "thread-compare", "commit-compare", "search-dmesg", "regex-dmesg", "search-user", "regex-user"];
+const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch", "patch-compare", "thread-compare", "commit-compare", "search-dmesg", "regex-dmesg", "search-user", "regex-user", "tools"];
 export const ROLE_ORDER = ["user", "module", "kconf", "patch", "init"];
 
 const FENCE_OPEN = /^(`{3,})(.*)$/;     // ```role:filename  (or any info string)

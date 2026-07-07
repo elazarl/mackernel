@@ -30,6 +30,7 @@ A `---`-delimited block, at column 0 and outside any code fence, holding
 | `patch`          | URL or path to a patch applied on top of `commit`                |
 | `thread`         | lore.kernel.org thread URL; its `[PATCH n/m]` series is `git am`'d on top of `commit` |
 | `arch`           | target arch (`x86_64` / `arm64`); overrides `ARCH` env and host  |
+| `tools`          | space-separated kernel-tree userspace tools to build and ship into the guest (currently `perf`, `bpftool`); the reproducer can then invoke them directly (they're on `PATH`). Built from the job's tree, so version-matched to the kernel. |
 | `patch-compare`  | `true` to run twice — with and without `patch:` — in parallel    |
 | `thread-compare` | lore thread URL; run baseline vs the thread's series, in parallel|
 | `commit-compare` | two whitespace-separated commit-ishes; run the first (baseline) vs the second (patched), in parallel |

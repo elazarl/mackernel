@@ -25,6 +25,17 @@ def parse(text: str) -> dict:
     return meta
 
 
+def test_tools_parse_and_registry():
+    # `tools:` is kept in meta as a space-separated string the runner splits + validates.
+    meta = parse("---\ncommit: v6.12\ntools: perf bpftool\n---\n")
+    assert meta["tools"] == "perf bpftool"
+    assert meta["url"] == rk.KERNEL_URL          # requesting a tree hardens the url
+    # Every name a bundle may request must be in the build registry; junk is not.
+    for name in meta["tools"].split():
+        assert name in rk.TOOLS, f"{name} missing from TOOLS registry"
+    assert "definitely-not-a-tool" not in rk.TOOLS
+
+
 def test_truthy():
     assert rk._truthy("true") and rk._truthy("YES") and rk._truthy("1") and rk._truthy("on")
     assert not rk._truthy("false") and not rk._truthy("") and not rk._truthy("no")
