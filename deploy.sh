@@ -87,12 +87,15 @@ Environment=MK_OPENCODE_BIN=%h/.opencode/bin/opencode
 Environment=MK_OPENCODE_MODEL=${OPENCODE_MODEL}"
 # Human-readable state of the local phi3.5 backend for the log lines below.
 if [[ "$LLAMA_DISABLE" == "1" ]]; then LOCAL_DESC="local phi3.5 disabled"; else LOCAL_DESC="local phi3.5 (nice ${LLAMA_NICE})"; fi
-# Scaffolding (the opencode agent in a container) restricts egress to opencode's
-# servers via an allowlisting proxy; pass MK_OPENCODE_PROXY through if set (see
-# docs/opencode-egress.md). Unset = unrestricted egress for the agent container.
-if [[ -n "${MK_OPENCODE_PROXY:-}" ]]; then
+# Scaffolding (the opencode agent in a container) restricts egress to an allowlist
+# (kernel lore/git + the model providers) enforced by scaffold-proxy.py on the host;
+# the container's HTTPS_PROXY points at it (see docs/opencode-egress.md). Default on;
+# `MK_OPENCODE_PROXY= ./deploy.sh` (empty) disables it for unrestricted egress. The
+# `-` (not `:-`) keeps an explicit empty value empty.
+PROXY="${MK_OPENCODE_PROXY-http://host.containers.internal:8888}"
+if [[ -n "$PROXY" ]]; then
   DROPIN+="
-Environment=MK_OPENCODE_PROXY=${MK_OPENCODE_PROXY}"
+Environment=MK_OPENCODE_PROXY=${PROXY}"
 fi
 # opencode (free zen model via the opencode CLI) is the PRIMARY backend; the
 # OpenRouter HTTP models (if a key is set) are added as non-primary. Label is the
@@ -120,6 +123,28 @@ printf '%s\n' "$DROPIN" | ssh "$HOST" '
   mkdir -p "$d" && umask 077 && cat > "$d/extra.conf" && chmod 600 "$d/extra.conf"
   systemctl --user daemon-reload && echo "wrote $d/extra.conf"
 '
+
+# Install/refresh the scaffold egress allowlist proxy (scaffold-proxy.py, pulled with
+# the repo above) as a systemd --user unit, so the container's HTTPS_PROXY has something
+# to talk to. Skipped when the proxy is disabled (empty MK_OPENCODE_PROXY).
+if [[ -n "$PROXY" ]]; then
+  log "install scaffold egress proxy on $HOST"
+  UNIT="[Unit]
+Description=mackernel scaffold egress allowlist proxy
+[Service]
+ExecStart=/usr/bin/python3 %h/${REMOTE_REPO}/scaffold-proxy.py --bind 127.0.0.1:8888
+Restart=on-failure
+[Install]
+WantedBy=default.target"
+  printf '%s\n' "$UNIT" | ssh "$HOST" '
+    d="$HOME/.config/systemd/user"
+    mkdir -p "$d" && cat > "$d/mk-scaffold-proxy.service"
+    systemctl --user daemon-reload
+    systemctl --user enable mk-scaffold-proxy.service
+    systemctl --user restart mk-scaffold-proxy.service
+    systemctl --user is-active mk-scaffold-proxy.service && echo "scaffold-proxy active"
+  '
+fi
 
 log "build binary + restart on $HOST"
 ssh "$HOST" bash -seo pipefail <<REMOTE

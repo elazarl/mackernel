@@ -23,6 +23,17 @@ permit every provider host the UI offers (and any "Custom" host an operator allo
 | nftables / netavark IP allowlist on a dedicated podman net | A real L3 block, but the gateway is CDN-fronted, so the IP set rotates and is brittle to pin; also wants more privilege than the rootless CentOS home box gives cheaply. |
 | **Host-side allowlisting HTTPS proxy** (chosen) | Domain-level allowlist survives CDN IP churn; opencode honors `HTTPS_PROXY`; no in-container privilege needed. |
 
+## Shipped implementation
+
+`scaffold-proxy.py` in the repo root is exactly the ~small allowlisting CONNECT proxy
+described below (stdlib only, default-deny, host-suffix allowlist baked in — the kernel
+lore/git hosts plus the providers in `server/ui/src/lib/providers.ts`). `deploy.sh`
+installs it as a `mk-scaffold-proxy.service` systemd --user unit on the host and points
+the container's `MK_OPENCODE_PROXY` at `http://host.containers.internal:8888` by default;
+`MK_OPENCODE_PROXY= ./deploy.sh` (empty) disables it for open egress. Extend the allowlist
+for a custom provider with `MK_PROXY_ALLOW="host.example.com"`. The `tinyproxy` recipe
+below is an equivalent alternative.
+
 ## Chosen mechanism: host allowlist proxy
 
 Run a small forward proxy on the host, bound to loopback, that only permits

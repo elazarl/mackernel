@@ -88,6 +88,28 @@ pub async fn host_net_bytes() -> Option<u64> {
     Some(sum_proc_net_dev(&text))
 }
 
+/// Host CPU busy/total jiffies from /proc/stat's aggregate `cpu` line. The caller keeps
+/// the previous reading and computes utilization % from the (busy, total) delta between
+/// two ticks. Sampled during the run phase so CPU shows across the whole cycle (the build
+/// + qemu are host processes). Linux via /proc/stat; None elsewhere.
+pub async fn host_cpu_times() -> Option<(u64, u64)> {
+    let text = tokio::fs::read_to_string("/proc/stat").await.ok()?;
+    Some(parse_proc_stat_cpu(&text)?)
+}
+
+/// Parse the aggregate `cpu` line into (busy, total) jiffies. Fields:
+/// user nice system idle iowait irq softirq steal ...; busy = total - idle - iowait.
+fn parse_proc_stat_cpu(text: &str) -> Option<(u64, u64)> {
+    let line = text.lines().next()?;
+    let mut f = line.split_whitespace();
+    if f.next()? != "cpu" { return None; }
+    let vals: Vec<u64> = f.take(8).map(|x| x.parse().unwrap_or(0)).collect();
+    if vals.len() < 4 { return None; }
+    let total: u64 = vals.iter().sum();
+    let idle = vals[3] + vals.get(4).copied().unwrap_or(0); // idle + iowait
+    Some((total.saturating_sub(idle), total))
+}
+
 fn sum_proc_net_dev(text: &str) -> u64 {
     let mut total = 0u64;
     for line in text.lines() {
@@ -154,6 +176,14 @@ Inter-|   Receive                    |  Transmit
 ";
         // eth0 rx 1000 + tx 500 = 1500; lo excluded.
         assert_eq!(sum_proc_net_dev(text), 1500);
+    }
+
+    #[test]
+    fn parses_proc_stat_cpu_busy_and_total() {
+        // user=10 nice=0 system=5 idle=100 iowait=5 irq=0 softirq=0 steal=0 -> sum 120
+        let (busy, total) = parse_proc_stat_cpu("cpu  10 0 5 100 5 0 0 0\ncpu0 ...\n").unwrap();
+        assert_eq!(total, 120);
+        assert_eq!(busy, 120 - 100 - 5); // total - idle - iowait = 15
     }
 }
 

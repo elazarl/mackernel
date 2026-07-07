@@ -969,6 +969,8 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
         // Host CPU thermometer (None off Linux / no sensor); resolved once per job.
         let thermo = thermometer::for_host();
         tokio::spawn(async move {
+            // Host CPU% needs two /proc/stat readings; carry the previous one across ticks.
+            let mut prev_cpu: Option<(u64, u64)> = None;
             while !sp.load(Ordering::Relaxed) {
                 let rss = metrics::tree_rss(pid).await;
                 let disk = metrics::dir_disk(&jdir).await;
@@ -976,12 +978,20 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
                 rp.fetch_max(rss, Ordering::Relaxed);
                 dp.fetch_max(disk, Ordering::Relaxed);
                 let ts = now_ms();
-                // Run phase: host `ps`/`du` sampling (no container CPU% — that's the
-                // scaffold stage). Network is host-wide and sampled here too, so the net
-                // line keeps going through the whole test cycle (build pulls, guest egress).
+                // Run phase: host `ps`/`du` sampling. Network and CPU are host-wide (the
+                // build + qemu are host processes), so the net and CPU lines keep going
+                // through the whole test cycle, not just scaffolding. CPU% is the busy
+                // fraction between this /proc/stat reading and the last.
                 let net = metrics::host_net_bytes().await;
-                let _ = db.add_metric(id, ts, rss as i64, disk as i64, temp, None, net.map(|n| n as i64));
-                busc.publish(id, json!({ "kind": "metric", "ts_ms": ts, "rss": rss, "disk": disk, "temp_mc": temp, "net_bytes": net }).to_string());
+                let cpu = metrics::host_cpu_times().await;
+                let cpu_pct = match (prev_cpu, cpu) {
+                    (Some((b0, t0)), Some((b1, t1))) if t1 > t0 =>
+                        Some((b1 - b0) as f64 / (t1 - t0) as f64 * 100.0),
+                    _ => None,
+                };
+                prev_cpu = cpu;
+                let _ = db.add_metric(id, ts, rss as i64, disk as i64, temp, cpu_pct, net.map(|n| n as i64));
+                busc.publish(id, json!({ "kind": "metric", "ts_ms": ts, "rss": rss, "disk": disk, "temp_mc": temp, "cpu_pct": cpu_pct, "net_bytes": net }).to_string());
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         })
