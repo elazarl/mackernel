@@ -21,6 +21,9 @@ import { SegTabs } from "./ui/Tabs";
 const LOG_KINDS = ["fetch", "compile", "console", "dmesg", "exec", "run"] as const;
 type LogKind = (typeof LOG_KINDS)[number];
 
+// ponytail: mirrors TIMEOUT in scaffold-repro.py; bump both together if the agent budget changes.
+const SCAFFOLD_TIMEOUT_S = 900;
+
 export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine }:
   { id: number; summarizerReady: boolean; servers: SummarizerInfo["servers"]; view: string; onEdit: (text: string) => void; onRefine: (id: number, note?: string) => void }) {
   const [job, setJob] = useState<Job | null>(null);
@@ -79,6 +82,17 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
     const el = scaffoldPre.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [scaffoldLog]);
+  // Liveliness: a 1s tick drives the "last output Ns ago" heartbeat and the elapsed bar
+  // while scaffolding; lastLogAt resets whenever a new agent log line arrives (silence ⇒
+  // the agent is likely wedged, complementing a flat CPU line on the chart).
+  const lastLogAt = useRef<number>(Date.now());
+  useEffect(() => { lastLogAt.current = Date.now(); }, [scaffoldLog]);
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!scaffolding) return;
+    const iv = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(iv);
+  }, [scaffolding]);
   const t0 = useRef<number>(0);
   const userPicked = useRef(false);
 
@@ -213,6 +227,26 @@ export function JobDetail({ id, summarizerReady, servers, view, onEdit, onRefine
               <h2 className="inline">Scaffolding log ✨</h2>
               {scaffolding && <span className="text-muted"> · agent running…</span>}
             </summary>
+            {scaffolding && (() => {
+              const idle = Math.max(0, Math.round((Date.now() - lastLogAt.current) / 1000));
+              const started = phaseTs["scaffold"];
+              const elapsed = started ? Math.max(0, Math.round((Date.now() - started) / 1000)) : 0;
+              const frac = Math.min(1, elapsed / SCAFFOLD_TIMEOUT_S);
+              return (
+                <div className="mt-2 flex flex-wrap items-center gap-4 text-xs text-muted">
+                  <span style={idle > 30 ? { color: "#d29922" } : undefined}>
+                    {idle > 30 ? "⚠️ " : ""}last output {idle}s ago
+                  </span>
+                  <span className="flex items-center gap-2">
+                    elapsed {elapsed}s / {SCAFFOLD_TIMEOUT_S}s
+                    <span className="inline-block h-1.5 w-24 rounded bg-border">
+                      <span className="block h-full rounded"
+                        style={{ width: `${frac * 100}%`, background: frac > 0.85 ? "#f85149" : "#3fb950" }} />
+                    </span>
+                  </span>
+                </div>
+              );
+            })()}
             {/* eslint-disable-next-line no-control-regex -- strip ANSI colors from the agent's terminal output */}
             <pre className="log mt-2" ref={scaffoldPre}>{scaffoldLog.replace(/\x1b\[[0-9;]*m/g, "") || "waiting for the agent…"}</pre>
           </details>

@@ -312,12 +312,16 @@ pub async fn run_scaffold_stage(
             }
         })
     }
+    // Deterministic container name so the sampler below can `podman stats` this exact
+    // opencode container (scaffold-repro.py honors MK_SCAFFOLD_CONTAINER).
+    let container = format!("mk-scaffold-{id}");
     let mut child = cmd
         .arg("--out").arg(&bundle)
         .arg("--log-dir").arg(logs)
         .current_dir(&st.repo)
         .env("MK_SANDBOX", "auto")
         .env("MK_WT_ROOT", dir.join("wt"))
+        .env("MK_SCAFFOLD_CONTAINER", &container)
         // Creds ride as env, not argv, so the API key never appears in `ps`.
         .env("MK_OPENAI_BASE_URL", &creds.base_url)
         .env("MK_OPENAI_API_KEY", &creds.api_key)
@@ -327,7 +331,33 @@ pub async fn run_scaffold_stage(
         .spawn()?;
     let t_out = tee(child.stdout.take().expect("stdout piped"), logf, st.bus.clone(), id);
     let t_err = tee(child.stderr.take().expect("stderr piped"), logf2, st.bus.clone(), id);
+
+    // Resource sampler for the scaffold window: the whole workload is the opencode
+    // container, so one `podman stats` call gives CPU/mem/net/disk (a host `ps` can't see
+    // into the container, least of all through the podman-machine VM on macOS). Feeds the
+    // same `metrics` table + `metric` SSE event the run phase uses, so the UI's
+    // ResourceChart just renders it. Stops when the agent exits.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let sampler = {
+        let (db, busc, name, sp) = (st.db.clone(), st.bus.clone(), container.clone(), stop.clone());
+        tokio::spawn(async move {
+            while !sp.load(Ordering::Relaxed) {
+                if let Some(s) = crate::metrics::container_stats(&name).await {
+                    let ts = now_ms();
+                    let _ = db.add_metric(id, ts, s.mem_bytes as i64, s.blk_bytes as i64,
+                                          None, Some(s.cpu_pct), Some(s.net_bytes as i64));
+                    busc.publish(id, json!({ "kind": "metric", "ts_ms": ts, "rss": s.mem_bytes,
+                        "disk": s.blk_bytes, "cpu_pct": s.cpu_pct, "net_bytes": s.net_bytes }).to_string());
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        })
+    };
+
     let status = child.wait().await?;
+    stop.store(true, Ordering::Relaxed);
+    let _ = sampler.await;
     let _ = t_out.await;
     let _ = t_err.await;
     // Persist the log to the jobs row win or lose — it's the only scaffold diagnostic

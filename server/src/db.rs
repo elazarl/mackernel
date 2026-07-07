@@ -78,6 +78,10 @@ pub struct Sample {
     pub disk_bytes: i64,
     /// Host CPU temperature in millidegrees Celsius, or None if unavailable.
     pub temp_mc: Option<i64>,
+    /// Container CPU percent + cumulative net bytes (rx+tx), from `podman stats` during the
+    /// scaffold stage; None on run-phase rows (host `ps`/`du` sampling) and old rows.
+    pub cpu_pct: Option<f64>,
+    pub net_bytes: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -148,6 +152,10 @@ impl Db {
             -- Host CPU temperature in millidegrees Celsius at sample time; NULL on old
             -- rows and hosts with no readable sensor (see src/thermometer.rs).
             ALTER TABLE metrics ADD COLUMN IF NOT EXISTS temp_mc BIGINT;
+            -- Container CPU percent + cumulative net bytes from `podman stats` (scaffold
+            -- stage only); NULL on run-phase rows and pre-existing rows.
+            ALTER TABLE metrics ADD COLUMN IF NOT EXISTS cpu_pct DOUBLE;
+            ALTER TABLE metrics ADD COLUMN IF NOT EXISTS net_bytes BIGINT;
             -- Every LKML message id the monitor has already evaluated, so it never
             -- re-fetches/re-parses one across polls (qualifying or not).
             CREATE TABLE IF NOT EXISTS lkml_seen (
@@ -388,10 +396,11 @@ impl Db {
         Ok(out)
     }
 
-    pub fn add_metric(&self, id: i64, ts_ms: i64, rss: i64, disk: i64, temp_mc: Option<i64>) -> Result<()> {
+    pub fn add_metric(&self, id: i64, ts_ms: i64, rss: i64, disk: i64, temp_mc: Option<i64>,
+                      cpu_pct: Option<f64>, net_bytes: Option<i64>) -> Result<()> {
         self.lock().execute(
-            "INSERT INTO metrics (job_id, ts_ms, rss_bytes, disk_bytes, temp_mc) VALUES (?, ?, ?, ?, ?)",
-            duckdb::params![id, ts_ms, rss, disk, temp_mc],
+            "INSERT INTO metrics (job_id, ts_ms, rss_bytes, disk_bytes, temp_mc, cpu_pct, net_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            duckdb::params![id, ts_ms, rss, disk, temp_mc, cpu_pct, net_bytes],
         )?;
         Ok(())
     }
@@ -427,12 +436,12 @@ impl Db {
     pub fn metrics(&self, id: i64) -> Result<Vec<Sample>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT ts_ms, rss_bytes, disk_bytes, temp_mc FROM metrics WHERE job_id=? ORDER BY ts_ms",
+            "SELECT ts_ms, rss_bytes, disk_bytes, temp_mc, cpu_pct, net_bytes FROM metrics WHERE job_id=? ORDER BY ts_ms",
         )?;
         let mut rows = stmt.query(duckdb::params![id])?;
         let mut out = Vec::new();
         while let Some(r) = rows.next()? {
-            out.push(Sample { ts_ms: r.get(0)?, rss_bytes: r.get(1)?, disk_bytes: r.get(2)?, temp_mc: r.get(3)? });
+            out.push(Sample { ts_ms: r.get(0)?, rss_bytes: r.get(1)?, disk_bytes: r.get(2)?, temp_mc: r.get(3)?, cpu_pct: r.get(4)?, net_bytes: r.get(5)? });
         }
         Ok(out)
     }

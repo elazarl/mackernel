@@ -49,7 +49,9 @@ export interface JobSummary {
   tokens: number | null;
   model: string | null;
 }
-export interface Sample { ts_ms: number; rss_bytes: number; disk_bytes: number; temp_mc: number | null; }
+// cpu_pct + net_bytes are populated only for scaffold-stage rows (from `podman stats`);
+// null on run-phase rows. net_bytes is a cumulative counter — charted as a rate (delta).
+export interface Sample { ts_ms: number; rss_bytes: number; disk_bytes: number; temp_mc: number | null; cpu_pct: number | null; net_bytes: number | null; }
 export interface Peak { id: number; ram_peak: number; disk_peak: number; status: string; }
 // A reproducer cover letter found on LKML, runnable with one click.
 export interface Candidate {

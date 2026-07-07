@@ -44,6 +44,85 @@ pub async fn tree_rss(root_pid: u32) -> u64 {
     total * 1024
 }
 
+/// A single `podman stats` reading for one container. `net_bytes`/`blk_bytes` are
+/// cumulative counters (bytes since container start); the UI plots their per-interval delta.
+pub struct ContainerStat {
+    pub cpu_pct: f64,
+    pub mem_bytes: u64,
+    pub net_bytes: u64,
+    pub blk_bytes: u64,
+}
+
+/// Sample one podman container's CPU/mem/net/disk in a single call. Used for the scaffold
+/// stage, whose whole workload is the opencode container (a host `ps` can't see into it,
+/// least of all through the podman-machine VM on macOS). `None` if the container is gone
+/// or stats fail — the caller treats that as "no sample this tick".
+pub async fn container_stats(name: &str) -> Option<ContainerStat> {
+    let out = tokio::process::Command::new("podman")
+        .args(["stats", "--no-stream", "--format",
+               "{{.CPUPerc}}|{{.MemUsage}}|{{.NetIO}}|{{.BlockIO}}", name])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout);
+    let line = line.trim();
+    let mut f = line.split('|');
+    let cpu = f.next()?.trim().trim_end_matches('%').parse::<f64>().ok()?;
+    // MemUsage / NetIO / BlockIO are "<used> / <total>" and "<rx|read> / <tx|write>" pairs.
+    let mem = parse_size(f.next()?.split('/').next()?);
+    let (nrx, ntx) = parse_pair(f.next()?);
+    let (brd, bwr) = parse_pair(f.next()?);
+    Some(ContainerStat { cpu_pct: cpu, mem_bytes: mem, net_bytes: nrx + ntx, blk_bytes: brd + bwr })
+}
+
+fn parse_pair(s: &str) -> (u64, u64) {
+    let mut p = s.split('/');
+    (p.next().map(parse_size).unwrap_or(0), p.next().map(parse_size).unwrap_or(0))
+}
+
+// ponytail: podman prints decimal units (kB/MB/GB = 1000^n), so scale by 1000, not 1024.
+// Covers the units podman actually emits; extend if a new suffix shows up.
+fn parse_size(s: &str) -> u64 {
+    let s = s.trim();
+    let digits: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let n: f64 = digits.parse().unwrap_or(0.0);
+    let unit = s[digits.len()..].trim().to_ascii_lowercase();
+    let mult = match unit.as_str() {
+        "b" | "" => 1.0,
+        "kb" => 1e3,
+        "mb" => 1e6,
+        "gb" => 1e9,
+        "tb" => 1e12,
+        _ => 1.0,
+    };
+    (n * mult).round() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn parse_line(line: &str) -> ContainerStat {
+        let mut f = line.split('|');
+        let cpu = f.next().unwrap().trim().trim_end_matches('%').parse::<f64>().unwrap();
+        let mem = parse_size(f.next().unwrap().split('/').next().unwrap());
+        let (nrx, ntx) = parse_pair(f.next().unwrap());
+        let (brd, bwr) = parse_pair(f.next().unwrap());
+        ContainerStat { cpu_pct: cpu, mem_bytes: mem, net_bytes: nrx + ntx, blk_bytes: brd + bwr }
+    }
+
+    #[test]
+    fn parses_podman_stats_line() {
+        let s = parse_line("0.50%|12.3MB / 1.5GB|1.2kB / 3.4kB|0B / 4.1MB");
+        assert_eq!(s.cpu_pct, 0.50);
+        assert_eq!(s.mem_bytes, 12_300_000);
+        assert_eq!(s.net_bytes, 1_200 + 3_400);
+        assert_eq!(s.blk_bytes, 4_100_000);
+    }
+}
+
 /// Disk usage (bytes) of `dir` via `du -sk`.
 pub async fn dir_disk(dir: &Path) -> u64 {
     let out = match tokio::process::Command::new("du")

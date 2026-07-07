@@ -92,6 +92,14 @@ that triggers this printk, so that we'll at least activate this code.
 If nothing is possible, explain why in the reproducer.
 """
 
+# Only meaningful for compare bundles (patch-compare / thread-compare), where the runner
+# builds both sides: dmesg matchers make the baseline-vs-patched difference legible in the
+# Issues view. Appended to the patch-scaffold and refine prompts, not the prompt-only one.
+DMESG_COMPARE_DIRECTIVE = """\
+Always try to add `search-dmesg`/`regex-dmesg` matchers (see the spec) for the bug's \
+signature in the serial console, chosen so they match on the baseline (unpatched) build \
+but NOT on the patched one — proving the bug appears without the fix and is gone with it."""
+
 
 def progress(phase: str, **extra) -> None:
     if _PROGRESS:
@@ -155,7 +163,9 @@ def build_prompt_md(has_example: bool, note: str = "", has_patch: bool = True) -
 Set `patch-compare: true` (or `thread-compare:`) in the bundle so the runner builds
 the kernel both without and with the fix and shows the difference. Put the fix's patch
 (from `./fix.patch`) into a `patch:` fence, or use `thread-compare:` with the thread
-URL, as the spec describes."""
+URL, as the spec describes.
+
+{DMESG_COMPARE_DIRECTIVE}"""
     else:
         task = """\
 Write a reproducer bundle for the kernel bug or behavior the user describes below
@@ -229,6 +239,7 @@ necessarily been run, so there are no prior logs."""
 Read `./prev-repro.md` and improve it, following the user's guidance below and the spec,
 then write the improved bundle to `./repro.md`. Keep the `patch-compare:`/`thread-compare:`
 setup so the runner builds the kernel both without and with the fix."""
+    task = f"{task}\n\n{DMESG_COMPARE_DIRECTIVE}"
     return f"""\
 # Refine a kernel reproducer
 
@@ -291,7 +302,9 @@ def run_opencode(work: Path, wt: Path, arch: str, image: str, is_local: bool) ->
     # Name the container so we can kill it by name: `proc.kill()` only kills the
     # podman client, leaving the container running under conmon (an orphan that also
     # holds the free-tier's single concurrency slot).
-    name = f"mk-scaffold-{os.getpid()}"
+    # The service sets MK_SCAFFOLD_CONTAINER so it can `podman stats` this exact
+    # container for the live resource graph; fall back to a pid name for standalone runs.
+    name = os.environ.get("MK_SCAFFOLD_CONTAINER") or f"mk-scaffold-{os.getpid()}"
     # Pass the API key through to the container by name (no `=value`), so it stays out of
     # podman's argv (visible in `ps`); the value is in our env, set by the service.
     cmd = [

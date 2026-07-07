@@ -64,11 +64,12 @@ export function jobSummaryTip(s: JobSummary): string {
 // SSE metric frames arrive with compact keys (rss/disk); the REST /metrics endpoint
 // sends the Sample shape (rss_bytes/disk_bytes). Normalize both to Sample at the
 // boundary so everything downstream sees one shape.
-type MetricFrame = { ts_ms: number; rss: number; disk: number; temp_mc?: number | null };
+type MetricFrame = { ts_ms: number; rss: number; disk: number; temp_mc?: number | null; cpu_pct?: number | null; net_bytes?: number | null };
 export function toSample(v: Sample | MetricFrame): Sample {
   return "rss_bytes" in v
     ? v
-    : { ts_ms: v.ts_ms, rss_bytes: v.rss, disk_bytes: v.disk, temp_mc: v.temp_mc ?? null };
+    : { ts_ms: v.ts_ms, rss_bytes: v.rss, disk_bytes: v.disk, temp_mc: v.temp_mc ?? null,
+        cpu_pct: v.cpu_pct ?? null, net_bytes: v.net_bytes ?? null };
 }
 
 export function stepClass(job: Job | null, phase: string): string {

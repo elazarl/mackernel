@@ -956,7 +956,9 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
                 rp.fetch_max(rss, Ordering::Relaxed);
                 dp.fetch_max(disk, Ordering::Relaxed);
                 let ts = now_ms();
-                let _ = db.add_metric(id, ts, rss as i64, disk as i64, temp);
+                // Run phase: host `ps`/`du` sampling — no container CPU%/net (that's the
+                // scaffold stage's podman-stats sampler; see scaffold.rs).
+                let _ = db.add_metric(id, ts, rss as i64, disk as i64, temp, None, None);
                 busc.publish(id, json!({ "kind": "metric", "ts_ms": ts, "rss": rss, "disk": disk, "temp_mc": temp }).to_string());
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
