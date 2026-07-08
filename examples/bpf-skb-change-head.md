@@ -4,6 +4,10 @@ arch: x86_64
 thread-compare: https://lore.kernel.org/all/20251023125532.182262-1-daniel@iogearbox.net
 search-dmesg: kernel BUG at
 regex-dmesg: invalid opcode|general protection fault
+summary: Negative head_room reaches pskb_expand_head()'s BUG_ON via a GSO skb
+tag: bpf
+tag: net
+tag: bug-on
 ---
 
 # Reproducer — negative `head_room` in `bpf_skb_change_head()` -> `BUG_ON` in `pskb_expand_head()`

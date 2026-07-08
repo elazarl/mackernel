@@ -1,3 +1,8 @@
+---
+summary: Minimal userspace + module + init demo bundle
+tag: demo
+---
+
 # greeter — example mackernel bundle
 
 A self-contained repro you can run with:

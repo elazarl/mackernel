@@ -3,6 +3,11 @@ commit: v6.19
 thread-compare: https://lore.kernel.org/lkml/20260702224519.800135-1-xmei5@asu.edu/
 search-dmesg: BUG: KASAN: slab-out-of-bounds
 search-dmesg: bpf_sock_destroy
+summary: slab-OOB in bpf_sock_destroy() reading sk_protocol off a TIME_WAIT mini-socket
+tag: bpf
+tag: net
+tag: oob
+tag: kasan
 ---
 
 # slab-out-of-bounds in `bpf_sock_destroy()` via TIME_WAIT mini-socket

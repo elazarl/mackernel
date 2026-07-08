@@ -1,5 +1,9 @@
 ---
 regex-dmesg: (BUG: KASAN:|invalid opcode|general protection|Oops)
+summary: Double-free on release: devres and a tuner .release both kfree the same object
+tag: media
+tag: double-free
+tag: kasan
 ---
 
 # helene double-free reproducer (KASAN)

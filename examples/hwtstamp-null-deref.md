@@ -3,6 +3,9 @@ commit: v6.18-rc6
 patch-compare: true
 search-dmesg: BUG: kernel NULL pointer dereference
 search-dmesg: generic_hwtstamp_ioctl_lower
+summary: NULL deref in generic_hwtstamp_ioctl_lower() via ethtool TSCONFIG_GET on a VLAN
+tag: net
+tag: null-deref
 ---
 
 # NULL-deref in `generic_hwtstamp_ioctl_lower()` via ethtool tsconfig netlink

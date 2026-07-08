@@ -4,6 +4,9 @@ commit: v6.19
 arch: x86_64
 patch-compare: true
 search-dmesg: REPRODUCED
+summary: BLKSECDISCARD {0,0} passes validation and invalidates the whole block page cache
+tag: block
+tag: page-cache
 ---
 
 # BLKSECDISCARD zero-length range page-cache invalidation reproducer

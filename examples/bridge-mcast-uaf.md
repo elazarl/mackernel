@@ -3,6 +3,11 @@ commit: v6.16-rc3
 patch-compare: true
 search-dmesg: BUG: KASAN: slab-use-after-free
 search-dmesg: br_multicast_add_router
+summary: UAF in the bridge multicast router-port list after a per-VLAN port is deleted
+tag: net
+tag: bridge
+tag: uaf
+tag: kasan
 ---
 
 # Use-after-free in bridge multicast router port configuration

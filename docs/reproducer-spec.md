@@ -38,6 +38,12 @@ A `---`-delimited block, at column 0 and outside any code fence, holding
 | `regex-dmesg`    | same as `search-dmesg`, but the value is a regular expression. Repeatable. |
 | `search-user`    | literal string to hunt for in userspace output (`exec.log` — the reproducer's own stdout/stderr in the guest); flagged and shown in Issues just like `search-dmesg`. Repeatable; does **not** change pass/fail. |
 | `regex-user`     | same as `search-user`, but the value is a regular expression. Repeatable. |
+| `summary`        | one-line description of the reproducer, shown in the UI's "More…" examples list. UI-only — ignored by the runner. |
+| `tag`            | free-form label for grouping/filtering in the UI's "More…" examples list (e.g. `bpf`, `uaf`). Repeatable. UI-only — ignored by the runner. |
+
+`summary` and `tag` are **UI-only**: they surface in the Examples "More…"
+browser (its per-example summary and tag filter) and never change the build or
+the run's pass/fail. `tag` is repeatable, like `search-dmesg`.
 
 With no metadata block, the kernel at `LINUX_SRC` (default `~/linux`) is built
 as-is. Arch precedence: frontmatter `arch:` > `ARCH` env > host arch.

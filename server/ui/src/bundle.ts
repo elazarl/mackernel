@@ -8,7 +8,7 @@ export interface ParsedBundle { meta: BundleMeta[]; files: BundleFile[]; }
 
 // Recognized metadata keys and the canonical tab order (per the spec). Roles not in
 // this list still get a tab, ordered after the known ones.
-const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch", "patch-compare", "thread-compare", "commit-compare", "search-dmesg", "regex-dmesg", "search-user", "regex-user", "tools"];
+const RECOGNIZED_META = ["url", "commit", "patch", "thread", "arch", "patch-compare", "thread-compare", "commit-compare", "search-dmesg", "regex-dmesg", "search-user", "regex-user", "tools", "summary", "tag"];
 export const ROLE_ORDER = ["user", "module", "kconf", "patch", "init"];
 
 const FENCE_OPEN = /^(`{3,})(.*)$/;     // ```role:filename  (or any info string)
@@ -947,3 +947,62 @@ exit 0
 `,
   },
 ];
+
+// --- on-disk examples (the "More…" browser) ------------------------------------
+// Every examples/*.md in the repo, inlined at build time by Vite (same ?raw access
+// docs/reproducer-spec.md uses; vite.config.ts fs.allow covers the repo root). Each
+// carries an authored `summary:` and repeatable `tag:` frontmatter (see the spec);
+// the "More…" modal lists them and filters by tag.
+export interface DiskExample { label: string; summary: string; tags: string[]; bundle: string }
+
+const RAW_EXAMPLES = import.meta.glob("../../../examples/*.md", {
+  query: "?raw", import: "default", eager: true,
+}) as Record<string, string>;
+
+// H1 with the common inline markdown (backticks, links, emphasis) stripped for a
+// clean one-line label.
+function stripMd(s: string): string {
+  return s
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_]{1,2}([^*_]+)[*_]{1,2}/g, "$1")
+    .trim();
+}
+
+// Turn one example file into a list entry: label from the H1 (fallback: file name),
+// summary from the authored `summary:` (fallback: first prose paragraph), tags from
+// the repeatable `tag:` frontmatter.
+function summarizeExample(path: string, raw: string): DiskExample {
+  const parsed = parseBundle(raw);
+  const base = path.split("/").pop()!.replace(/\.md$/, "");
+  const lines = raw.split(/\r?\n/);
+
+  const h1 = lines.find((l) => /^#\s+/.test(l));
+  const label = h1 ? stripMd(h1.replace(/^#\s+/, "")) : base;
+
+  const tags = parsed.meta.filter((m) => m.key === "tag").map((m) => m.value.trim()).filter(Boolean);
+
+  let summary = parsed.meta.find((m) => m.key === "summary")?.value.trim() ?? "";
+  if (!summary) {
+    // First prose line: skip frontmatter, headings, and fenced code.
+    let fence: string | null = null;
+    for (const l of lines) {
+      const open = l.match(FENCE_OPEN);
+      if (fence === null && open) { fence = open[1]; continue; }
+      if (fence !== null) { if (new RegExp("^`{" + fence.length + ",}\\s*$").test(l)) fence = null; continue; }
+      const t = l.trim();
+      if (!t || t === "---" || t.startsWith("#") || KV.test(t)) continue;
+      summary = stripMd(t);
+      break;
+    }
+  }
+  return { label, summary, tags, bundle: raw };
+}
+
+// Built once at module load (glob is eager). Sorted by label for a stable list.
+export const DISK_EXAMPLES: DiskExample[] = Object.entries(RAW_EXAMPLES)
+  .map(([path, raw]) => summarizeExample(path, raw))
+  .sort((a, b) => a.label.localeCompare(b.label));
+
+// Union of all tags across the examples, for the filter bar (sorted).
+export const EXAMPLE_TAGS: string[] = [...new Set(DISK_EXAMPLES.flatMap((e) => e.tags))].sort();

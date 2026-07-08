@@ -8,6 +8,7 @@ import { getTheme, setTheme as persistTheme, Theme } from "../lib/theme";
 import { jobFromPath, queueTip, statusColor, summaryTip } from "../lib/format";
 import { ModelSwitcher } from "./ModelSwitcher";
 import { BundleModal } from "./BundleModal";
+import { ExamplesModal } from "./ExamplesModal";
 import { SpecModal } from "./SpecModal";
 import { LkmlBrowser } from "./LkmlBrowser";
 import { OpenAISettings } from "./OpenAISettings";
@@ -39,6 +40,7 @@ export function Dashboard() {
   };
   const [bundle, setBundle] = useState("");
   const [modalOpen, setModalOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
   const [lkmlOpen, setLkmlOpen] = useState(false);
   // Spec mirrors the URL (/spec) so it's linkable and back/forward work, like jobs.
   const [showSpec, setShowSpec] = useState(() => location.pathname === "/spec");
@@ -205,6 +207,10 @@ export function Dashboard() {
         <BundleModal bundle={bundle} theme={theme} onChange={setBundle}
           onRun={onRun} onRefine={onRefineText} onClose={() => setModalOpen(false)} />
       )}
+      {moreOpen && (
+        <ExamplesModal onClose={() => setMoreOpen(false)}
+          onPick={(b) => { setBundle(b); setMoreOpen(false); setModalOpen(true); }} />
+      )}
       {lkmlOpen && <LkmlBrowser onPick={onPickPatch} onScaffold={onScaffoldPatch} onClose={() => setLkmlOpen(false)} />}
       <div className="grid grid-cols-[380px_1fr] gap-4 items-start">
         <div>
@@ -239,6 +245,8 @@ export function Dashboard() {
                   {ex.label}
                 </button>
               ))}
+              <button className="chip" title="Browse all examples, filter by tag"
+                onClick={() => setMoreOpen(true)}>More…</button>
             </div>
           </section>
           {candidates.length > 0 && (

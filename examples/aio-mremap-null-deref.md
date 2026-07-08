@@ -5,6 +5,10 @@ patch-compare: true
 arch: x86_64
 search-dmesg: aio_ring_mremap
 search-dmesg: kernel NULL pointer dereference
+summary: NULL deref in aio_ring_mremap() when a forked child mremap()s the inherited [aio] ring
+tag: aio
+tag: fs
+tag: null-deref
 ---
 
 # aio: NULL-pointer deref in `aio_ring_mremap()` after `fork()`

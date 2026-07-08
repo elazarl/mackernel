@@ -54,7 +54,11 @@ def progress(phase: str, **extra) -> None:
         with _PRINT_LOCK:
             print(f"{PROGRESS_SENTINEL} {json.dumps({'phase': phase, **extra})}", flush=True)
 
-META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare", "commit-compare", "compiler", "tools"}
+META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare", "commit-compare", "compiler", "tools",
+             # UI-only (see docs/reproducer-spec.md): surfaced in the Examples "More…"
+             # browser for its summary + tag filter. Recognized so a block carrying only
+             # these still parses; the runner does nothing with them.
+             "summary", "tag"}
 # Kernel-tree userspace tools a bundle may request via `tools:` (space-separated). Each
 # maps to (subdir under tools/, built binary name). Built against the job's tree and
 # shipped into the guest so a reproducer can call e.g. `perf` (see build_tools).

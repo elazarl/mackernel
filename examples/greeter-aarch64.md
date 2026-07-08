@@ -13,6 +13,9 @@ QEMU boot is emulated (TCG). On an arm64 host it all builds and boots natively.
 
 ---
 arch: arm64
+summary: The greeter demo, pinned to arm64
+tag: demo
+tag: arm64
 ---
 
 It builds a tiny userspace program and a kernel module, boots the kernel, loads

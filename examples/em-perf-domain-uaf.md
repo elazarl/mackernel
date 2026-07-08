@@ -3,6 +3,10 @@ url: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
 commit: v6.19
 arch: arm64
 patch-compare: true
+summary: UAF race between em_pd_get() and a concurrent Energy Model unregister/register
+tag: power
+tag: uaf
+tag: kasan
 ---
 
 
