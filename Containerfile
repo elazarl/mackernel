@@ -18,11 +18,16 @@ ARG TARGETARCH
 #   RUN apt-get update && apt-get install -y software-properties-common \
 #    && add-apt-repository -y ppa:ubuntu-toolchain-r/test
 
+# pkg-config + libbabeltrace2-dev let perf's `tools:` build detect/link babeltrace2
+# instead of hard-$(error)ing. libstdc++-${GCC_VERSION}-dev: perf links -lstdc++, and
+# gcc-${GCC_VERSION} looks only in its own lib dir — build-essential's default g++
+# supplies libstdc++.so for gcc-15 only, so gcc-14 builds fail "cannot find -lstdc++"
+# without the version-matched dev package.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
       gcc-${GCC_VERSION} build-essential flex bison libssl-dev libelf-dev bc \
       libncurses-dev cpio kmod git dwarves python3 pkg-config \
       libdw-dev libunwind-dev zlib1g-dev libslang2-dev libcap-dev \
-      python3-dev libtraceevent-dev libbabeltrace2-dev \
+      python3-dev libtraceevent-dev libbabeltrace2-dev libstdc++-${GCC_VERSION}-dev \
  && if [ "$TARGETARCH" != "arm64" ]; then \
       DEBIAN_FRONTEND=noninteractive apt-get install -y \
         gcc-${GCC_VERSION}-aarch64-linux-gnu; \
