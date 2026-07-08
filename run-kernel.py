@@ -512,11 +512,17 @@ def build_tools(names, tree: Path, arch: str, image: str, is_local: bool,
             die(f"unknown tool {name!r} in `tools:` (supported: {', '.join(sorted(TOOLS))})")
         subdir, binname = TOOLS[name]
         odir = Path(tempfile.mkdtemp(prefix=f".mk-tool-{name}-", dir=HERE))
+        # perf turns a missing babeltrace2 into a hard $(error) unless pkg-config is
+        # present to soft-skip it; NO_LIBBABELTRACE=1 drops the feature outright so perf
+        # builds even on a build image without pkg-config (reproducers don't need the CTF
+        # `perf data convert`). ponytail: only babeltrace2 hard-errors today; add more
+        # NO_* here if another optional feature starts failing the same way.
+        mkflags = "NO_LIBBABELTRACE=1 " if name == "perf" else ""
         # Build to O=/out (keeps the worktree clean), then copy the binary's runtime .so
         # deps into /out/.libs — skipping libc/libm and the dynamic loader, which must be
         # the guest's own. `-j` capped by MK_BUILD_JOBS (thermal control on small hosts).
         script = (
-            f'set -e; make -C /linux/tools/{subdir} O=/out '
+            f'set -e; make -C /linux/tools/{subdir} O=/out {mkflags}'
             f'ARCH={ka} CROSS_COMPILE={cross} CC={cross}gcc-{gcc} HOSTCC=gcc-{gcc} '
             f'-j"${{MK_JOBS:-$(nproc)}}"; '
             f'mkdir -p /out/.libs; '
