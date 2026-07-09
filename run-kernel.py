@@ -512,11 +512,19 @@ def build_tools(names, tree: Path, arch: str, image: str, is_local: bool,
             die(f"unknown tool {name!r} in `tools:` (supported: {', '.join(sorted(TOOLS))})")
         subdir, binname = TOOLS[name]
         odir = Path(tempfile.mkdtemp(prefix=f".mk-tool-{name}-", dir=HERE))
+        # perf: link fully static. The guest is noble (glibc 2.39) but the build image
+        # (ubuntu:latest) ships a newer glibc, so a dynamic perf dies "GLIBC_2.4x not found"
+        # in the guest — build image and guest are no longer the same release. A static perf
+        # carries no glibc dependency and no .so deps to lift into the guest (~60s at -j4,
+        # 15MB). NO_LIBBABELTRACE=1: babeltrace2/glib have no static archive to link against,
+        # and reproducers don't need the CTF `perf data convert`. bpftool stays dynamic.
+        mkflags = "LDFLAGS=-static NO_LIBBABELTRACE=1 " if name == "perf" else ""
         # Build to O=/out (keeps the worktree clean), then copy the binary's runtime .so
         # deps into /out/.libs — skipping libc/libm and the dynamic loader, which must be
-        # the guest's own. `-j` capped by MK_BUILD_JOBS (thermal control on small hosts).
+        # the guest's own. (Static perf has no dynamic deps, so the loop is a no-op for it.)
+        # `-j` capped by MK_BUILD_JOBS (thermal control on small hosts).
         script = (
-            f'set -e; make -C /linux/tools/{subdir} O=/out '
+            f'set -e; make -C /linux/tools/{subdir} O=/out {mkflags}'
             f'ARCH={ka} CROSS_COMPILE={cross} CC={cross}gcc-{gcc} HOSTCC=gcc-{gcc} '
             f'-j"${{MK_JOBS:-$(nproc)}}"; '
             f'mkdir -p /out/.libs; '
