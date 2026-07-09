@@ -168,8 +168,10 @@ ssh "$HOST" bash -seo pipefail <<REMOTE
   BIND="\${BIND:-127.0.0.1:8080}"
   CODE=000
   for i in \$(seq 1 20); do
-    CODE="\$(curl -s -o /dev/null -w '%{http_code}' "http://\$BIND/api/jobs" || echo 000)"
-    [[ "\$CODE" == "000" ]] || break   # server answered (any HTTP status) -> stop waiting
+    # curl -w prints "000" when it can't connect yet; `|| true` keeps set -e from
+    # aborting AND avoids appending a second "000" (which broke the != "000" check).
+    CODE="\$(curl -s -o /dev/null -w '%{http_code}' "http://\$BIND/api/jobs" || true)"
+    [[ "\$CODE" == "000" || -z "\$CODE" ]] || break   # server answered -> stop waiting
     sleep 1
   done
   echo "smoke-test http://\$BIND/api/jobs (no token) -> \$CODE"
