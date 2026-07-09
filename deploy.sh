@@ -159,13 +159,19 @@ ssh "$HOST" bash -seo pipefail <<REMOTE
   echo "dist asset: \$(grep -o 'assets/[^\"]*' ui/dist/index.html)"
   cargo build --release 2>&1 | tail -3
   systemctl --user restart "$SERVICE"
-  sleep 2
   systemctl --user is-active "$SERVICE"
 
-  # Smoke-test: unauthenticated /api/* must be rejected (auth is enforced).
+  # Smoke-test: unauthenticated /api/* must be rejected (auth is enforced). The server
+  # needs a few seconds to bind (DuckDB open + migrations + seed), so poll until it
+  # answers (curl exit != 0 -> 000) instead of a fixed sleep that races the startup.
   BIND="\$(systemctl --user show "$SERVICE" -p Environment | tr ' ' '\n' | sed -n 's/.*MK_SERVER_BIND=//p')"
   BIND="\${BIND:-127.0.0.1:8080}"
-  CODE="\$(curl -s -o /dev/null -w '%{http_code}' "http://\$BIND/api/jobs" || echo 000)"
+  CODE=000
+  for i in \$(seq 1 20); do
+    CODE="\$(curl -s -o /dev/null -w '%{http_code}' "http://\$BIND/api/jobs" || echo 000)"
+    [[ "\$CODE" == "000" ]] || break   # server answered (any HTTP status) -> stop waiting
+    sleep 1
+  done
   echo "smoke-test http://\$BIND/api/jobs (no token) -> \$CODE"
   [[ "\$CODE" == "401" ]] || { echo "WARNING: expected 401 from unauthenticated /api/jobs, got \$CODE" >&2; exit 1; }
 REMOTE
