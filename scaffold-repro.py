@@ -130,7 +130,12 @@ GUEST_ENV_NOTE = """\
 The guest VM has NO kernel source tree and NO compiler — do NOT compile kernel-tree
 source (e.g. `tools/perf`, `tools/lib/...`) inside the guest. If the reproducer needs a
 kernel-tree userspace tool, request it with the `tools:` key (e.g. `tools: perf`): the
-runner builds it from the job's tree and ships it into the guest on `PATH`, ready to run."""
+runner builds it from the job's tree and ships it into the guest on `PATH`, ready to run.
+When checking whether such a tool ran, key on its own success output (e.g. perf's
+`Captured and wrote` line) — do NOT decide failure by grepping its stderr for words like
+`permission`/`denied`/`perf_event_paranoid`: perf prints a benign `Kernel address maps
+are restricted, check ... perf_event_paranoid` warning even on a fully successful record,
+which would false-fail the check."""
 
 
 def progress(phase: str, **extra) -> None:
