@@ -23,7 +23,7 @@ use sysinfo::System;
 
 use axum::{
     extract::{Path, Query, Request, State},
-    http::{header::{AUTHORIZATION, CONTENT_TYPE}, StatusCode},
+    http::{header::{AUTHORIZATION, CONTENT_TYPE}, HeaderMap, StatusCode},
     middleware::Next,
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
@@ -223,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
     // served unauthenticated so it can load and prompt for the token.
     let api = Router::new()
         .route("/api/jobs", post(submit).get(list_jobs))
+        .route("/api/jobs/search", get(search_jobs))
         .route("/api/jobs/:id", get(get_job))
         .route("/api/jobs/:id/summaries", get(get_job_summaries))
         .route("/api/jobs/:id/events", get(events))
@@ -260,11 +261,16 @@ async fn main() -> anyhow::Result<()> {
 
 // --- HTTP handlers ----------------------------------------------------------
 
-async fn submit(State(st): State<AppState>, body: String) -> Result<Json<serde_json::Value>, StatusCode> {
+async fn submit(State(st): State<AppState>, headers: HeaderMap, body: String) -> Result<Json<serde_json::Value>, StatusCode> {
     if body.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
     let id = st.db.create_job(now_ms(), None).map_err(ise)?;
+    // Optional submitter identity (UI prompt / curl header). Absent -> unattributed.
+    if let Some(who) = headers.get("x-mackernel-submitter").and_then(|h| h.to_str().ok()) {
+        let who = who.trim();
+        if !who.is_empty() { let _ = st.db.set_submitted_by(id, who); }
+    }
     let dir = st.work.join(id.to_string());
     // Start clean: after a DB wipe the id sequence resets, so this id's dir may hold
     // a prior occupant's stale logs (baseline/patched, console.log, …). Remove it.
@@ -279,6 +285,24 @@ async fn submit(State(st): State<AppState>, body: String) -> Result<Json<serde_j
 
 async fn list_jobs(State(st): State<AppState>) -> Result<Json<Vec<db::Job>>, StatusCode> {
     Ok(Json(st.db.list_jobs().map_err(ise)?))
+}
+
+#[derive(serde::Deserialize)]
+struct SearchParams {
+    q: Option<String>,
+    status: Option<String>,
+    submitter: Option<String>,
+    limit: Option<i64>,
+}
+
+/// Search past jobs: free-text `q` (matches title/summaries/detail/submitter), plus
+/// optional exact `status` / `submitter` filters. Newest first, `limit` capped at 500
+/// (default 100). Requires the bearer token like the other /api/* routes.
+async fn search_jobs(State(st): State<AppState>, Query(p): Query<SearchParams>)
+    -> Result<Json<Vec<db::Job>>, StatusCode> {
+    let limit = p.limit.unwrap_or(100).clamp(1, 500);
+    Ok(Json(st.db.search_jobs(p.q.as_deref(), p.status.as_deref(),
+                              p.submitter.as_deref(), limit).map_err(ise)?))
 }
 
 async fn get_job(State(st): State<AppState>, Path(id): Path<i64>) -> Result<Json<db::Job>, StatusCode> {
@@ -932,6 +956,16 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
     let logs = dir.join("logs");
     let bundle = dir.join("bundle.md");
     st.db.set_running(id, now_ms())?;
+    // Runner metadata: which mackernel instance/host ran this job (host + version + arch).
+    let host = std::fs::read_to_string("/etc/hostname").ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "unknown".into());
+    let version = std::fs::read_to_string(st.repo.join("VERSION")).ok()
+        .map(|s| s.trim().to_string()).unwrap_or_default();
+    let runner = json!({ "host": host, "version": version, "arch": std::env::consts::ARCH });
+    let _ = st.db.set_runner(id, &runner.to_string());
     st.bus.publish_global(json!({ "kind": "jobs" }).to_string());
     info!("job {id}: starting");
 

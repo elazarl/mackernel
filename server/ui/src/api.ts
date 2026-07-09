@@ -28,6 +28,10 @@ export interface Job {
   // The job's origin ("scaffold" for scaffold jobs, "lkml" for candidate runs, else null).
   // Scaffold jobs get an extra "scaffold" phase step (see lib/format phaseList).
   source: string | null;
+  // Who submitted the job (X-Mackernel-Submitter header / UI prompt), or null.
+  submitted_by: string | null;
+  // Runner metadata JSON ({host,version,arch}) for the instance that ran it, or null.
+  runner: string | null;
 }
 export interface SummarizerInfo {
   loaded: boolean;
@@ -78,6 +82,16 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+// Submitter identity, persisted like the token (localStorage). Sent as the
+// X-Mackernel-Submitter header on submit so past jobs can be attributed/searched.
+const SUBMITTER_KEY = "mk_submitter";
+export function submitter(): string {
+  return localStorage.getItem(SUBMITTER_KEY) || "";
+}
+export function setSubmitter(s: string) {
+  localStorage.setItem(SUBMITTER_KEY, s.trim());
+}
+
 // A direct link can carry the bearer in the URL fragment as #rev=<commit>, so shared
 // links unlock without the password prompt (the server now accepts a >=8-char prefix
 // of the v7.1 commit). The fragment is never sent to the server. Runs at module load,
@@ -115,7 +129,14 @@ export async function getJobSummaries(id: number): Promise<JobSummary[]> {
   return (await authed(`/api/jobs/${id}/summaries`)).json();
 }
 export async function submit(bundle: string): Promise<{ id: number }> {
-  return (await authed("/api/jobs", { method: "POST", body: bundle })).json();
+  // Attribute the job: reuse the stored identity, else prompt once and remember it.
+  let who = submitter();
+  if (!who) {
+    who = (prompt("Your name/identity for submitted jobs (optional):") || "").trim();
+    if (who) setSubmitter(who);
+  }
+  const extra: HeadersInit = who ? { "X-Mackernel-Submitter": who } : {};
+  return (await authed("/api/jobs", { method: "POST", body: bundle, headers: extra })).json();
 }
 export async function listCandidates(): Promise<Candidate[]> {
   return (await authed("/api/candidates")).json();

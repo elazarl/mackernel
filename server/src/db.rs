@@ -43,6 +43,11 @@ pub struct Job {
     /// The `submitter` column: "scaffold" for scaffold jobs (so the UI shows the extra
     /// scaffold phase step), "lkml" for candidate runs, else NULL.
     pub source: Option<String>,
+    /// Who submitted the job (from the X-Mackernel-Submitter header / UI prompt), or None.
+    pub submitted_by: Option<String>,
+    /// Runner metadata JSON ({"host","version","arch"}) for the instance that ran the
+    /// job, set at run start. None until the job starts (and on old rows).
+    pub runner: Option<String>,
 }
 
 /// A cover letter found on LKML whose frontmatter matches the reproducer spec, shown
@@ -132,6 +137,13 @@ impl Db {
             -- the scaffold stage so it survives the job dir being reaped. Served via
             -- GET /api/jobs/:id/logs/scaffold, never in the job list (it's large).
             ALTER TABLE jobs ADD COLUMN IF NOT EXISTS scaffold_log VARCHAR;
+            -- Who submitted the job (X-Mackernel-Submitter header / UI prompt); NULL when
+            -- unattributed. Distinct from the `submitter` column above, which is the job
+            -- *source* discriminator ("scaffold"/"lkml", mapped to Job.source).
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS submitted_by VARCHAR;
+            -- Runner metadata recorded when the job starts running: a JSON object
+            -- {host,version,arch} identifying the mackernel instance that ran it.
+            ALTER TABLE jobs ADD COLUMN IF NOT EXISTS runner VARCHAR;
             -- One row per (job, summary field, backend server): every backend's
             -- output. The legacy per-field columns above hold the primary backend's
             -- copy; this holds all of them for the UI's "see all models" view.
@@ -241,6 +253,20 @@ impl Db {
             .query_row("SELECT scaffold_log FROM jobs WHERE id=?", duckdb::params![id],
                        |r| r.get::<_, Option<String>>(0))
             .unwrap_or(None))
+    }
+
+    /// Record who submitted the job (X-Mackernel-Submitter header / UI prompt).
+    pub fn set_submitted_by(&self, id: i64, who: &str) -> Result<()> {
+        self.lock()
+            .execute("UPDATE jobs SET submitted_by=? WHERE id=?", duckdb::params![who, id])?;
+        Ok(())
+    }
+
+    /// Record runner metadata (a JSON string {host,version,arch}) when the job starts.
+    pub fn set_runner(&self, id: i64, json: &str) -> Result<()> {
+        self.lock()
+            .execute("UPDATE jobs SET runner=? WHERE id=?", duckdb::params![json, id])?;
+        Ok(())
     }
 
     pub fn finish(&self, id: i64, now_ms: i64, status: &str, exit: Option<i64>,
@@ -408,7 +434,7 @@ impl Db {
     pub fn get_job(&self, id: i64) -> Result<Option<Job>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, repro_summary, result_summary, detail, source_url, title, short_title, summary_meta, submitter
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, repro_summary, result_summary, detail, source_url, title, short_title, summary_meta, submitter, submitted_by, runner
              FROM jobs WHERE id=?",
         )?;
         let mut rows = stmt.query(duckdb::params![id])?;
@@ -422,10 +448,40 @@ impl Db {
     pub fn list_jobs(&self) -> Result<Vec<Job>> {
         let c = self.lock();
         let mut stmt = c.prepare(
-            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, repro_summary, result_summary, detail, source_url, title, short_title, summary_meta, submitter
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, repro_summary, result_summary, detail, source_url, title, short_title, summary_meta, submitter, submitted_by, runner
              FROM jobs ORDER BY id DESC",
         )?;
         let mut rows = stmt.query([])?;
+        let mut out = Vec::new();
+        while let Some(r) = rows.next()? {
+            out.push(row_to_job(r)?);
+        }
+        Ok(out)
+    }
+
+    /// Free-text + filtered search over past jobs. `q` matches (case-insensitive) across
+    /// title/short_title/repro_summary/result_summary/detail/submitted_by; `status` and
+    /// `submitter` are exact filters. Any argument left None is a no-op (SQL-guarded).
+    /// Newest first, capped by `limit`. Same column list as list_jobs (reuses row_to_job).
+    pub fn search_jobs(&self, q: Option<&str>, status: Option<&str>,
+                       submitter: Option<&str>, limit: i64) -> Result<Vec<Job>> {
+        let c = self.lock();
+        let mut stmt = c.prepare(
+            "SELECT id, created_ms, started_ms, finished_ms, status, phase, exit_code, ram_peak, disk_peak, reaped_ms, summary, repro_summary, result_summary, detail, source_url, title, short_title, summary_meta, submitter, submitted_by, runner
+             FROM jobs
+             WHERE (? IS NULL OR (title ILIKE ? OR short_title ILIKE ? OR repro_summary ILIKE ?
+                                  OR result_summary ILIKE ? OR detail ILIKE ? OR submitted_by ILIKE ?))
+               AND (? IS NULL OR status = ?)
+               AND (? IS NULL OR submitted_by = ?)
+             ORDER BY id DESC LIMIT ?",
+        )?;
+        // duckdb params are positional `?` (the codebase convention), so the free-text
+        // pattern is bound once per occurrence; the leading bind drives the `IS NULL` guard.
+        let like = q.map(|s| format!("%{s}%"));
+        let mut rows = stmt.query(duckdb::params![
+            like, like, like, like, like, like, like,
+            status, status, submitter, submitter, limit,
+        ])?;
         let mut out = Vec::new();
         while let Some(r) = rows.next()? {
             out.push(row_to_job(r)?);
@@ -590,6 +646,8 @@ fn row_to_job(r: &duckdb::Row<'_>) -> Result<Job> {
         short_title: r.get(16)?,
         summary_meta: r.get(17)?,
         source: r.get(18)?,
+        submitted_by: r.get(19)?,
+        runner: r.get(20)?,
     })
 }
 
