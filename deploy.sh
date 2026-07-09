@@ -65,7 +65,9 @@ fi
 log "pull source on $HOST:~/$REMOTE_REPO (branch $BRANCH)"
 ssh "$HOST" bash -seo pipefail <<REMOTE
   cd ~/"$REMOTE_REPO"
-  git fetch origin "$BRANCH"
+  # --tags so the runner's \`git describe\` (stamped into each job's runner metadata)
+  # sees release tags; an explicit-refspec fetch does not auto-follow them otherwise.
+  git fetch --tags origin "$BRANCH"
   git checkout "$BRANCH"
   git pull --ff-only origin "$BRANCH"
   echo "now at: \$(git rev-parse --short HEAD) \$(git log -1 --format=%s)"
