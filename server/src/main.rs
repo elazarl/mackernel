@@ -962,8 +962,13 @@ async fn run_job(st: &AppState, id: i64) -> anyhow::Result<()> {
         .filter(|s| !s.is_empty())
         .or_else(|| std::env::var("HOSTNAME").ok())
         .unwrap_or_else(|| "unknown".into());
-    let version = std::fs::read_to_string(st.repo.join("VERSION")).ok()
-        .map(|s| s.trim().to_string()).unwrap_or_default();
+    let version = tokio::process::Command::new("git")
+        .arg("-C").arg(&st.repo)
+        .args(["describe", "--tags", "--always", "--dirty"])
+        .output().await.ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
     let runner = json!({ "host": host, "version": version, "arch": std::env::consts::ARCH });
     let _ = st.db.set_runner(id, &runner.to_string());
     st.bus.publish_global(json!({ "kind": "jobs" }).to_string());

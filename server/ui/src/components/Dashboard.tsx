@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   Candidate, getPeaks, getSummarizer, gib, globalEventsUrl, highlightCss, Job, JobSummary,
-  listCandidates, listJobs, LkmlPatch, Peak, refineJob, refineText, runCandidate, startScaffold, submit, SummarizerInfo,
+  listCandidates, listJobs, LkmlPatch, Peak, refineJob, refineText, runCandidate, searchJobs, startScaffold, submit, SummarizerInfo,
 } from "../api";
 import { EXAMPLES, upsertMeta } from "../bundle";
 import { getTheme, setTheme as persistTheme, Theme } from "../lib/theme";
@@ -23,6 +23,10 @@ const JOB_LIMIT = 20;
 
 export function Dashboard() {
   const [jobs, setJobs] = useState<Job[]>([]);
+  // Job search: when the query is non-empty, the list shows /api/jobs/search results
+  // (debounced) instead of the newest-JOB_LIMIT slice of the live list.
+  const [jobQuery, setJobQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Job[] | null>(null);
   const [peaks, setPeaks] = useState<Peak[]>([]);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [summarizer, setSummarizer] = useState<SummarizerInfo | null>(null);
@@ -92,6 +96,15 @@ export function Dashboard() {
     es.onerror = () => setConnected(false);
     return () => es.close();
   }, []);
+
+  // Debounced job search: hit /api/jobs/search 250ms after typing stops; empty query
+  // clears results and falls back to the live newest-JOB_LIMIT list.
+  useEffect(() => {
+    const q = jobQuery.trim();
+    if (!q) { setSearchResults(null); return; }
+    const t = setTimeout(() => { searchJobs({ q }).then(setSearchResults).catch(() => {}); }, 250);
+    return () => clearTimeout(t);
+  }, [jobQuery]);
 
   const onRun = async () => {
     if (!bundle.trim()) return;
@@ -274,9 +287,16 @@ export function Dashboard() {
             </section>
           )}
           <section className="card" data-tour="jobs">
-            <h2>Jobs{jobs.length > JOB_LIMIT && <span className="text-muted"> · newest {JOB_LIMIT} of {jobs.length}</span>}</h2>
+            <h2>Jobs{searchResults
+              ? <span className="text-muted"> · {searchResults.length} match{searchResults.length === 1 ? "" : "es"}</span>
+              : jobs.length > JOB_LIMIT && <span className="text-muted"> · newest {JOB_LIMIT} of {jobs.length}</span>}</h2>
+            <input
+              className="mb-2 mt-1 w-full box-border rounded-md border border-border bg-bg p-[7px] text-fg outline-none focus:border-accent"
+              placeholder="search jobs — title, summary, submitter…"
+              value={jobQuery} onChange={(e) => setJobQuery(e.target.value)} />
             <ul className="m-0 max-h-70 list-none overflow-auto p-0">
-              {[...jobs].sort((a, b) => b.id - a.id).slice(0, JOB_LIMIT).map((j) => (
+              {searchResults && searchResults.length === 0 && <li className="px-2 py-1.5 text-muted">No jobs match “{jobQuery.trim()}”.</li>}
+              {(searchResults ?? [...jobs].sort((a, b) => b.id - a.id).slice(0, JOB_LIMIT)).map((j) => (
                 <li key={j.id} className={"flex cursor-pointer flex-col gap-0.5 rounded-md px-2 py-1.5 " + (sel === j.id ? "bg-subtle" : "")} onClick={() => selectJob(j.id)}>
                   <div className="flex flex-wrap items-center gap-1.5">
                     <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: statusColor(j.status) }} />

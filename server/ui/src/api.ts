@@ -125,6 +125,17 @@ export async function listJobs(): Promise<Job[]> {
 export async function getJob(id: number): Promise<Job> {
   return (await authed(`/api/jobs/${id}`)).json();
 }
+// Search past jobs: free-text `q` + optional status/submitter filters. Newest first.
+export async function searchJobs(
+  p: { q?: string; status?: string; submitter?: string; limit?: number },
+): Promise<Job[]> {
+  const qs = new URLSearchParams();
+  if (p.q) qs.set("q", p.q);
+  if (p.status) qs.set("status", p.status);
+  if (p.submitter) qs.set("submitter", p.submitter);
+  if (p.limit) qs.set("limit", String(p.limit));
+  return (await authed(`/api/jobs/search?${qs}`)).json();
+}
 export async function getJobSummaries(id: number): Promise<JobSummary[]> {
   return (await authed(`/api/jobs/${id}/summaries`)).json();
 }
