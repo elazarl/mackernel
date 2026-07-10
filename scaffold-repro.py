@@ -135,7 +135,10 @@ When checking whether such a tool ran, key on its own success output (e.g. perf'
 `Captured and wrote` line) — do NOT decide failure by grepping its stderr for words like
 `permission`/`denied`/`perf_event_paranoid`: perf prints a benign `Kernel address maps
 are restricted, check ... perf_event_paranoid` warning even on a fully successful record,
-which would false-fail the check."""
+which would false-fail the check. The guest runs the script as a non-root user (uid 1000)
+and ships with `perf_event_paranoid=4`, which blocks unprivileged `perf_event_open`; a perf
+reproducer must lower it first (`echo -1 > /proc/sys/kernel/perf_event_paranoid`, falling
+back to `sudo -n` — the cloud image grants the login user NOPASSWD sudo) before attaching."""
 
 
 def progress(phase: str, **extra) -> None:
