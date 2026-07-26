@@ -55,6 +55,8 @@ def progress(phase: str, **extra) -> None:
             print(f"{PROGRESS_SENTINEL} {json.dumps({'phase': phase, **extra})}", flush=True)
 
 META_KEYS = {"url", "commit", "patch", "arch", "thread", "patch-compare", "thread-compare", "commit-compare", "compiler", "tools",
+             # QEMU passthrough (validated in validate_qemu_extra before use):
+             "qemu-device", "qemu-machine", "append",
              # UI-only (see docs/reproducer-spec.md): surfaced in the Examples "More…"
              # browser for its summary + tag filter. Recognized so a block carrying only
              # these still parses; the runner does nothing with them.
@@ -230,8 +232,15 @@ def parse_bundle(path: Path) -> Bundle:
     return b
 
 
+# Keys that may appear on multiple lines; their values accumulate into a list (a
+# bundle needs several `qemu-device:` lines; `append:` may also repeat). All other
+# keys are last-wins.
+_REPEATABLE_KEYS = {"qemu-device", "append"}
+
+
 def _parse_kv(block: list[str]) -> dict | None:
-    """Parse lines as `key: value`; return None if any non-blank line isn't kv."""
+    """Parse lines as `key: value`; return None if any non-blank line isn't kv.
+    Keys in _REPEATABLE_KEYS accumulate a list; others are last-wins."""
     kv = {}
     kv_re = re.compile(r"^([A-Za-z_][\w-]*):\s*(.*)$")
     for ln in block:
@@ -240,8 +249,56 @@ def _parse_kv(block: list[str]) -> dict | None:
         m = kv_re.match(ln.strip())
         if not m:
             return None
-        kv[m.group(1)] = m.group(2).strip()
+        key, val = m.group(1), m.group(2).strip()
+        if key in _REPEATABLE_KEYS:
+            kv.setdefault(key, []).append(val)
+        else:
+            kv[key] = val
     return kv
+
+
+# --- QEMU passthrough from an (untrusted) bundle -----------------------------
+# THREAT MODEL: a bundle may be fetched from an arbitrary URL, so its metadata is
+# untrusted. qemu-device / qemu-machine / append are the ONLY bundle-controlled
+# inputs to QEMU's argv. Each value is spliced as an individual argv token (never
+# through a shell), so it cannot become a *new* qemu option unless it is a
+# separate token that begins with '-'. We additionally require a strict allowlist:
+# an alphanumeric first character (which forbids a leading '-') and only
+# device-spec / kernel-cmdline characters -- no whitespace, quotes, $, backtick,
+# ';', '&', etc. This blocks injecting new qemu flags (e.g. -drive/-fsdev/-chardev
+# to reach host files) and any shell escape. The device count is capped.
+_QEMU_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.,=:/@+-]*$")
+MAX_QEMU_DEVICES = 16
+
+
+def validate_qemu_extra(meta: dict) -> tuple[list[str], str | None, str]:
+    """Validate a bundle's qemu-device / qemu-machine / append values and return
+    (devices, machine, append_str). die()s on any value that isn't a bare,
+    allowlisted token (see the THREAT MODEL note above)."""
+    def _as_list(v):
+        return v if isinstance(v, list) else ([v] if v else [])
+
+    devices = _as_list(meta.get("qemu-device"))
+    if len(devices) > MAX_QEMU_DEVICES:
+        die(f"too many qemu-device entries ({len(devices)} > {MAX_QEMU_DEVICES})")
+    for d in devices:
+        if not _QEMU_TOKEN_RE.match(d):
+            die(f"invalid qemu-device {d!r}: must be a bare device spec "
+                "(alphanumeric first char; no whitespace / shell metacharacters / leading '-')")
+
+    machine = meta.get("qemu-machine")
+    if machine is not None and not _QEMU_TOKEN_RE.match(machine):
+        die(f"invalid qemu-machine {machine!r}: must be a bare machine spec "
+            "(alphanumeric first char; no whitespace / shell metacharacters / leading '-')")
+
+    tokens = []
+    for a in _as_list(meta.get("append")):
+        for tok in a.split():
+            if not _QEMU_TOKEN_RE.match(tok):
+                die(f"invalid append token {tok!r}: a kernel-cmdline token must have an "
+                    "alphanumeric first char and no shell metacharacters / leading '-'")
+            tokens.append(tok)
+    return devices, machine, " ".join(tokens)
 
 
 # ----------------------------------------------------------------------------
@@ -698,7 +755,10 @@ def build_boot_run(b, tree: Path, arch: str, args, log_dir: Path | None,
         log(f"port {args.ssh_port} busy, using {port} instead")
     boot_log = (log_dir / "console.log") if log_dir else (HERE / "run-kernel-boot.log")
     prog("boot")
-    proc = g.boot_qemu(arch, tree, img, seed, port, boot_log)
+    # Untrusted bundle -> QEMU: validated (allowlisted, no shell) before use.
+    qdev, qmach, qappend = validate_qemu_extra(b.meta)
+    proc = g.boot_qemu(arch, tree, img, seed, port, boot_log,
+                       extra_devices=qdev, machine=qmach, extra_append=qappend)
     rc = 1
     gdir = "/tmp/mkbundle"
     # TCG (foreign-arch emulation, no KVM) boots ~10x slower and is easily starved

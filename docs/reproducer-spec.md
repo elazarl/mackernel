@@ -38,12 +38,40 @@ A `---`-delimited block, at column 0 and outside any code fence, holding
 | `regex-dmesg`    | same as `search-dmesg`, but the value is a regular expression. Repeatable. |
 | `search-user`    | literal string to hunt for in userspace output (`exec.log` — the reproducer's own stdout/stderr in the guest); flagged and shown in Issues just like `search-dmesg`. Repeatable; does **not** change pass/fail. |
 | `regex-user`     | same as `search-user`, but the value is a regular expression. Repeatable. |
+| `qemu-device`    | extra QEMU device to add, as a bare `-device` spec (e.g. `edu,bus=rp0`). **Repeatable** and order-preserving, so a device can reference a bus defined by an earlier one. Strictly validated (see below). |
+| `qemu-machine`   | override the QEMU `-machine` type (e.g. `q35,kernel-irqchip=split`, needed for `intel-iommu,intremap=on`). Strictly validated. |
+| `append`         | extra tokens appended to the guest kernel command line (e.g. `intel_iommu=on`). Repeatable; each whitespace-separated token is validated. |
 | `summary`        | one-line description of the reproducer, shown in the UI's "More…" examples list. UI-only — ignored by the runner. |
 | `tag`            | free-form label for grouping/filtering in the UI's "More…" examples list (e.g. `bpf`, `uaf`). Repeatable. UI-only — ignored by the runner. |
 
 `summary` and `tag` are **UI-only**: they surface in the Examples "More…"
 browser (its per-example summary and tag filter) and never change the build or
 the run's pass/fail. `tag` is repeatable, like `search-dmesg`.
+
+#### QEMU passthrough (`qemu-device` / `qemu-machine` / `append`) — validation
+
+A bundle may be fetched from an arbitrary URL, so these values are **untrusted**.
+Each is spliced into QEMU's argv as its own token (never through a shell), and is
+additionally checked against a strict allowlist: the value must start with an
+**alphanumeric** character (so it can't begin with `-` and masquerade as a new
+QEMU option) and may only contain device-spec / kernel-cmdline characters
+(`A-Za-z0-9_.,=:/@+-`; `append` also allows spaces between tokens). Anything else
+— whitespace inside a device spec, a leading `-`, or a shell metacharacter
+(`;`, `&`, `` ` ``, `$`, quotes, …) — is **rejected before boot**. The number of
+`qemu-device` entries is capped. This prevents a bundle from injecting new QEMU
+flags (e.g. `-drive`/`-fsdev`/`-chardev` to reach host files) or escaping to a
+shell. Example (VFIO device behind an emulated IOMMU):
+
+```
+---
+arch: x86_64
+qemu-machine: q35,kernel-irqchip=split
+qemu-device: intel-iommu,intremap=on,caching-mode=on
+qemu-device: pcie-root-port,id=rp0,bus=pcie.0,chassis=1
+qemu-device: edu,bus=rp0
+append: intel_iommu=on
+---
+```
 
 With no metadata block, the kernel at `LINUX_SRC` (default `~/linux`) is built
 as-is. Arch precedence: frontmatter `arch:` > `ARCH` env > host arch.

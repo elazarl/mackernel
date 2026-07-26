@@ -115,10 +115,17 @@ def ssh_run(port: int, key: Path, user: str, remote_cmd: str, timeout: int | Non
         return 124
 
 
-def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> subprocess.Popen:
+def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path,
+              extra_devices=None, machine: str | None = None,
+              extra_append: str = "") -> subprocess.Popen:
     """Boot the built kernel headless, serial -> serial_log; return the Popen.
 
-    Uses -snapshot so guest disk writes are discarded on exit."""
+    Uses -snapshot so guest disk writes are discarded on exit.
+
+    extra_devices / machine / extra_append come from a bundle's qemu-device /
+    qemu-machine / append keys. They MUST already be validated by the caller
+    (run-kernel.py validate_qemu_extra) -- each is spliced as its own argv token,
+    never through a shell."""
     prof = mklib.arch_profile(arch)
     accel, cpu = mklib.qemu_accel_cpu(arch)
     kimg = mklib.kernel_image(linux_src, arch)
@@ -131,7 +138,7 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
     qemu = [
         qbin,
         *mklib.qemu_hardening_args(),
-        "-machine", prof["qemu_machine"],
+        "-machine", machine or prof["qemu_machine"],
         "-cpu", cpu, "-accel", accel,
         "-m", "2048", "-smp", "4",
         "-kernel", str(kimg),
@@ -150,12 +157,19 @@ def boot_qemu(arch: str, linux_src, img, seed, port: int, serial_log: Path) -> s
         # level instead (e.g. =4 for errors+), if a chatty kernel floods the emulated
         # serial and crawls past the SSH timeout (TCG boots already triple it).
         "-append", f"console={prof['console']} root=/dev/vda1 rw "
-                    + (f"loglevel={mklvl}" if (mklvl := os.environ.get('MK_LOGLEVEL')) else "ignore_loglevel"),
+                    + (f"loglevel={mklvl}" if (mklvl := os.environ.get('MK_LOGLEVEL')) else "ignore_loglevel")
+                    + (f" {extra_append}" if extra_append else ""),
         "-snapshot",
         "-display", "none",
         "-serial", f"file:{serial_log}",
         "-monitor", "none",
     ]
+    # Bundle-supplied extra QEMU devices, in order (validated in run-kernel.py:
+    # each is a bare device spec with no leading '-', spliced as its own argv
+    # token so it can't inject a new qemu option). Order is preserved so a device
+    # can reference a bus defined by an earlier one (e.g. edu,bus=rp0).
+    for _dev in (extra_devices or []):
+        qemu += ["-device", _dev]
     # Optional outer sandbox confining the qemu process (MK_SANDBOX); empty by default.
     # The serial log may live outside HERE (the service's --log-dir), so bind its
     # dir read-write or qemu can't create the log inside the jail.
