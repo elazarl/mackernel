@@ -881,6 +881,11 @@ def run_bundle(src, args) -> int:
         b.meta["patch"] = pf.as_uri()
     enforce_hardened(b.meta)  # always build from Linus's tree; ignore bundle url
 
+    # Fail fast on an untrusted bundle's QEMU passthrough BEFORE any expensive
+    # fetch/configure/build: validate_qemu_extra die()s on a disallowed value.
+    # (build_boot_run re-derives the validated values for boot_qemu.)
+    validate_qemu_extra(b.meta)
+
     # Bundle builds are in-tree in the (cached) worktree, so a kernel module can
     # build against /linux directly; BUILD_DIR would split that out, so ignore it.
     os.environ.pop("BUILD_DIR", None)
