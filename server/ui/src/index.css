@@ -87,5 +87,5 @@ h2 { font-size: 14px; text-transform: uppercase; color: var(--muted); letter-spa
 .md th, .md td { border: 1px solid var(--border); padding: 4px 9px; text-align: left; }
 .md th { background: var(--subtle); }
 .md code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; font-family: ui-monospace, monospace; font-size: 12px; }
-.md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow: auto; }
+.md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .md pre code { border: 0; padding: 0; background: none; }
