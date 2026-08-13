@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -81,7 +82,10 @@ ROLES = ("user", "module", "kconf", "patch", "init")
 # bundle that requests a remote tree (url/commit/patch) is forced to build from
 # Linus's tree; a bundle's own `url:` is ignored. Metadata-less bundles still
 # build LINUX_SRC as-is (no fetch).
-KERNEL_URL = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git"
+KERNEL_URL = "https://github.com/torvalds/linux.git"
+
+FETCH_TRIES = 3
+FETCH_RETRY_WAIT = 5  # seconds
 
 # lore.kernel.org sits behind Anubis bot-protection, which serves a JS challenge to
 # browser User-Agents but lets bot UAs (git/curl) through. Use a git-like UA for all
@@ -100,6 +104,19 @@ def enforce_hardened(meta: dict) -> dict:
             log(f"hardened: ignoring bundle url {meta['url']!r}; forcing {KERNEL_URL}")
         meta["url"] = KERNEL_URL
     return meta
+
+
+def fetch_with_retry(cmd: list[str], cap: dict, flog=lambda _m: None,
+                     tries: int = FETCH_TRIES, wait: float = FETCH_RETRY_WAIT) -> bool:
+    """Run a git fetch, retrying a few times. Returns True once one succeeds."""
+    # Concurrent fetches into the shared LINUX_SRC lose a ref compare-and-swap; retry, don't lock.
+    for attempt in range(1, tries + 1):
+        if run(cmd, **cap).returncode == 0:
+            return True
+        if attempt < tries:
+            flog(f"fetch failed (attempt {attempt}/{tries}); retrying in {wait}s ...")
+            time.sleep(wait)
+    return False
 
 
 def _stage(path: Path, content: str) -> Path:
@@ -357,8 +374,9 @@ def prepare_kernel_tree(meta: dict, linux_src: Path, log_path: Path | None = Non
                 flog(f"commit {commit} already present, skipping fetch")
             else:
                 flog(f"fetching {remote} (all refs) ...")
-                if run(["git", "-C", str(linux_src), "fetch", "--tags", remote], **cap).returncode != 0:
-                    die(f"git fetch {remote} failed")
+                if not fetch_with_retry(
+                        ["git", "-C", str(linux_src), "fetch", "--tags", remote], cap, flog):
+                    die(f"git fetch {remote} failed after {FETCH_TRIES} attempts")
 
         treeish = commit or "HEAD"
         sha = run(["git", "-C", str(linux_src), "rev-parse", "--verify", f"{treeish}^{{commit}}"],

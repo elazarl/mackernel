@@ -41,6 +41,25 @@ def test_truthy():
     assert not rk._truthy("false") and not rk._truthy("") and not rk._truthy("no")
 
 
+def test_fetch_with_retry():
+    class R:
+        def __init__(self, rc):
+            self.returncode = rc
+
+    orig, calls = rk.run, []
+    try:
+        seq = [1, 0]                     # first attempt loses the ref CAS, second wins
+        rk.run = lambda cmd, **kw: (calls.append(cmd), R(seq.pop(0)))[1]
+        assert rk.fetch_with_retry(["git", "fetch"], {}, tries=3, wait=0)
+        assert len(calls) == 2           # stops as soon as one succeeds
+        calls.clear()
+        rk.run = lambda cmd, **kw: (calls.append(cmd), R(1))[1]
+        assert not rk.fetch_with_retry(["git", "fetch"], {}, tries=3, wait=0)
+        assert len(calls) == 3           # bounded at `tries`, then gives up
+    finally:
+        rk.run = orig
+
+
 def test_patch_compare():
     meta = parse("---\ncommit: v6.12\npatch: https://x/fix.patch\npatch-compare: true\n---\n")
     assert meta["patch-compare"] == "true"

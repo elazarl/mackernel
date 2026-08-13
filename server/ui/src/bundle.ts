@@ -113,8 +113,7 @@ export function rolesOf(parsed: ParsedBundle): string[] {
 
 // --- hardened-mode constants (must match KERNEL_URL in run-kernel.py) ----------
 // The kernel is always built from Linus's tree, so a commit tree-ish maps to GitHub.
-export const KERNEL_URL =
-  "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git";
+export const KERNEL_URL = "https://github.com/torvalds/linux.git";
 export const githubTree = (ref: string) =>
   `https://github.com/torvalds/linux/tree/${encodeURIComponent(ref)}`;
 
