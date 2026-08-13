@@ -79,10 +79,12 @@ DEFAULT_GCC = "14"
 ROLES = ("user", "module", "kconf", "patch", "init")
 
 # Hardened mode (always on): a bundle never chooses its own kernel remote. Any
-# bundle that requests a remote tree (url/commit/patch) is forced to build from
-# Linus's tree; a bundle's own `url:` is ignored. Metadata-less bundles still
-# build LINUX_SRC as-is (no fetch).
-KERNEL_URL = "https://github.com/torvalds/linux.git"
+# bundle that requests a remote tree (url/commit/patch) is forced onto the tree
+# below; a bundle's own `url:` is ignored. Metadata-less bundles still build
+# LINUX_SRC as-is (no fetch).
+# linux-stable, not Linus's tree: it carries every mainline tag *plus* the stable
+# point releases (v7.1.7 and friends), which mainline has never had.
+KERNEL_URL = "https://github.com/gregkh/linux.git"
 
 FETCH_TRIES = 3
 FETCH_RETRY_WAIT = 5  # seconds
@@ -897,7 +899,7 @@ def run_bundle(src, args) -> int:
         pf = Path(tempfile.mkdtemp(prefix="mk-patch-")) / "inline.patch"
         pf.write_text("".join(content for _, content in b.files["patch"]))
         b.meta["patch"] = pf.as_uri()
-    enforce_hardened(b.meta)  # always build from Linus's tree; ignore bundle url
+    enforce_hardened(b.meta)  # always build from KERNEL_URL; ignore bundle url
 
     # Fail fast on an untrusted bundle's QEMU passthrough BEFORE any expensive
     # fetch/configure/build: validate_qemu_extra die()s on a disallowed value.

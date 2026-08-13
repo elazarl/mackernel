@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { compareMode, githubTree, KERNEL_URL, ParsedBundle, rolesOf } from "../bundle";
+import { compareMode, githubTree, KERNEL_REPO, KERNEL_URL, ParsedBundle, rolesOf } from "../bundle";
 import { Code, langOf } from "./Code";
 import { SegTabs } from "./ui/Tabs";
 
@@ -25,9 +25,7 @@ export function BundlePreview({ parsed }: { parsed: ParsedBundle }) {
     <div className="mb-2">
       {parsed.meta.length ? (
         <dl className="mb-2">
-          {/* A bundle that requests a kernel always builds Linus's tree, so its commit
-              tree-ish links to GitHub. */}
-          {requestsKernel && <Row dt="repo">torvalds/linux</Row>}
+          {requestsKernel && <Row dt="repo">{KERNEL_REPO}</Row>}
           {commit && <Row dt="commit"><a className="text-accent" href={githubTree(commit)} target="_blank" rel="noreferrer">{commit}</a></Row>}
           {arch && <Row dt="arch">{arch}</Row>}
           {patch && <Row dt="patch">{patch}</Row>}
